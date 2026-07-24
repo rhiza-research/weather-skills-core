@@ -9,13 +9,18 @@ and output writing (Zarr, streaming Zarr appends, or PNG figures).
 A skill declares its surface and keeps only its domain logic:
 
 ```python
-@weather_skill("my-fancy-skill", "0.1.0",
-               input_type="forecast, station", output_type="forecast",
-               start_time=True, end_time=True,
-               extra_args={"corr_coefficient": int,
-                           "interpolation_factor": {int, range(0, 2)}})
-def my_fancy_skill(forecast_ds, station_ds, start_time, end_time,
-                   corr_coefficient, interpolation_factor): ...
+@weather_skill(
+    "my-fancy-skill",
+    "0.1.0",
+    input_type="forecast, station",
+    output_type="forecast",
+    start_time=True,
+    end_time=True,
+    extra_args={"corr_coefficient": int, "interpolation_factor": {int, range(0, 2)}},
+)
+def my_fancy_skill(
+    forecast_ds, station_ds, start_time, end_time, corr_coefficient, interpolation_factor
+): ...
 ```
 
 The wrapped function receives the input dataset(s) and resolved arguments and

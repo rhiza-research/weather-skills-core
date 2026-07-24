@@ -342,7 +342,7 @@ class TestExtractionErrors:
         assert "no @weather_skill decorator call" in decls[0].error
 
     def test_helper_scripts_ignored_when_a_decorated_script_exists(self, tmp_path):
-        script, skill_dir = write_script(
+        _script, skill_dir = write_script(
             tmp_path,
             '''
             """Doc."""

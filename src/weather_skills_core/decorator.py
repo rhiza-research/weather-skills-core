@@ -264,9 +264,7 @@ def _add_extra_argument(parser, dest, spec):
                 kwargs["action"] = "store_true"
             elif isinstance(element, type):
                 kwargs["type"] = element
-            elif isinstance(element, range):
-                kwargs["choices"] = list(element)
-            elif isinstance(element, tuple | list):
+            elif isinstance(element, range | tuple | list):
                 kwargs["choices"] = list(element)
             else:
                 raise ValueError(f"unsupported constraint {element!r} for extra arg {dest!r}")
@@ -314,7 +312,7 @@ def _normalize_mode_toggle(name, value, modes, *, extra_keys=()):
     if isinstance(value, str):
         value = {"mode": value}
     if not isinstance(value, dict):
-        raise ValueError(
+        raise ValueError(  # noqa: TRY004 -- ValueError is the observable contract asserted by callers/tests
             f"{name} must be one of {modes} or a dict with a 'mode' key, not {value!r}"
         )
     allowed = {"mode", "help", "choices", *extra_keys}
@@ -980,7 +978,7 @@ def weather_skill(
         for p, declared in zip(paths, declared_per_path, strict=True):
             try:
                 ds = xr.open_zarr(p, consolidated=False)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 -- broad by design: xr.open_zarr can fail many ways; all map to one UsageError
                 raise UsageError(
                     f"{p} is not a readable Zarr store ({type(exc).__name__}: {exc})."
                 ) from None

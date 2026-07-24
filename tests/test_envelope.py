@@ -1,3 +1,5 @@
+from typing import ClassVar
+
 import numpy as np
 import pytest
 import xarray as xr
@@ -402,11 +404,11 @@ class TestLatSlice:
 
 
 class TestPolygonFromGeojson:
-    square = {
+    square: ClassVar[dict] = {
         "type": "Polygon",
         "coordinates": [[[0, 0], [0, 1], [1, 1], [1, 0], [0, 0]]],
     }
-    east_square = {
+    east_square: ClassVar[dict] = {
         "type": "Polygon",
         "coordinates": [[[2, 0], [2, 1], [3, 1], [3, 0], [2, 0]]],
     }

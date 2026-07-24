@@ -243,9 +243,13 @@ def _store_is_complete(out, context):
 
 
 @weather_skill(
-    "my-fetch", _SKILL_VERSION,
-    output_type="gridded", source="my-source",
-    start_time=True, end_time=True, variable="single",
+    "my-fetch",
+    _SKILL_VERSION,
+    output_type="gridded",
+    source="my-source",
+    start_time=True,
+    end_time=True,
+    variable="single",
     latest_resolver=_latest,
     validate_args=_remember_request,
     completeness_probe=_store_is_complete,
@@ -270,9 +274,12 @@ itself defers them.
 
 ```python
 @weather_skill(
-    "clip-region", _SKILL_VERSION,
-    input_type="gridded", output_type="gridded",
-    bbox="required", dims=True,
+    "clip-region",
+    _SKILL_VERSION,
+    input_type="gridded",
+    output_type="gridded",
+    bbox="required",
+    dims=True,
     hash_input=False,  # cheap cache check; hash computed only on a miss
     cache_hit_label="clip",  # cache-hit line reads "skipping clip."
 )
@@ -303,6 +310,7 @@ write zarr yourself.
 def _latest(args):
     """Newest date with available data. One bounded discovery call."""
     import xarray as xr
+
     ...
     return newest_date  # a datetime.date
 
@@ -310,19 +318,25 @@ def _latest(args):
 def _store_is_complete(out):
     """Corner-read probe: True when a candidate cache hit actually reads back."""
     import xarray as xr
+
     ...
 
 
 @weather_skill(
-    "oisst-fetch", _SKILL_VERSION,
-    output_type="gridded", source="oisst",
-    start_time=True, end_time=True, bbox="optional",
+    "oisst-fetch",
+    _SKILL_VERSION,
+    output_type="gridded",
+    source="oisst",
+    start_time=True,
+    end_time=True,
+    bbox="optional",
     latest_resolver=_latest,
     completeness_probe=_store_is_complete,
 )
 def fetch(start_time, end_time, bbox):
     """Fetch daily SST and write a weather-skills envelope Zarr."""
     import xarray as xr
+
     ...
     return ds
 ```
@@ -346,10 +360,15 @@ def _set_write_encoding(ds):
 
 
 @weather_skill(
-    "oisst-fetch", _SKILL_VERSION,
-    output_type="gridded", source="oisst",
-    start_time=True, end_time=True, bbox="optional",
-    streaming=True, append_dim="time",
+    "oisst-fetch",
+    _SKILL_VERSION,
+    output_type="gridded",
+    source="oisst",
+    start_time=True,
+    end_time=True,
+    bbox="optional",
+    streaming=True,
+    append_dim="time",
     write_encoding=_set_write_encoding,
 )
 def fetch(start_time, end_time, bbox):
@@ -373,9 +392,12 @@ chain reflects every override, including one yielded after the final dataset
 
 ```python
 @weather_skill(
-    "plot-compare", _SKILL_VERSION,
-    input_type=["any", "any"], output_type="png",
-    history_labels=["a", "b"], title=True,
+    "plot-compare",
+    _SKILL_VERSION,
+    input_type=["any", "any"],
+    output_type="png",
+    history_labels=["a", "b"],
+    title=True,
     savefig_kwargs={"bbox_inches": "tight"},
 )
 def plot_compare(ds_a, ds_b, title):
@@ -399,7 +421,8 @@ input; `weather_skills_history_<label>` per declared label otherwise, plus a
 
 ```python
 @weather_skill(
-    "resolve-region", _SKILL_VERSION,
+    "resolve-region",
+    _SKILL_VERSION,
     extra_args={"code": {"positional": True, "metavar": "CODE"}, "geojson": str},
 )
 def resolve_region(code, geojson):

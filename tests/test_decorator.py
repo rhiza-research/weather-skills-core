@@ -81,7 +81,7 @@ class TestParserConstruction:
         assert args.factor == 3
 
     def test_extra_args_constraint_set_choices(self):
-        skill = make_identity_skill([], extra_args={"interpolation_factor": {int, range(0, 2)}})
+        skill = make_identity_skill([], extra_args={"interpolation_factor": {int, range(2)}})
         args = skill.parser.parse_args(["-i", "a", "-o", "b", "--interpolation-factor", "1"])
         assert args.interpolation_factor == 1
         with pytest.raises(SystemExit) as exc:
@@ -105,7 +105,7 @@ class TestParserConstruction:
 
     def test_extra_args_untyped_choice_set_rejected(self):
         with pytest.raises(ValueError, match="choices without a type"):
-            make_identity_skill([], extra_args={"level": {range(0, 3)}})
+            make_identity_skill([], extra_args={"level": {range(3)}})
         with pytest.raises(ValueError, match="choices without a type"):
             make_identity_skill([], extra_args={"method": {("mean", "std")}})
 

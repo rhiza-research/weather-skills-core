@@ -53,7 +53,7 @@ def parse_chain(raw: str) -> list:
     except (TypeError, json.JSONDecodeError):
         raise ValueError("value is not valid JSON") from None
     if not isinstance(chain, list):
-        raise ValueError("value is not a JSON array")
+        raise ValueError("value is not a JSON array")  # noqa: TRY004 -- ValueError is the observable contract asserted by callers/tests
     return chain
 
 
@@ -277,9 +277,7 @@ def _chained_input_match(last_input, entry_input, *, compare_hash: bool) -> bool
     entry_input = entry_input or {}
     if last_input.get("basename") != entry_input.get("basename"):
         return False
-    if compare_hash and last_input.get("hash") != entry_input.get("hash"):
-        return False
-    return True
+    return not (compare_hash and last_input.get("hash") != entry_input.get("hash"))
 
 
 def cache_hit(

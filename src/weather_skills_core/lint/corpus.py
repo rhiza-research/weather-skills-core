@@ -148,6 +148,7 @@ def _run_git(args: list[str], reference: str) -> subprocess.CompletedProcess:
             text=True,
             timeout=GIT_TIMEOUT_SECONDS,
             env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+            check=False,
         )
     except FileNotFoundError as exc:
         raise UsageError(
