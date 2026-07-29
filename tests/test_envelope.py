@@ -3,9 +3,9 @@ from typing import ClassVar
 import numpy as np
 import pytest
 import xarray as xr
-from conftest import make_forecast, make_gridded, make_station
+from conftest import make_forecast, make_gridded, make_series, make_station
 
-from weather_skills_core import envelope
+from weather_skills_core import envelope, types
 from weather_skills_core.errors import DataError, UsageError
 
 
@@ -82,6 +82,43 @@ class TestDetectType:
     def test_station(self):
         assert envelope.detect_type(make_station()) == envelope.STATION
 
+    def test_series(self):
+        assert envelope.detect_type(make_series()) == envelope.SERIES
+
+    def test_unidentifiable_grid_is_a_series_until_dims_names_it(self):
+        ds = make_gridded().rename({"latitude": "yy", "longitude": "xx"})
+        assert envelope.detect_type(ds) == envelope.SERIES
+        assert envelope.detect_type(ds, "yy,xx") == envelope.GRIDDED
+
+    def test_forecast_collapsed_over_lat_lon_is_a_series(self):
+        # What `reduce --dim latitude --dim longitude` leaves of a forecast:
+        # step and the scalar init time survive, the spatial axes do not.
+        # Classifying that a forecast made it unreadable by every skill, since
+        # the forecast structural check cannot pass without spatial dims.
+        ds = xr.Dataset(
+            {"tp": (("number", "step"), np.zeros((3, 8)))},
+            coords={
+                "number": np.arange(3),
+                "step": np.arange(8),
+                "time": np.datetime64("2026-01-01"),
+            },
+        )
+        assert envelope.detect_type(ds) == envelope.SERIES
+        assert envelope.validate_input(ds, types.ALL, "in") == envelope.SERIES
+
+    def test_forecast_with_one_spatial_axis_selected_away_is_a_series(self):
+        # What `select --dim latitude --index 0` leaves: the newly-scalar
+        # latitude coord is dropped, so only one spatial axis remains.
+        ds = make_forecast().isel(latitude=0).drop_vars("latitude")
+        assert envelope.detect_type(ds) == envelope.SERIES
+        assert envelope.validate_input(ds, types.ALL, "in") == envelope.SERIES
+
+    def test_forecast_keeps_its_spatial_dims(self):
+        assert envelope.detect_type(make_forecast()) == envelope.FORECAST
+        ds = make_forecast().rename({"latitude": "yy", "longitude": "xx"})
+        assert envelope.detect_type(ds) == envelope.SERIES
+        assert envelope.detect_type(ds, "yy,xx") == envelope.FORECAST
+
     def test_step_with_time_dim_is_not_forecast(self):
         # A forecast envelope is a step dim plus a SCALAR time coord; a step
         # dim alongside a time dim does not classify as forecast.
@@ -93,65 +130,153 @@ class TestDetectType:
 
 class TestValidateInput:
     def test_matching_type_passes(self):
-        assert envelope.validate_input(make_gridded(), "gridded", "in.zarr") == "gridded"
+        assert envelope.validate_input(make_gridded(), types.GRIDDED, "in.zarr") == types.GRIDDED
 
-    def test_any_passes_everything(self):
-        for ds in (make_gridded(), make_forecast(), make_station()):
-            envelope.validate_input(ds, "any", "in.zarr")
+    def test_all_accepts_every_type(self):
+        for ds, expected in (
+            (make_gridded(), types.GRIDDED),
+            (make_forecast(), types.FORECAST),
+            (make_station(), types.STATION),
+            (make_series(), types.SERIES),
+        ):
+            assert envelope.validate_input(ds, types.ALL, "in.zarr") == expected
 
     def test_list_of_alternatives(self):
         assert (
-            envelope.validate_input(make_forecast(), ["gridded", "forecast"], "in.zarr")
-            == "forecast"
+            envelope.validate_input(make_forecast(), [types.GRIDDED, types.FORECAST], "in.zarr")
+            == types.FORECAST
         )
 
     def test_gridded_rejected_when_forecast_expected(self):
         with pytest.raises(UsageError, match="no 'step' dim"):
-            envelope.validate_input(make_gridded(), "forecast", "in.zarr")
+            envelope.validate_input(make_gridded(), types.FORECAST, "in.zarr")
 
     def test_forecast_rejected_when_station_expected(self):
         with pytest.raises(UsageError, match="no 'station_id' dim"):
-            envelope.validate_input(make_forecast(), "station", "in.zarr")
+            envelope.validate_input(make_forecast(), types.STATION, "in.zarr")
 
     def test_error_names_the_input(self):
         with pytest.raises(UsageError, match="my/path.zarr"):
-            envelope.validate_input(make_gridded(), "station", "my/path.zarr")
+            envelope.validate_input(make_gridded(), types.STATION, "my/path.zarr")
 
     def test_station_missing_latitude_coord(self):
         ds = make_station().drop_vars("latitude")
         with pytest.raises(UsageError, match="'latitude'"):
-            envelope.validate_input(ds, "station", "in.zarr")
+            envelope.validate_input(ds, types.STATION, "in.zarr")
 
     def test_station_latitude_on_wrong_dim(self):
         ds = make_station()
         ds = ds.assign_coords(latitude=("time", np.zeros(ds.sizes["time"])))
         with pytest.raises(UsageError, match="station_id"):
-            envelope.validate_input(ds, "station", "in.zarr")
+            envelope.validate_input(ds, types.STATION, "in.zarr")
 
     def test_unknown_declared_type_is_a_programming_error(self):
         with pytest.raises(ValueError, match="unknown envelope type"):
             envelope.validate_input(make_gridded(), "grid", "in.zarr")
 
     def test_dims_override_validates_undetectable_gridded(self):
+        # Unnamed, the grid's axes are unidentifiable, so it does not classify
+        # as gridded at all; naming them with --dims is what makes it one.
         ds = make_gridded().rename({"latitude": "yy", "longitude": "xx"})
-        with pytest.raises(UsageError, match="Pass --dims"):
-            envelope.validate_input(ds, "gridded", "in.zarr")
-        assert envelope.validate_input(ds, "gridded", "in.zarr", dims="yy,xx") == "gridded"
+        with pytest.raises(UsageError, match="pass --dims"):
+            envelope.validate_input(ds, types.GRIDDED, "in.zarr")
+        assert envelope.validate_input(ds, types.GRIDDED, "in.zarr", dims="yy,xx") == types.GRIDDED
 
     def test_dims_override_names_must_exist(self):
         ds = make_gridded().rename({"latitude": "yy", "longitude": "xx"})
         with pytest.raises(UsageError, match="not in dataset dims"):
-            envelope.validate_input(ds, "gridded", "in.zarr", dims="a,b")
+            envelope.validate_input(ds, types.GRIDDED, "in.zarr", dims="a,b")
 
     def test_time_dim_override_must_exist(self):
         with pytest.raises(UsageError, match="not in dataset dims"):
-            envelope.validate_input(make_gridded(), "gridded", "in.zarr", time_dim="t")
+            envelope.validate_input(make_gridded(), types.GRIDDED, "in.zarr", time_dim="t")
         ds = make_gridded().rename({"time": "t"})
-        assert envelope.validate_input(ds, "gridded", "in.zarr", time_dim="t") == "gridded"
+        assert envelope.validate_input(ds, types.GRIDDED, "in.zarr", time_dim="t") == types.GRIDDED
 
-    def test_any_skips_override_checks(self):
-        ds = make_gridded().rename({"latitude": "yy", "longitude": "xx"})
-        assert envelope.validate_input(ds, "any", "in.zarr", dims="a,b", time_dim="t") == "gridded"
+    def test_forecast_with_unnamed_axes_is_accepted_as_the_series_it_is(self):
+        # A forecast owes identifiable spatial dims, so a store without them
+        # is a series -- read as one rather than rejected. --dims names the
+        # axes and makes it a forecast again.
+        ds = make_forecast().rename({"latitude": "yy", "longitude": "xx"})
+        assert envelope.validate_input(ds, types.ALL, "in.zarr") == types.SERIES
+        assert envelope.validate_input(ds, types.ALL, "in.zarr", dims="yy,xx") == types.FORECAST
+
+    def test_all_still_runs_the_time_dim_check(self):
+        with pytest.raises(UsageError, match="not in dataset dims"):
+            envelope.validate_input(make_gridded(), types.ALL, "in.zarr", time_dim="t")
+
+    def test_all_still_runs_the_station_coord_check(self):
+        ds = make_station().drop_vars("latitude")
+        with pytest.raises(UsageError, match="'latitude'"):
+            envelope.validate_input(ds, types.ALL, "in.zarr")
+
+    def test_series_rejected_when_gridded_expected(self):
+        with pytest.raises(UsageError, match="no identifiable lat/lon coords"):
+            envelope.validate_input(make_series(), types.GRIDDED, "in.zarr")
+
+    def test_gridded_rejected_when_series_expected(self):
+        with pytest.raises(UsageError, match="has lat/lon coords"):
+            envelope.validate_input(make_gridded(), types.SERIES, "in.zarr")
+
+    def test_series_still_runs_the_time_dim_check(self):
+        with pytest.raises(UsageError, match="not in dataset dims"):
+            envelope.validate_input(make_series(), types.SERIES, "in.zarr", time_dim="t")
+
+
+class TestValidateType:
+    def test_single_expected_type(self):
+        assert envelope.validate_type(make_gridded(), types.GRIDDED) == types.GRIDDED
+
+    def test_tuple_of_expected_types(self):
+        assert envelope.validate_type(make_forecast(), types.ALL) == types.FORECAST
+
+    def test_reference_dataset_form(self):
+        assert envelope.validate_type(make_gridded(), make_gridded()) == types.GRIDDED
+
+    def test_mismatch_is_a_data_error(self):
+        with pytest.raises(DataError, match="expected a station envelope, got gridded"):
+            envelope.validate_type(make_gridded(), types.STATION)
+
+    def test_reference_dataset_mismatch_names_both_shapes(self):
+        with pytest.raises(DataError, match="expected a gridded envelope, got series"):
+            envelope.validate_type(make_series(), make_gridded())
+
+    def test_unknown_expected_type_is_a_programming_error(self):
+        with pytest.raises(ValueError, match="unknown envelope type"):
+            envelope.validate_type(make_gridded(), "grid")
+
+
+class TestValidateTypeDims:
+    """The ``dims`` argument makes validate_type classify as the decorator does."""
+
+    @staticmethod
+    def renamed():
+        return make_gridded().rename({"latitude": "yy", "longitude": "xx"})
+
+    def test_override_classifies_both_sides(self):
+        # The defect this closes: without the override, both sides of the
+        # assertion classified series where the decorator saw gridded, so the
+        # claim compared two shapes nobody else read.
+        ds = self.renamed()
+        assert envelope.validate_type(ds, ds) == types.SERIES
+        assert envelope.validate_type(ds, ds, "yy,xx") == types.GRIDDED
+        assert envelope.validate_type(ds, types.GRIDDED, "yy,xx") == types.GRIDDED
+
+    def test_drift_on_overridden_axes_is_caught(self):
+        ds = self.renamed()
+        with pytest.raises(DataError, match="expected a gridded envelope, got series"):
+            envelope.validate_type(ds.mean(dim=["yy", "xx"]), ds, "yy,xx")
+
+    def test_names_absent_from_the_output_leave_it_a_series(self):
+        # The output side of a --dims run: a store that collapsed the named
+        # axes no longer has them, which is a shape, not a usage error.
+        assert envelope.detect_type(make_series(), "yy,xx") == types.SERIES
+
+    def test_override_does_not_hide_canonical_axes(self):
+        # A transform that renames its axes to canonical names preserves the
+        # shape: --dims named the input's axes, the output's own names
+        # identify the output's.
+        assert envelope.validate_type(make_gridded(), self.renamed(), "yy,xx") == types.GRIDDED
 
 
 class TestBboxSubset:

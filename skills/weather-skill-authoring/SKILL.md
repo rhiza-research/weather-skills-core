@@ -29,19 +29,39 @@ body holds only domain logic.
 
 | Class | Declaration shape | Function returns |
 | --- | --- | --- |
-| Transform | `input_type` + zarr `output_type` (or `"same"`) | a Dataset |
-| Fetcher | no `input_type`, zarr `output_type`, `source=` | a Dataset |
+| Transform | `input_type` + zarr `output_type` | a Dataset |
+| Fetcher | no `input_type`, zarr `output_type`, `set_source()` in the body | a Dataset |
 | Streaming fetcher | fetcher + `streaming=True` | a generator of per-period Datasets |
-| Plot | `input_type` + `output_type="png"` | a matplotlib Figure |
+| Plot | `input_type` + `output_type=types.PNG` | a matplotlib Figure |
 | No-artifact | no `output_type` | anything (ignored) |
 
 ## The envelope contract
 
 Every zarr input and output is a weather-skills envelope: a CF-compliant Zarr
-store plus the `weather_skills_history` provenance attr, in one of three
-shapes — `gridded`, `forecast`, `station`. Declare each input's shape in
-`input_type` (use `any` to opt out of shape validation); the decorator
-validates on open and exits 2 with a message naming the offending dim.
+store plus the `weather_skills_history` provenance attr, in one of four
+shapes — `types.GRIDDED`, `types.FORECAST`, `types.STATION`, `types.SERIES`.
+Declare each input's shape in `input_type`; the decorator validates on open
+and exits 2 with a message naming the offending dim.
+
+The shape is detected, first match wins: a `station_id` dim is a station;
+without identifiable lat/lon coords it is a series (what collapsing latitude
+and longitude leaves); with them, a `step` dim plus a scalar `time` coord is a
+forecast and anything else is gridded. Gridded and forecast are positive tests
+rather than fall-throughs, so every dataset classified as one satisfies that
+shape's contract — a forecast collapsed over latitude and longitude keeps its
+`step` axis and scalar init `time` but reads as the series it is, not as a
+forecast no skill can open. "Identifiable" means cf-xarray's CF-attr
+resolution or the `lat`/`lon`/`y`/`x` name heuristics — a grid whose axes are
+named something else reads as a series until `--dims` names them, which is
+what `--dims` is for. A `station_id` dim without its `latitude(station_id)`/
+`longitude(station_id)` coords is a malformed station rather than another
+shape, and is rejected naming the missing coord.
+
+Declare types and modes with the `weather_skills_core.types` constants, never
+a bare string. `types.ALL` is the tuple of all four shapes: an input declaring
+it accepts any of them and is then validated as whichever shape it is detected
+to be — the station-coordinate and `--time-dim` checks still run. It widens
+what a skill accepts, not what the decorator checks.
 
 `references/ENVELOPE.md` is authoritative for the rest: the exact dims and
 coords of each shape, the CF-compliance requirement, the write rules
@@ -61,14 +81,14 @@ The script is a PEP 723 single file. Skeleton:
 # ///
 """Module docstring: what the script is. Not read by the decorator."""
 
-from weather_skills_core import weather_skill
+from weather_skills_core import set_source, types, validate_type, weather_skill
 
 # Auto-populated by the version-bump CI workflow. Do not edit manually.
 _SKILL_VERSION = "0.1.0"
 
 
 @weather_skill("my-skill", _SKILL_VERSION, ...)
-def my_skill(ds, ...):
+def my_skill(ds, args):
     """Docstring shown as the CLI description."""
     ...
 
@@ -86,41 +106,56 @@ live in the function docstring — a shortened function docstring shortens
 
 Declaration surface (all keyword-only after `name`, `version`):
 
-- `input_type` — `None`, one type, or a comma string / list with one type per
-  input. Inputs arrive as `--input`/`-i` (repeated for several), or via
+- `input_type` — `None` for no zarr inputs. Otherwise **the shape of the value
+  says how many inputs there are**:
+
+  | Declaration | Inputs | Each accepts |
+  | --- | --- | --- |
+  | `types.GRIDDED` | one | that one type |
+  | `(types.GRIDDED, types.FORECAST)` | one | either type |
+  | `types.ALL` | one | any shape (it is just the tuple of all four) |
+  | `[types.GRIDDED, types.STATION]` | two | first gridded, second station |
+  | `[types.ALL, (types.GRIDDED, types.FORECAST)]` | two | any shape; gridded or forecast |
+
+  A tuple is **one input's allowed set**; a list is **one entry per input**,
+  and a list entry may itself be a tuple. `types.ALL` is not a wildcard — it
+  is the tuple of every shape, and the input is still validated as whichever
+  shape it turns out to be.
+  Inputs arrive as `--input`/`-i` (repeated for several), or via
   `input_names=["forecast", "mclimate"]` for dedicated flags, or
   `variadic_input=True` for two-or-more `--input` repeats (the function then
   receives one list of datasets).
-- `input_help` — help text for the input flag(s). With `input_names`, a list
-  giving one help string per named flag
-  (`input_help=["Forecast ensemble Zarr.", "M-climate ensemble Zarr."]`);
-  otherwise a single string shown on `--input`/`-i`, replacing the
-  decorator's default help in the repeated-input cases.
-- `output_type` — `None`, a zarr envelope type, a tuple/set of zarr envelope
-  types (a union), `"same"`, or `"png"`. `"same"` declares a shape-preserving
-  transform: the output is whatever envelope type the input carries. Use it
-  (instead of hard-coding one zarr type) when `input_type` admits several
-  shapes (`"gridded|forecast"`, `"any"`) and the skill preserves whichever
-  came in. It requires at least one declared zarr input and writes through
-  the zarr path exactly like an explicit zarr type. A union (e.g.
-  `("gridded", "forecast")`, for a fetcher whose source decides the shape)
-  VALIDATES rather than selects: the returned dataset's detected shape must
+- `input_help` — help text for the input flag(s); requires a declared
+  `input_type`. With `input_names`, a list giving one help string per named
+  flag (`input_help=["Forecast ensemble Zarr.", "M-climate ensemble Zarr."]`),
+  where a `None` entry leaves that flag without help; otherwise a single
+  string shown on `--input`/`-i`, replacing the decorator's default help in
+  the repeated-input cases.
+- `output_type` — `None`, a zarr envelope type, a tuple of zarr envelope
+  types (a union), or `types.PNG`. A list is rejected: it is the
+  one-entry-per-input spelling and a skill has one output. A union (e.g.
+  `(types.GRIDDED, types.FORECAST)`, for a fetcher whose source decides the
+  shape) VALIDATES rather than selects: the returned dataset's detected shape must
   be one of the members, checked before the write (a mismatch exits 1); the
   declaration never coerces the output toward any member. A single-type
-  declaration stays unchecked.
-- Standard flags, enabled by toggles and passed as keyword arguments:
-  `start_time`/`end_time` (`--start`/`--end`), `date` (`--date`), `bbox`
-  (`"required"` or `"optional"`; the function receives a parsed
-  `(N, W, S, E)` tuple), `variable` (`"single"` or `"repeat"`), `workers`
-  (pass the default int), `title`, `dims`, `time_dim`.
+  declaration stays unchecked. A shape-preserving transform declares
+  `types.ALL` and asserts the preservation in its body with `validate_type`
+  (below) — the declaration cannot say "the same as the input" because with
+  more than one input there is no saying which input that means.
+- Standard flags, enabled by toggles and delivered on the same arguments
+  namespace as the extra arguments: `start_time`/`end_time` (`--start`/`--end`), `date`
+  (`--date`), `bbox` (`types.REQUIRED` or `types.OPTIONAL`; the body gets a
+  parsed `(N, W, S, E)` tuple), `variable` (`types.SINGLE` or `types.REPEAT`),
+  `workers` (pass the default int), `title`, `dims`, `time_dim`.
 - Toggle dict form: `start_time`/`end_time`/`date`, `bbox`, `variable`, and
   `workers` also accept a dict overriding the flag's argparse surface —
-  `help` replaces the decorator-owned help text, `required` overrides
+  `help` replaces the decorator-owned sentence (on a date flag the grammar
+  is still appended; see below), `required` overrides
   requiredness (`--start`/`--end`/`--date` default to required; with
   `"required": False` an omitted value reaches the function as `None` and no
   resolved date is recorded), and `choices` constrains the accepted values.
   The string/int forms become the dict's `mode`/`default` key —
-  `bbox={"mode": "optional", ...}`, `variable={"mode": "repeat", ...}`,
+  `bbox={"mode": types.OPTIONAL, ...}`, `variable={"mode": types.REPEAT, ...}`,
   `workers={"default": 4, ...}` — and `date` additionally accepts `context`:
   the parenthetical label on the resolved-date stderr line (default
   `"single date"`; e.g. `date={"context": "single forecast init date"}`
@@ -128,27 +163,45 @@ Declaration surface (all keyword-only after `name`, `version`):
   Prefer a dict-form standard toggle over redeclaring the same flag under
   `extra_args`: the toggle keeps the date grammar, the bbox parse/argv
   rewrite, and the resolved-provenance behavior.
-- `extra_args` — dest name to a bare type (`int`; `bool` makes a store-true
-  flag), a tuple of literal string choices (`("mean", "std")`), a constraint
-  set combining a type with a value domain (`{int, range(0, 2)}` derives
-  `choices`; the set must name the element type), or an argparse-keyword
-  dict (supports `positional`, `flag`, `aliases`, `repeat`, and any argparse
-  keyword such as `help`). A dest may not reuse a name the decorator
-  resolves and passes itself (`start_time`/`end_time`/`date`/`bbox`/
-  `input_paths`/`context`).
+- `extra_args` — a list of `add_argument` calls, one tuple each. Every
+  leading element is a flag (or, with no leading dash, a positional's name);
+  an optional trailing dict carries argparse's own keywords, passed straight
+  through. **There is no Rhiza vocabulary on top of argparse** — if you know
+  `add_argument`, you know this:
+
+  ```python
+  @weather_skill(
+      "my-skill",
+      _SKILL_VERSION,
+      extra_args=[
+          ("--method", {"choices": ["mean", "std"], "required": True}),
+          ("--factor", "-f", {"type": float}),  # an alias is just another flag
+          ("--dim", {"action": "append"}),  # repeatable
+          ("--from", {"dest": "sender"}),  # dest differs from the flag
+          ("code", {"help": "ISO 3166-1 alpha-3"}),  # positional: no dashes
+          ("--cc",),  # no keywords needed
+      ],
+  )
+  ```
+
+  Dests are the ones argparse derives (explicit `dest` wins, else the first
+  long flag underscored), must be unique, and may not reuse a name the
+  decorator resolves itself (`start_time`/`end_time`/`date`/`bbox`/`context`).
 - `mutex_groups` — named groups of mutually exclusive `extra_args` (see
   below).
-- `input_paths=True` — the function also receives an `input_paths` keyword
-  argument: the CLI-given input path(s) as a list of `pathlib.Path`, in
-  input order. Use it for diagnostics and messages that name the inputs; the
-  datasets still arrive positionally, and the paths never enter the recorded
-  provenance args. This is the supported way to learn an input's path — do
-  not fish it out of `ds.encoding`.
-- Hooks and cache behavior: `latest_resolver`, `source`, `streaming`,
+- input paths — every dataset the decorator opens carries the path it came
+  from; read it with `input_path(ds)` (`from weather_skills_core import
+  input_path`), which returns a `pathlib.Path`. Use it for diagnostics and
+  labels that name the inputs. It rides on the dataset rather than arriving
+  as a parallel list, so it cannot desync from the inputs, and `stamp_zarr`
+  strips it before every write — see "Metadata that must not reach the store"
+  below. This is the supported way to learn an input's path: do not fish it
+  out of `ds.encoding`.
+- Hooks and cache behavior: `latest_resolver`, `streaming`,
   `cache`, `hash_input`, `completeness_probe`, `validate_args`,
-  `normalize_args`, `exclude_args`, `reference_args`, `history_labels`,
-  `write_encoding`, `post_write`, `append_dim`, `savefig_kwargs`,
-  `cache_hit_label`.
+  `normalize_args`, `exclude_args`, `preserve_order`, `reference_args`,
+  `history_labels`,
+  `write_encoding`, `post_write`, `append_dim`, `savefig_kwargs`, `software`.
 - `post_write` — `callable(path)` run after the artifact is written (zarr,
   streaming, or PNG; requires an artifact `output_type`), receiving the
   output path. Use it for read-back verification of the written store (a
@@ -168,12 +221,12 @@ when required):
 ```python
 @weather_skill(
     "downscale", _SKILL_VERSION,
-    input_type="gridded", output_type="gridded",
-    extra_args={
-        "factor": {"type": float, "aliases": ["-f"]},
-        "target_resolution": {"type": float},
-        "reference_grid": {},
-    },
+    input_type=types.GRIDDED, output_type=types.GRIDDED,
+    extra_args=[
+        ("--factor", "-f", {"type": float}),
+        ("--target-resolution", {"type": float}),
+        ("--reference-grid",),
+    ],
     mutex_groups={
         "target": {"args": ("factor", "target_resolution", "reference_grid"),
                    "required": True},
@@ -183,7 +236,9 @@ when required):
 
 Members must be non-positional `extra_args` entries that do not set their own
 `required` (requiredness belongs to the group); a dest may belong to at most
-one group, and a group needs at least two members. Declare groups here —
+one group, and a group needs at least two members. The group name labels the
+declaration only — argparse mutex groups are untitled and it reaches no help
+text. Declare groups here —
 never assemble them by reaching into `wrapper.parser._actions` after
 decoration.
 
@@ -202,9 +257,8 @@ Opt in by naming a `context` parameter on any hook (`latest_resolver`,
 `context=`, a `RunContext` carrying:
 
 - `args` — the parsed argparse namespace;
-- `input_paths` / `output_path` — the CLI paths as `pathlib.Path`;
-- `start_time` / `end_time` / `date` — the resolved absolute dates (`None`
-  before resolution or when the toggle is off);
+- `start_time` — the resolved absolute window start (`None` before resolution
+  or when the toggle is off);
 - `state` — a mutable dict reserved for the skill, empty at the start of
   every run and shared across the hooks and the function within that run.
 
@@ -245,25 +299,47 @@ def _store_is_complete(out, context):
 @weather_skill(
     "my-fetch",
     _SKILL_VERSION,
-    output_type="gridded",
-    source="my-source",
+    output_type=types.GRIDDED,
     start_time=True,
     end_time=True,
-    variable="single",
+    variable=types.SINGLE,
     latest_resolver=_latest,
     validate_args=_remember_request,
     completeness_probe=_store_is_complete,
 )
-def fetch(start_time, end_time, variable, context):
+def fetch(args, context):
     """Fetch and write a weather-skills envelope Zarr."""
     ds = _open_remote(context)
+    set_source(ds, "my-source")
     ...
 ```
 
-The function receives the opened input dataset(s) positionally, then the
-resolved parameters as keyword arguments. Raise
-`weather_skills_core.UsageError` for usage/validation failures (exit 2) and
-`weather_skills_core.DataError` for data-availability or hard failures
+The function receives the opened input dataset(s) positionally, then **one
+namespace holding every argument**:
+
+```python
+def transform(ds, args): ...  # one input
+def compare(ds_a, ds_b, args): ...  # two inputs
+def concat(datasets, args): ...  # variadic: one list
+def fetch(args): ...  # no inputs
+def fetch(args, context): ...  # context stays a separate opt-in
+```
+
+It is an `argparse.Namespace` whose attributes are the dests: every
+`extra_args` value **and** every enabled standard toggle —
+`start_time`/`end_time`/`date` already resolved to `datetime.date`, `bbox`
+parsed to an `(N, W, S, E)` tuple, plus
+`variable`/`workers`/`title`/`dims`/`time_dim`. One mechanism, so a date is an
+ordinary attribute rather than a special parameter. **Read each value where
+you use it** — `ds.resample(time=args.period).sum()` — and bind a local only
+when the value is used repeatedly or the name earns its line; a block of
+`a, b, c = args.a, args.b, args.c` at the top of the body is noise that
+rebinds by position. The namespace is built from the resolved values, not from
+the parsed argparse namespace, which keeps the raw `--bbox` string and date
+tokens the provenance entry records.
+
+Raise `weather_skills_core.UsageError` for usage/validation failures (exit 2)
+and `weather_skills_core.DataError` for data-availability or hard failures
 (exit 1). Never call `sys.exit` from the body.
 
 Defer heavy imports (`xarray`, `numpy`, plotting, client libraries) into the
@@ -276,27 +352,43 @@ itself defers them.
 @weather_skill(
     "clip-region",
     _SKILL_VERSION,
-    input_type="gridded",
-    output_type="gridded",
-    bbox="required",
+    input_type=types.ALL,
+    output_type=types.ALL,
+    bbox=types.REQUIRED,
     dims=True,
     hash_input=False,  # cheap cache check; hash computed only on a miss
-    cache_hit_label="clip",  # cache-hit line reads "skipping clip."
 )
-def clip_region(ds, bbox, dims):
+def clip_region(ds, args):
     """Spatially subset a gridded weather-skills envelope Zarr."""
     from weather_skills_core.envelope import bbox_subset, detect_spatial_dims
 
-    lat_dim, lon_dim = detect_spatial_dims(ds, dims)
-    return bbox_subset(ds, bbox, lat_dim=lat_dim, lon_dim=lon_dim)
+    lat_dim, lon_dim = detect_spatial_dims(ds, args.dims)
+    sub = bbox_subset(ds, args.bbox, lat_dim=lat_dim, lon_dim=lon_dim)
+    # Subsetting the spatial axes preserves the envelope shape.
+    validate_type(sub, ds, args.dims)
+    return sub
 ```
 
-A typed `input_type="gridded"` composes with `dims=True`: when the caller
-passes `--dims LAT,LON`, input validation checks that the overridden names
-exist on the dataset instead of running CF/heuristic detection, so an input
-with nonstandard dim names validates and reaches the body (the same holds
-for `--time-dim`). Overrides participate only in typed validation; an input
-declared `any` skips all shape checks.
+This is the shipped `clip-region` declaration, and its `input_type` is wider
+than its body: `types.ALL` accepts a station or series envelope, and
+`detect_spatial_dims` then fails inside the function rather than at the
+argparse boundary. Read it as a live tension, not a pattern to copy — declare
+the shapes your body actually handles (`(types.GRIDDED, types.FORECAST)` here)
+unless you have a reason to accept more, and the decorator rejects the rest
+with a message naming the offending dim before your code runs.
+
+`input_type` composes with `dims=True`: when the caller passes `--dims
+LAT,LON`, those names identify the spatial axes for both classification and
+validation, so a grid with nonstandard dim names classifies as gridded and
+reaches the body (the same holds for `--time-dim`). Without the override that
+grid reads as a series. A skill whose inputs may carry nonstandard dim names
+needs `dims=True` so the caller can name them. Input validation and the
+`output_type` union check classify by those names, so a body asserting its own
+shape passes `args.dims` to `validate_type` — as the example does — and
+compares the shapes the decorator saw; WSK103 flags a `dims=True` skill that
+omits it. The names win on a dataset that has them and CF attrs/heuristics
+decide on one that does not, so a transform that renames its axes to canonical
+names still reads as shape-preserving.
 
 The decorator writes the returned Dataset: it carries the first input's attrs
 forward, stamps the provenance chain, clears encodings, replaces whatever
@@ -325,16 +417,17 @@ def _store_is_complete(out):
 @weather_skill(
     "oisst-fetch",
     _SKILL_VERSION,
-    output_type="gridded",
-    source="oisst",
+    output_type=types.GRIDDED,
     start_time=True,
     end_time=True,
-    bbox="optional",
+    bbox=types.OPTIONAL,
     latest_resolver=_latest,
     completeness_probe=_store_is_complete,
 )
-def fetch(start_time, end_time, bbox):
+def fetch(args):
     """Fetch daily SST and write a weather-skills envelope Zarr."""
+    ...
+    set_source(ds, "oisst")
     import xarray as xr
 
     ...
@@ -362,23 +455,22 @@ def _set_write_encoding(ds):
 @weather_skill(
     "oisst-fetch",
     _SKILL_VERSION,
-    output_type="gridded",
-    source="oisst",
+    output_type=types.GRIDDED,
     start_time=True,
     end_time=True,
-    bbox="optional",
+    bbox=types.OPTIONAL,
     streaming=True,
     append_dim="time",
     write_encoding=_set_write_encoding,
 )
-def fetch(start_time, end_time, bbox):
+def fetch(args):
     """Fetch daily SST, one period per yield, bounded memory."""
-    days = plan_days(start_time, end_time)
-    if days and days[-1] != end_time:
+    days = plan_days(args.start_time, args.end_time)
+    if days and days[-1] != args.end_time:
         # Trailing days not yet published: record the effective window.
         yield EntryOverride({"end": days[-1].isoformat()})
     for day in days:
-        yield fetch_one_day(day, bbox)
+        yield set_source(fetch_one_day(day, bbox), "oisst")
 ```
 
 Yield one Dataset per period. The decorator writes the first with
@@ -394,13 +486,13 @@ chain reflects every override, including one yielded after the final dataset
 @weather_skill(
     "plot-compare",
     _SKILL_VERSION,
-    input_type=["any", "any"],
-    output_type="png",
+    input_type=[types.ALL, types.ALL],
+    output_type=types.PNG,
     history_labels=["a", "b"],
     title=True,
     savefig_kwargs={"bbox_inches": "tight"},
 )
-def plot_compare(ds_a, ds_b, title):
+def plot_compare(ds_a, ds_b, args):
     """Render two inputs as stacked heatmap rows."""
     import matplotlib
 
@@ -415,7 +507,8 @@ def plot_compare(ds_a, ds_b, title):
 Return the Figure; the decorator saves it with each input branch's full
 history embedded in the PNG metadata (`weather_skills_history` for a single
 input; `weather_skills_history_<label>` per declared label otherwise, plus a
-`Software` key). Plot skills have no cache: they always render.
+`Software` key, `"forecasting-skills"` unless the declaration overrides it
+with `software=`). Plot skills have no cache: they always render.
 
 ### Worked example: no-artifact
 
@@ -423,9 +516,9 @@ input; `weather_skills_history_<label>` per declared label otherwise, plus a
 @weather_skill(
     "resolve-region",
     _SKILL_VERSION,
-    extra_args={"code": {"positional": True, "metavar": "CODE"}, "geojson": str},
+    extra_args=[("code", {"metavar": "CODE"}), ("--geojson",)],
 )
-def resolve_region(code, geojson):
+def resolve_region(args):
     """Resolve an ISO 3166-1 alpha-3 country code to an N/W/S/E bbox."""
     print("12.0/33.9/-4.7/41.9")  # stdout is load-bearing: callers consume it
 ```
@@ -445,6 +538,35 @@ resolutions print a stderr line with the resolved dates. Your only obligation
 is the `latest_resolver` callable for sources that support `latest` — one
 bounded discovery call returning a `datetime.date`.
 
+**You never write the grammar into help text either.** The decorator appends
+it to `--start` and `--date`, and points `--end` at `--start` so one `--help`
+never prints it twice. `start_time=True` is the whole declaration for a plain
+date range.
+
+To add something source-specific, override `help` with **your sentence only**
+— the grammar still follows it:
+
+```python
+@weather_skill(
+    "my-fetch",
+    _SKILL_VERSION,
+    output_type=types.GRIDDED,
+    start_time={"help": "Start date (inclusive). 'latest' resolves to the current UTC date."},
+    end_time=True,
+)
+def fetch(args):
+    """Fetch and write a weather-skills envelope Zarr."""
+```
+
+renders as `Start date (inclusive). 'latest' resolves to the current UTC
+date. Either YYYY-MM-DD, 'now'/'today', 'latest', or an offset ...`. Restating
+the grammar yourself only duplicates it.
+
+A date flag declared as an `extra_args` entry rather than a toggle (because
+the dataset decides whether a range or a single date applies, say) gets no
+automatic grammar; interpolate `DATE_GRAMMAR` (`from weather_skills_core
+import DATE_GRAMMAR`) instead of retyping the sentence.
+
 ## Provenance and caching
 
 The decorator computes the provenance entry — skill, version, the recorded
@@ -453,9 +575,45 @@ hit it returns without calling you or touching the store. What you control:
 
 - The recorded args are the argparse namespace minus input/output path
   strings, with resolved absolute dates (never relative tokens) and
-  `--workers` excluded. Use `normalize_args` to canonicalize (sort a repeated
-  `--variable`, coerce types) so flag order cannot cause spurious misses, and
-  `exclude_args` for any other pure-concurrency or presentation knob.
+  `--workers` excluded. Use `exclude_args` for any other pure-concurrency or
+  presentation knob.
+- **Every list-valued recorded arg is sorted by the decorator**, so flag order
+  alone cannot cause a spurious cache miss — you do not sort `--variable`
+  yourself. Sorted, never deduped: `-v a -v a` records `["a", "a"]`, because
+  the record is a canonical spelling of what was asked for, not a rewrite of
+  it. Sorting runs last, after `normalize_args`, so it also covers a list the
+  hook produced.
+- `preserve_order` — the narrow exception. **If a repeated flag's ORDER changes
+  your output, name its dest here**, and the decorator leaves that list in the
+  order given:
+
+  ```python
+  @weather_skill(
+      "select",
+      _SKILL_VERSION,
+      input_type=types.ALL,
+      output_type=types.ALL,
+      extra_args=[("--index", {"action": "append"}), ("--value", {"action": "append"})],
+      preserve_order=("index", "value"),
+  )
+  def select(ds, args):
+      """Select entries along one named dimension."""
+  ```
+
+  Without it, `--index 2 --index 0` and `--index 0 --index 2` record the same
+  sorted list, share a cache key, and the second run takes a wrong cache hit
+  returning the first one's data. Core cannot infer which arguments those are —
+  that the order is data, not spelling, is exactly what this declares. It names
+  dests, like `exclude_args` and `reference_args`, and an unknown name is a
+  declaration error rather than a silent sort. Use it only when the order is
+  genuinely load-bearing; `--variable` and `--dim` are sets and stay sorted.
+- `normalize_args` remains for canonicalization ordering does not cover:
+  filling in a default so an omitted flag and an explicit full list share a
+  key, coercing `"0"` and `"00"` to one value, nulling an argument the chosen
+  style ignores, or folding a resolved lookup into the recorded args. The
+  dict it returns goes through a JSON round-trip before both the cache
+  compare and the stamp, so JSON-equivalent containers (a tuple and the list
+  it serializes to) compare equal and a hook may return either.
 - `cache=False` removes the cache check entirely: the function runs and the
   output is rewritten on every invocation, with the provenance entry still
   built and stamped. Declare it when a meaningful cache key does not exist
@@ -496,6 +654,23 @@ schema those pieces produce. One author-facing consequence:
 `weather_skills_history` is the only provenance attr the decorator reads, so
 an input without it (whatever other attrs it carries) is opaque, and the chain
 starts fresh at your skill's entry.
+
+### Metadata that must not reach the store
+
+Dataset attrs live **inside** the zarr store, and the cache key is a content
+hash over the store's bytes (`hash_zarr` walks the directory and hashes every
+file). So any attr that varies with where a run happened — above all an input
+path — would make the same data hash differently on two machines and turn
+every cache hit into a miss.
+
+`weather_skills_input_path` is therefore a reserved attr with a strict
+lifetime: the decorator sets it on each input it opens, the skill reads it
+with `input_path(ds)`, and `stamp_zarr` drops it before every write (zarr and
+streaming alike). You do not need to strip it yourself, including when you
+carry the input's attrs forward — the decorator merges the first input's attrs
+into your result and the strip runs after that merge. Do not add attrs of your
+own that encode a local path, a hostname, or a timestamp: the same reasoning
+applies to all of them.
 
 ### Raw-string parsers and the schema validator
 
@@ -590,6 +765,14 @@ parameterized by them. Do not reimplement any of these in a skill body.
 - `normalize_longitude(ds, lon_dim="longitude")` — maps a 0..360 longitude
   axis onto [-180, 180) and sorts ascending, so N/W/S/E bboxes with negative
   west/east select correctly.
+- `validate_type(ds, expected, dims=None)` — assert a dataset's envelope type,
+  returning it. `expected` is a type constant, a sequence of them, or another
+  dataset whose type `ds` must match (`validate_type(out_ds, ds)` is how a
+  shape-preserving transform states that claim). Raises `DataError` (exit 1)
+  on a mismatch. `dims` classifies both sides; a skill declaring `dims=True`
+  passes `args.dims` so the assertion reads the shapes the decorator
+  validated, and a skill that omits it is WSK103. Exported at the top level:
+  `from weather_skills_core import validate_type`.
 
 ### Dates (`weather_skills_core.dates`)
 
@@ -622,6 +805,20 @@ parameterized by them. Do not reimplement any of these in a skill body.
   forecast envelope's scalar init `time` — probe by variables alone or write
   a bespoke probe. Write a bespoke probe only when a store needs checks this
   cannot express.
+
+### Provenance metadata (`weather_skills_core.provenance`)
+
+- `set_source(ds, source)` — name the data product on a fetcher's output,
+  returning `ds`. It is the SOURCE's identity, not the skill's (`ecmwf-s2s`,
+  not `ecmwf-fetch`), so renaming the script cannot rewrite provenance; and it
+  is a body call, not a declaration, so the value may be one discovered at run
+  time (`f"dynamical:{dataset}"`). `stamp_zarr` leaves it alone, so it reaches
+  the written store and propagates to whatever a transform carries forward.
+  Exported at the top level. A fetcher that never calls it is WSK102.
+- `input_path(ds)` — the path the decorator opened this input from, as a
+  `pathlib.Path`. Set on every opened input and stripped before write; raises
+  `KeyError` for a dataset the decorator did not open. Exported at the top
+  level: `from weather_skills_core import input_path`.
 
 ### Runtime checks (`weather_skills_core.util`)
 
@@ -747,16 +944,13 @@ own version of any of them:
 
 - the resolved-dates line for relative date tokens
   (`resolved "now-1w".."now" -> ... (7 days; ...)`);
-- `Cache hit: <output> already matches requested params; skipping <label>.`
-  — `<label>` defaults to the skill name; set `cache_hit_label` to change
-  the word (e.g. `cache_hit_label="clip"`);
-- `Wrote: <output> (<detail>)` — the default detail is the output's sizes
+- `Cache hit: <output> already matches requested params; skipping <skill>.`
+  — always the skill name, so a pipeline running several skills says which
+  one was skipped;
+- `Wrote: <output> (<detail>)` — the detail is the output's dimension sizes
   for a standard zarr skill, `<append_dim>=<total>` for a streaming skill,
-  and nothing for a PNG skill. To add or replace detail, return
-  `weather_skills_core.WroteSummary("...")` alongside the output (a tuple:
-  `return ds, WroteSummary("variable 'precip' -> 'rain'")`; combinable with
-  an `EntryOverride`), or yield it from a streaming generator. The text is
-  appended after the default detail unless `replace=True`;
+  and nothing for a PNG skill. It is not customizable: a skill with more to
+  say prints its own stderr line, which lands before this one;
 - the opaque-input warnings (`no upstream weather_skills_history ...`), the
   incomplete-store re-fetch note, the partial-store removal note, and the
   malformed-history note.
@@ -837,7 +1031,7 @@ Before calling a skill done, confirm:
 - [ ] Written-store verification lives in `post_write`, not in `__main__`
       after the decorated call.
 - [ ] Cache declaration is deliberate: `cache`, `hash_input`,
-      `normalize_args`, `exclude_args`, `reference_args`,
+      `normalize_args`, `exclude_args`, `preserve_order`, `reference_args`,
       `completeness_probe` each considered; fetch-discovered entry values are
       resolved before the cache check, with `EntryOverride` reserved for
       values that only exist after the work.
@@ -901,6 +1095,8 @@ as clean.
 | --- | --- | --- | --- |
 | WSK001 | error | The script parses and contains a `@weather_skill` call. | Fix the syntax error or declare the skill through the decorator. |
 | WSK101 | warning | No `extra_args` entry shadows a standard flag or dest (`--input`, `--output`, `--start`, `--end`, `--date`, `--bbox`, `--variable`, `--workers`, `--title`, `--dims`, `--time-dim`). | Declare the standard toggle instead; its dict form covers help/required/choices overrides. |
+| WSK102 | warning | A fetcher-shaped skill (zarr `output_type`, no `input_type`) calls `set_source()`. | Name the data product in the body; nothing upstream can supply it. |
+| WSK103 | warning | A skill declaring `dims=True` passes `dims` to every `validate_type()` call. | Pass `args.dims`; without it the assertion classifies by CF attrs and heuristics while the decorator classified by the override. |
 | WSK201 | warning | A one-off flag name is not also declared by another corpus skill. **Advisory: off by default** (CONVENTIONS.md wants a flag doing the same job to share a name, so a shared flag is usually the desired consistency, not a defect; the genuinely-bad case — a shared name with a divergent shape — is WSK202). Opt in with `--extend-select WSK201` to survey shared flags that might be promoted to a core standard parameter. | Rename it, or propose promoting it to a weather-skills-core standard parameter. Findings name each skill and corpus holding the collision. |
 | WSK202 | error | Skills sharing a one-off flag name agree on its shape (type, arity, nargs, choices). | Align the declarations or rename the flags. Values that are not literals in the source are recorded as dynamic and skipped from the comparison. |
 | WSK301 | warning | SKILL.md and the declaration agree: every declared flag is mentioned in SKILL.md, and every flag the Arguments section documents is declared. A missing SKILL.md is its own finding. | Update the Arguments section or the declaration. |
@@ -916,8 +1112,8 @@ which rules run.
 ### Rule selection
 
 The **default rule set** is every rule above except WSK201: WSK001, WSK101,
-WSK202, WSK301, WSK401, and WSK402 run when you pass no selection flag (this
-is what CI invokes). WSK201 is off by default.
+WSK102, WSK103, WSK202, WSK301, WSK401, and WSK402 run when you pass no
+selection flag (this is what CI invokes). WSK201 is off by default.
 
 Three repeatable flags choose the rules to run, with the same semantics as
 ruff's `select`/`extend-select`/`ignore`:

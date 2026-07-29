@@ -6,16 +6,16 @@
 # ///
 """Lint fixture: no _SKILL_VERSION constant (WSK401). Never executed."""
 
-from weather_skills_core import weather_skill
+from weather_skills_core import types, weather_skill
 
 
 @weather_skill(
     "no-constant",
     "0.1.0",
-    input_type="any",
-    output_type="same",
+    input_type=types.ALL,
+    output_type=types.ALL,
 )
-def no_constant(ds):
+def no_constant(ds, args):
     """Lint fixture; never executed."""
     return ds
 

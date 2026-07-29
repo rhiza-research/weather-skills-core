@@ -5,8 +5,10 @@ toggles, extra arguments) and keeps only its domain logic; the decorator owns
 argparse construction, input reading, envelope validation, date resolution,
 provenance, the cache-hit short-circuit, and output writing.
 
-The wrapped function receives the input dataset(s) positionally followed by
-the resolved parameters as keyword arguments, and returns its output:
+The wrapped function receives the input dataset(s) positionally, then ONE
+dict holding every argument -- the extra arguments and the standard toggles
+alike, keyed by dest, with the dates already resolved -- and returns its
+output:
 
 - a Dataset for a zarr-writing skill (the decorator stamps provenance,
   writes it, and removes a partial store when the write fails);
@@ -17,10 +19,9 @@ the resolved parameters as keyword arguments, and returns its output:
   (the decorator saves it with provenance embedded in the PNG metadata);
 - anything (ignored) for a no-artifact skill.
 
-An artifact-writing skill may return a tuple -- the output first, followed by
-marker objects: an :class:`EntryOverride` rewriting the recorded provenance
-args (zarr modes) and/or a :class:`WroteSummary` customizing the ``Wrote:``
-stderr line. A streaming skill yields either marker from its generator.
+A zarr-writing skill may return ``(dataset, EntryOverride)`` instead of a
+bare dataset, rewriting the recorded provenance args; a streaming skill
+yields the override from its generator.
 
 Calling the decorated function runs the CLI on ``sys.argv``; pass ``argv`` to
 run it on an explicit argument list. Usage/validation failures exit 2 and
@@ -41,25 +42,25 @@ from pathlib import Path
 from weather_skills_core import dates as _dates
 from weather_skills_core import envelope as _envelope
 from weather_skills_core import provenance as _provenance
+from weather_skills_core import types as _types
 from weather_skills_core.errors import DataError, SkillError, UsageError
 
-_START_HELP = (
-    "Range start, inclusive. Either YYYY-MM-DD, 'now'/'today', 'latest', "
-    "or an offset 'now-<int>{d|w}' / 'latest-<int>{d|w}' (w = 7 days)."
+#: Core owns the date grammar, so core states it: the decorator appends this to
+#: the help of every date flag it registers, whether the help is the default
+#: below or a skill's own sentence. --end cross-references --start instead, so
+#: one --help never prints the grammar twice. Exported for the rare skill whose
+#: date flag is an ``extra_args`` entry rather than a standard toggle.
+DATE_GRAMMAR = (
+    "Either YYYY-MM-DD, 'now'/'today', 'latest', or an offset "
+    "'now-<int>{d|w}' / 'latest-<int>{d|w}' (w = 7 days)."
 )
+_START_HELP = "Range start, inclusive."
 _END_HELP = "Range end, inclusive. Same date grammar as --start."
-_DATE_HELP = (
-    "Date. Either YYYY-MM-DD, 'now'/'today', 'latest', "
-    "or an offset 'now-<int>{d|w}' / 'latest-<int>{d|w}' (w = 7 days)."
-)
+_DATE_HELP = "Date."
 _BBOX_REQUIRED_HELP = (
     "N/W/S/E decimal degrees (use the resolve-region skill to get a country's bbox)"
 )
 _BBOX_OPTIONAL_HELP = "Spatial subset N/W/S/E decimal degrees. Omit for the full grid."
-
-_ZARR_OUTPUT_TYPES = (_envelope.GRIDDED, _envelope.FORECAST, _envelope.STATION)
-PNG = "png"
-SAME = "same"
 
 
 @dataclass
@@ -69,29 +70,21 @@ class RunContext:
     Created once per invocation and passed by keyword (``context=``) to every
     declaration hook whose signature names a ``context`` parameter --
     ``latest_resolver``, ``validate_args``, ``normalize_args``,
-    ``completeness_probe``, and ``write_encoding`` -- and to the wrapped
-    function itself when its signature names one. Callables without the
-    parameter keep their plain call shapes.
+    ``completeness_probe``, ``write_encoding``, and ``post_write`` -- and to
+    the wrapped function itself when its signature names one. Callables
+    without the parameter keep their plain call shapes.
 
-    Fields fill in as the run proceeds: ``args`` (the parsed argparse
-    namespace) and ``output_path`` exist from the start; ``input_paths``
-    holds the CLI-given input paths once collected (before the inputs are
-    opened); ``start_time``/``end_time``/``date`` hold the resolved absolute
-    dates once the date grammar has run, and are ``None`` before that or when
-    the toggle is off.
-
-    ``state`` is a mutable scratch dict reserved for the skill: hooks and the
-    function share it within one run (memoize an opened remote store, stash a
-    value the write-encoding hook needs) and it starts empty on every run.
-    Use it instead of module-level globals for run-scoped side channels.
+    ``args`` is the parsed argparse namespace. ``start_time`` holds the
+    resolved absolute window start once the date grammar has run, and is
+    ``None`` before that or when the toggle is off. ``state`` is a mutable
+    scratch dict reserved for the skill: hooks and the function share it
+    within one run (memoize an opened remote store, stash a value the
+    write-encoding hook needs) and it starts empty on every run. Use it
+    instead of module-level globals for run-scoped side channels.
     """
 
     args: argparse.Namespace
-    output_path: Path | None = None
-    input_paths: list = field(default_factory=list)
     start_time: datetime.date | None = None
-    end_time: datetime.date | None = None
-    date: datetime.date | None = None
     state: dict = field(default_factory=dict)
 
 
@@ -115,34 +108,8 @@ def _call_hook(hook, *hook_args, wants_context, context):
     return hook(*hook_args)
 
 
-@dataclass
-class WroteSummary:
-    """Customize the detail of the decorator's ``Wrote:`` stderr line.
-
-    ``detail`` is extra text for the line's parenthetical: appended after the
-    default detail (``"; "``-separated) unless ``replace=True``, which makes
-    it the whole parenthetical. The defaults are the output sizes for a
-    standard zarr skill, ``<append_dim>=<total>`` for a streaming skill, and
-    nothing for a PNG skill.
-
-    A standard-mode skill returns it alongside the dataset -- ``(dataset,
-    WroteSummary(...))``, in any combination with an :class:`EntryOverride`;
-    a PNG skill returns ``(figure, WroteSummary(...))``; a streaming skill
-    yields it from the generator (the last one yielded wins).
-    """
-
-    detail: str
-    replace: bool = False
-
-
-def _wrote_line(output, default_detail, summary):
-    """Compose the ``Wrote:`` stderr line from the default detail and a summary."""
-    if summary is None:
-        detail = default_detail
-    elif summary.replace or not default_detail:
-        detail = summary.detail
-    else:
-        detail = f"{default_detail}; {summary.detail}"
+def _wrote_line(output, detail):
+    """The ``Wrote:`` stderr line, with the write mode's detail parenthesized."""
     suffix = f" ({detail})" if detail else ""
     return f"Wrote: {output}{suffix}"
 
@@ -166,31 +133,48 @@ class EntryOverride:
 
 
 def _split_extras(result, *, allow_override=True):
-    """Unpack a wrapped function's return into ``(primary, override, summary)``.
+    """Unpack a wrapped function's return into ``(primary, override)``.
 
-    A non-tuple return is the primary result alone. A tuple return's first
-    element is the primary result (the dataset or figure); each remaining
-    element must be a marker -- at most one :class:`EntryOverride` (rejected
-    with ``allow_override=False``, i.e. in PNG mode, where the entries are
-    embedded before the function runs) and at most one :class:`WroteSummary`.
-    Anything else raises :class:`TypeError`.
+    A bare return is the primary result (the dataset or figure) alone; the
+    only tuple form is ``(primary, EntryOverride)``, and PNG mode
+    (``allow_override=False``) has no tuple form at all because its entries
+    are embedded before the function runs. Anything else raises
+    :class:`TypeError`.
     """
     if not isinstance(result, tuple):
-        return result, None, None
+        return result, None
     primary, *extras = result
-    override = summary = None
-    for extra in extras:
-        if allow_override and isinstance(extra, EntryOverride) and override is None:
-            override = extra
-        elif isinstance(extra, WroteSummary) and summary is None:
-            summary = extra
-        else:
-            raise TypeError(
-                f"unexpected extra return value {extra!r}: a tuple return holds the "
-                "output first, then at most one EntryOverride (zarr mode only) and "
-                "at most one WroteSummary"
-            )
-    return primary, override, summary
+    if not (allow_override and len(extras) == 1 and isinstance(extras[0], EntryOverride)):
+        raise TypeError(
+            f"unexpected extra return value(s) {extras!r}: a tuple return holds "
+            "the output followed by exactly one EntryOverride (zarr mode only)"
+        )
+    return primary, extras[0]
+
+
+def _order_lists(raw, preserve_order=()):
+    """Sort every list-valued entry arg, so flag order cannot cause a cache miss.
+
+    Ordered, never deduped: a value given twice is recorded twice. Runs last,
+    after any ``normalize_args`` hook, so the guarantee holds for a list the
+    hook itself produced.
+
+    ``preserve_order`` names the dests whose order is data -- the skill's
+    output changes with it -- which core cannot infer and sorting would
+    destroy, collapsing two different requests onto one cache key.
+    """
+    ordered = {}
+    for key, value in raw.items():
+        # Tuples count: a hook may return one, and the JSON round-trip below
+        # would turn it into a list that had never been ordered.
+        if isinstance(value, list | tuple) and key not in preserve_order:
+            try:
+                value = sorted(value)
+            except TypeError:
+                # Mixed element types have no total order; keep as given.
+                value = list(value)
+        ordered[key] = value
+    return ordered
 
 
 def _remove_existing(path):
@@ -226,57 +210,40 @@ def rewrite_bbox_argv(argv):
     return out
 
 
-def _add_extra_argument(parser, dest, spec):
-    """Add one ``extra_args`` entry to the parser.
+def _split_arg_spec(spec):
+    """Split one ``extra_args`` tuple into ``(add_argument args, kwargs)``.
 
-    ``spec`` is a bare type (``int``; ``bool`` becomes a store-true flag), a
-    tuple/list of literal string choices, a constraint set combining a type
-    with a value domain (``{int, range(0, 2)}`` derives ``choices``; the set
-    must name the element type alongside any choices), or a dict of argparse
-    keywords for full control with the extra keys ``positional``, ``flag``,
-    ``aliases``, and ``repeat``.
+    The tuple IS an ``add_argument`` call: every leading element is a flag
+    (or, without a leading dash, a positional's name) and an optional
+    trailing dict holds argparse's own keywords.
     """
-    flag_name = "--" + dest.replace("_", "-")
-    if isinstance(spec, dict):
-        spec = dict(spec)
-        positional = spec.pop("positional", False)
-        flag = spec.pop("flag", flag_name)
-        aliases = list(spec.pop("aliases", ()))
-        if spec.pop("repeat", False):
-            spec["action"] = "append"
-        if positional:
-            parser.add_argument(dest, **spec)
-        else:
-            parser.add_argument(flag, *aliases, dest=dest, **spec)
-        return
-    kwargs = {}
-    if spec is bool:
-        kwargs["action"] = "store_true"
-    elif isinstance(spec, type):
-        kwargs["type"] = spec
-    elif isinstance(spec, tuple | list):
-        # A top-level tuple/list spec lists the flag's choices literally,
-        # matched against the raw CLI string.
-        kwargs["choices"] = list(spec)
-    elif isinstance(spec, set | frozenset):
-        for element in spec:
-            if element is bool:
-                kwargs["action"] = "store_true"
-            elif isinstance(element, type):
-                kwargs["type"] = element
-            elif isinstance(element, range | tuple | list):
-                kwargs["choices"] = list(element)
-            else:
-                raise ValueError(f"unsupported constraint {element!r} for extra arg {dest!r}")
-        if "choices" in kwargs and "type" not in kwargs:
-            raise ValueError(
-                f"extra arg {dest!r} constrains choices without a type; the raw CLI "
-                "string would never match a typed choice. Add the element type to the "
-                "constraint set, or declare literal string choices as a top-level tuple."
-            )
-    else:
-        raise ValueError(f"unsupported extra_args spec {spec!r} for {dest!r}")
-    parser.add_argument(flag_name, dest=dest, **kwargs)
+    if isinstance(spec, str) or not isinstance(spec, tuple | list):
+        raise ValueError(  # noqa: TRY004 -- every declaration error is a ValueError
+            f"each extra_args entry is a tuple of add_argument arguments, not {spec!r}"
+        )
+    names = list(spec)
+    kwargs = names.pop() if names and isinstance(names[-1], dict) else {}
+    if not names:
+        raise ValueError(f"extra_args entry {spec!r} names no flag or positional")
+    return names, dict(kwargs)
+
+
+def _arg_dest(spec):
+    """The dest argparse will give one ``extra_args`` entry.
+
+    Mirrors argparse's own rule: an explicit ``dest`` wins, a positional is
+    its own name verbatim, and a flag uses the first long spelling with the
+    leading dashes stripped and inner dashes underscored. The dash-to-
+    underscore rewrite is argparse's rule for optionals only, so a positional
+    named ``target-grid`` keeps that dest and reaches the body under that key.
+    """
+    names, kwargs = _split_arg_spec(spec)
+    if "dest" in kwargs:
+        return kwargs["dest"]
+    if not names[0].startswith("-"):
+        return names[0]
+    longs = [n for n in names if n.startswith("--")]
+    return (longs[0] if longs else names[0]).lstrip("-").replace("-", "_")
 
 
 def _normalize_date_toggle(name, value, *, extra_keys=()):
@@ -342,21 +309,31 @@ def _normalize_workers_toggle(value):
     raise ValueError(f"workers must be an int default or a dict, not {value!r}")
 
 
-def _date_toggle_kwargs(cfg, default_help):
-    """argparse keywords for a standard date toggle from its normalized config."""
-    kwargs = {"required": cfg.get("required", True), "help": cfg.get("help", default_help)}
+def _date_toggle_kwargs(cfg, default_help, *, grammar=True):
+    """argparse keywords for a standard date toggle from its normalized config.
+
+    The flag's own sentence is the default or the toggle's ``help`` override; a
+    skill states only what is source-specific and the date grammar is appended
+    here. ``grammar=False`` is ``--end``, whose default sentence points at
+    ``--start`` rather than repeating it.
+    """
+    help_text = cfg.get("help", default_help)
+    if grammar:
+        help_text = f"{help_text} {DATE_GRAMMAR}"
+    kwargs = {"required": cfg.get("required", True), "help": help_text}
     if "choices" in cfg:
         kwargs["choices"] = cfg["choices"]
     return kwargs
 
 
-def _normalize_mutex_groups(mutex_groups, extra_args):
-    """Validate a ``mutex_groups`` declaration against ``extra_args``.
+def _normalize_mutex_groups(mutex_groups, specs_by_dest):
+    """Validate a ``mutex_groups`` declaration against the declared arguments.
 
-    Returns ``(group_required, dest_to_group)``: the per-group ``required``
-    flag and the dest-to-group-name membership map. Raises :class:`ValueError`
-    for a group naming an undeclared dest, a dest in two groups, a group with
-    fewer than two members, a positional member, or a member carrying its own
+    ``specs_by_dest`` maps each ``extra_args`` dest to its spec. Returns
+    ``(group_required, dest_to_group)``: the per-group ``required`` flag and
+    the dest-to-group-name membership map. Raises :class:`ValueError` for a
+    group naming an undeclared dest, a dest in two groups, a group with fewer
+    than two members, a positional member, or a member carrying its own
     ``required`` (requiredness belongs to the group).
     """
     group_required = {}
@@ -376,7 +353,7 @@ def _normalize_mutex_groups(mutex_groups, extra_args):
         if len(dests) < 2:
             raise ValueError(f"mutex group {group_name!r} needs at least two member dests")
         for dest in dests:
-            if dest not in (extra_args or {}):
+            if dest not in specs_by_dest:
                 raise ValueError(
                     f"mutex group {group_name!r} names {dest!r}, which is not an extra_args dest"
                 )
@@ -385,18 +362,17 @@ def _normalize_mutex_groups(mutex_groups, extra_args):
                     f"extra arg {dest!r} is in both mutex groups "
                     f"{dest_to_group[dest]!r} and {group_name!r}"
                 )
-            spec = extra_args[dest]
-            if isinstance(spec, dict):
-                if spec.get("positional"):
-                    raise ValueError(
-                        f"mutex group {group_name!r} member {dest!r} is positional; "
-                        "mutually exclusive arguments must be flags"
-                    )
-                if spec.get("required"):
-                    raise ValueError(
-                        f"mutex group {group_name!r} member {dest!r} sets required=True; "
-                        "declare requiredness on the group, not the member"
-                    )
+            names, kwargs = _split_arg_spec(specs_by_dest[dest])
+            if not names[0].startswith("-"):
+                raise ValueError(
+                    f"mutex group {group_name!r} member {dest!r} is positional; "
+                    "mutually exclusive arguments must be flags"
+                )
+            if kwargs.get("required"):
+                raise ValueError(
+                    f"mutex group {group_name!r} member {dest!r} sets required=True; "
+                    "declare requiredness on the group, not the member"
+                )
             dest_to_group[dest] = group_name
         group_required[group_name] = required
     return group_required, dest_to_group
@@ -411,7 +387,6 @@ def weather_skill(
     input_names=None,
     input_help=None,
     variadic_input=False,
-    input_paths=False,
     start_time=False,
     end_time=False,
     date=False,
@@ -424,7 +399,6 @@ def weather_skill(
     extra_args=None,
     mutex_groups=None,
     latest_resolver=None,
-    source=None,
     streaming=False,
     cache=True,
     hash_input=True,
@@ -432,148 +406,104 @@ def weather_skill(
     validate_args=None,
     normalize_args=None,
     exclude_args=(),
+    preserve_order=(),
     reference_args=(),
     history_labels=None,
     write_encoding=None,
     post_write=None,
     append_dim="time",
     savefig_kwargs=None,
-    cache_hit_label=None,
     software=_provenance.DEFAULT_SOFTWARE,
 ):
-    """Declare a weather skill.
+    """Declare a weather skill: its CLI, its envelope contract, its cache, and its write.
 
-    Declaration surface:
+    The wrapped function is called as ``fn(*datasets, arguments)`` -- the
+    opened inputs positionally, then one :class:`argparse.Namespace` holding
+    every ``extra_args`` value and every enabled toggle under its dest, read
+    as ``arguments.start_time`` (dates already resolved to
+    :class:`datetime.date`, ``bbox`` to an (N, W, S, E) tuple). It is built
+    from the resolved values, not from the parsed namespace, which keeps the
+    raw tokens the provenance entry records. A variadic skill gets
+    ``fn(datasets, arguments)``. The function and every hook below opt into
+    the :class:`RunContext` by naming a ``context`` parameter, which the
+    decorator then passes as a separate keyword.
 
-    - ``name`` / ``version`` -- canonical skill name and its version (the
-      script's ``_SKILL_VERSION``); the version appears in the argparse epilog
-      and every provenance entry.
-    - ``input_type`` -- envelope type(s) of the zarr input(s): ``None`` (no
-      zarr inputs), one type string, or a comma string / list declaring one
-      type per input (each from ``gridded``/``forecast``/``station``/``any``).
-      Inputs arrive via ``--input``/``-i`` (repeated when there are several)
-      unless ``input_names`` names a dedicated flag per input (e.g.
-      ``["forecast", "mclimate"]``), or ``variadic_input=True`` accepts two or
-      more ``--input`` repeats of a single declared type (the function then
-      receives one list of datasets).
-    - ``input_help`` -- help text for the input flag(s). With ``input_names``,
-      a sequence giving one help string per named flag (a ``None`` entry
-      leaves that flag without help). Otherwise a single string shown on the
-      ``--input``/``-i`` flag, replacing the decorator's default help in the
-      variadic and fixed-multi cases. Requires a declared ``input_type``.
-    - ``input_paths`` -- with ``True``, the function also receives an
-      ``input_paths`` keyword argument: the CLI-given input path(s) as a list
-      of :class:`~pathlib.Path`, in input order (declaration order for
-      ``input_names``, repeat order otherwise). For diagnostics and messages;
-      the datasets still arrive positionally, and the paths never enter the
-      recorded provenance args. Requires a declared ``input_type``.
-    - ``output_type`` -- ``None`` for a no-artifact skill (argparse + version
-      epilog only: no provenance, no cache, no write), a zarr envelope type,
-      a tuple/set of zarr envelope types (a union), ``"same"``, or ``"png"``
-      for a Figure-writing skill. ``"same"`` declares a shape-preserving
-      transform: the output is whatever envelope type the (first) input
-      carries, useful for skills whose ``input_type`` admits several shapes
-      (``"gridded|forecast"``, ``"any"``, ...). It requires at least one
-      declared zarr input and is written through the zarr path exactly like
-      an explicit zarr type; it asserts nothing new about the output's shape
-      beyond "the input's shape, preserved". A union (e.g. ``("gridded",
-      "forecast")``, for a fetcher whose source decides the shape) VALIDATES
-      rather than selects: the returned dataset's detected shape must be a
-      member, checked before the write (a mismatch exits 1); the declaration
-      never coerces the output toward any member. A single-type declaration
-      stays unchecked.
-    - standard parameter toggles: ``start_time``/``end_time``/``date`` (the
-      relative-or-absolute date grammar; resolved dates are passed to the
-      function and recorded in provenance), ``bbox`` (``"required"`` or
-      ``"optional"``; parsed to an (N, W, S, E) tuple), ``variable``
-      (``"single"`` or ``"repeat"``), ``workers`` (an int default; excluded
-      from the cache key), ``title``, ``dims`` (LAT,LON override), and
-      ``time_dim`` (pass a string to set a default). A user-supplied
-      ``--dims``/``--time-dim`` value is honored during input validation:
-      typed inputs are validated against the overridden dim names instead of
-      relying on CF/heuristic detection (see
-      :func:`weather_skills_core.envelope.validate_input`).
-    - toggle dict form: ``start_time``/``end_time``/``date``, ``bbox``,
-      ``variable``, and ``workers`` also accept a dict overriding the flag's
-      argparse surface -- ``help`` replaces the decorator-owned help text,
-      ``required`` overrides requiredness (``--start``/``--end``/``--date``
-      default to required; with ``"required": False`` an omitted value is
-      passed to the function as ``None`` and no resolved date is recorded),
-      and ``choices`` constrains the accepted values. The string/int forms
-      become the dict's ``mode``/``default`` key -- ``bbox={"mode":
-      "optional", ...}``, ``variable={"mode": "repeat", ...}``,
-      ``workers={"default": 4, ...}`` -- and ``date`` additionally accepts
-      ``context``: the parenthetical label on the resolved-date stderr line
-      (default ``"single date"``, e.g. ``"single forecast init date"``).
-    - ``extra_args`` -- mapping of dest name to a bare type, a tuple/list of
-      literal string choices, a constraint set combining a type with a value
-      domain (``{int, range(0, 2)}``), or an argparse-keyword dict. A dest
-      may not reuse a name the decorator resolves and passes itself
-      (``start_time``/``end_time``/``date``/``bbox``/``input_paths``, and
-      ``context`` when the function opts into the run context): the resolved
-      value would clobber the extra argument's.
-    - ``mutex_groups`` -- mapping of group name to either a sequence of
-      ``extra_args`` dests (an optional group) or a dict
-      ``{"args": (dests...), "required": True}``. Each group becomes a real
-      argparse mutually exclusive group: at most one member may be given, and
-      ``required=True`` demands exactly one. Members must be non-positional
-      ``extra_args`` entries that do not set their own ``required``; the group
-      name labels the declaration only (argparse mutex groups are untitled).
-    - ``latest_resolver`` -- ``callable(args) -> date`` resolving the
-      ``latest`` token; invoked lazily, at most once per run.
-    - ``source`` -- ``weather_skills_source`` value stamped on fetcher output.
-    - ``streaming`` -- the function is a generator yielding per-period
-      datasets, written as ``mode="w"`` then appends along ``append_dim``.
-    - cache behavior: ``cache=False`` disables the cache check entirely -- the
-      function runs and the output is rewritten on every invocation, with the
-      provenance entry still built and stamped (for skills whose recompute is
-      cheaper than a meaningful cache key); ``hash_input`` compares the
-      input's content hash in the cache key (``False`` defers the expensive
-      hash until after a cheap check); ``completeness_probe`` (``callable(Path) -> bool``) verifies a
-      candidate cache hit actually reads back -- it receives the output store's
-      path and applies to fetcher and chained (transform) checks alike;
-      ``reference_args`` names
-      arg dests holding secondary reference-store paths, content-hashed into
-      the entry's ``reference_inputs``.
-    - hooks: ``validate_args(args)`` for pre-cache argument validation (raise
-      ``UsageError``); ``normalize_args(dict) -> dict`` canonicalizes the
-      recorded entry args (sort/dedupe) so flag order cannot cause spurious
-      misses -- the returned dict is passed through a JSON round-trip before
-      the cache compare and the stamp, so JSON-equivalent containers (a
-      tuple vs. the list it serializes to) compare equal;
-      ``exclude_args`` drops further dests from the entry args;
-      ``write_encoding(ds)`` sets controlled write encodings after the
-      encoding clear; ``post_write(path)`` runs after the artifact is written
-      (zarr, streaming, or PNG -- requires an artifact output_type),
-      receiving the output path, and may fail the run by raising a
-      ``SkillError`` (which maps to the usual exit codes) -- use it for
-      read-back verification of the written store. It runs before the
-      ``Wrote:`` line, and a cache hit skips it (nothing was written).
-    - run context: every hook above (plus ``latest_resolver`` and
-      ``completeness_probe``) and the wrapped function itself opt into the
-      run context by naming a ``context`` parameter; the decorator then also
-      passes ``context=`` -- a :class:`RunContext` carrying the parsed args
-      namespace, the resolved dates, the input/output paths, and a run-scoped
-      ``state`` scratch dict shared across the hooks and the function.
-      Callables without the parameter keep their plain call shapes.
-    - PNG: ``history_labels`` gives the per-input suffix for the embedded
-      history keys (defaults to ``input_names``); ``savefig_kwargs`` extends
-      the ``savefig`` call (default ``{"dpi": 150}``).
-    - stderr messages: ``cache_hit_label`` replaces the skill name as the
-      word after "skipping" in the cache-hit line (default: ``name``); the
-      ``Wrote:`` line's detail is customized by returning or yielding a
-      :class:`WroteSummary` (see its docstring). All other decorator-emitted
-      stderr lines are fixed.
+    ``skills/weather-skill-authoring/SKILL.md`` is the authoring guide: worked
+    examples per skill class, the date grammar, cache semantics, and the
+    envelope contract in full. Every parameter after ``version`` is
+    keyword-only.
+
+    Args:
+        name: canonical skill name; recorded in every provenance entry.
+        version: the script's ``_SKILL_VERSION``; shown in the ``--help`` epilog and recorded.
+        input_type: envelope type(s) of the zarr input(s), from
+            :mod:`weather_skills_core.types`. A type or a tuple of them declares ONE input
+            (the tuple its allowed set); a LIST declares one entry per input; ``None``
+            declares no zarr input. Each input is validated as the type it is detected to
+            be, so a wider declaration accepts more shapes without checking less.
+        output_type: ``None`` for a no-artifact skill (CLI only: no provenance, cache, or
+            write), a zarr envelope type, a tuple of them (a union the returned shape must
+            be a member of, checked before the write), or ``types.PNG``. A list is rejected:
+            a skill has one output. A single type is unchecked; a shape-preserving transform
+            declares ``types.ALL`` and asserts the preservation itself with
+            :func:`weather_skills_core.envelope.validate_type`.
+        input_names: one dedicated input flag per declared input, replacing ``--input``.
+        input_help: help for the input flag(s): one string, or one per ``input_names`` entry.
+        variadic_input: accept two or more ``--input`` repeats of the one declared type.
+        start_time: enable ``--start``; ``True``, or a dict overriding ``help``/``required``/
+            ``choices``.
+        end_time: enable ``--end``; same forms as ``start_time``.
+        date: enable ``--date``; same forms, plus ``context``, the resolved-date log label.
+        bbox: enable ``--bbox``: ``types.REQUIRED`` or ``types.OPTIONAL``, or a dict.
+        variable: enable ``--variable``: ``types.SINGLE`` or ``types.REPEAT``, or a dict.
+        workers: enable ``--workers`` with this int default; excluded from the cache key.
+        title: enable ``--title``.
+        dims: enable ``--dims LAT,LON``, naming the spatial axes for input validation and the
+            output union check; the body passes it to ``validate_type`` (WSK103).
+        time_dim: enable ``--time-dim``; a string sets its default.
+        extra_args: a sequence of ``add_argument`` calls, one tuple each -- leading strings
+            are the flags (or a positional's name), an optional trailing dict is argparse's
+            own keywords, verbatim. Dests are the ones argparse derives, must be unique, and
+            may not reuse a name the decorator resolves itself.
+        mutex_groups: group name to its member dests, or to ``{"args": (...), "required":
+            True}``; each becomes an argparse mutually exclusive group.
+        latest_resolver: ``callable(args) -> date`` resolving the ``latest`` token, invoked
+            lazily and at most once per run.
+        streaming: the function is a generator of per-period datasets, written then appended.
+        cache: ``False`` skips the cache check -- the function runs and the output is
+            rewritten every invocation, provenance still stamped.
+        hash_input: ``False`` defers the input's content hash until after the cheap check.
+        completeness_probe: ``callable(Path) -> bool`` confirming a candidate cache hit reads
+            back; receives the output store's path.
+        validate_args: ``callable(args)`` validating arguments before the cache check.
+        normalize_args: ``callable(dict) -> dict`` canonicalizing the recorded entry args.
+        exclude_args: dests dropped from the recorded entry args.
+        preserve_order: dests whose list ORDER is data, exempt from the entry-arg sort.
+        reference_args: dests holding secondary store paths, content-hashed into the entry's
+            ``reference_inputs``.
+        history_labels: per-input suffix for a PNG's embedded history keys (defaults to
+            ``input_names``).
+        write_encoding: ``callable(ds)`` setting write encodings, after the encoding clear.
+        post_write: ``callable(path)`` run after the artifact is written and before the
+            ``Wrote:`` line; raising a ``SkillError`` fails the run.
+        append_dim: the dim a streaming write appends along.
+        savefig_kwargs: extends the PNG ``savefig`` call (default ``{"dpi": 150}``).
+        software: the ``Software`` key stamped into a PNG's metadata.
+
+    Raises:
+        ValueError: the declaration is malformed -- an unknown envelope type, a list
+            ``output_type``, colliding or unknown dests, a toggle whose value is not one of
+            its modes, or a combination the decorator cannot build a parser from.
     """
     input_types = _normalize_input_types(input_type)
     for declared in input_types:
-        # An input may declare alternatives with "|" (e.g. "gridded|forecast");
-        # every alternative must be a known envelope type, checked at import.
-        unknown = [t for t in (a.strip() for a in declared.split("|")) if t not in _envelope.TYPES]
+        # Every alternative an input allows must be a known envelope type,
+        # checked at import rather than at first run.
+        unknown = [t for t in declared if t not in _types.ALL]
         if unknown:
             raise ValueError(
-                f"unknown envelope type(s) {unknown} in input_type {declared!r}; "
-                f"valid types: {list(_envelope.TYPES)}"
+                f"unknown envelope type(s) {unknown} in input_type {input_type!r}; "
+                f"valid types: {list(_types.ALL)}"
             )
     if variadic_input and len(input_types) != 1:
         raise ValueError("variadic_input requires exactly one declared input type")
@@ -592,27 +522,29 @@ def weather_skill(
             raise ValueError(
                 "without input_names, input_help is a single help string for the --input flag"
             )
-    if input_paths and not input_types:
-        raise ValueError("input_paths=True requires a declared input_type")
     output_union = None
-    if isinstance(output_type, tuple | set | frozenset | list):
+    if isinstance(output_type, list):
+        # A list is the one-entry-per-input spelling, and a skill has one
+        # output; a union is a tuple, the same as on input_type.
+        raise ValueError(  # noqa: TRY004 -- every declaration error is a ValueError
+            f"output_type takes one type or a tuple of them, not a list: {output_type!r}"
+        )
+    if isinstance(output_type, tuple | set | frozenset):
         members = list(output_type)
         if not members:
             raise ValueError("a union output_type needs at least one envelope type")
-        bad = [t for t in members if t not in _ZARR_OUTPUT_TYPES]
+        bad = [t for t in members if t not in _types.ALL]
         if bad:
             raise ValueError(
                 f"a union output_type may hold only zarr envelope types "
-                f"{list(_ZARR_OUTPUT_TYPES)}; got {bad}"
+                f"{list(_types.ALL)}; got {bad}"
             )
         output_union = tuple(dict.fromkeys(members))
         zarr_output = True
-    elif output_type not in (None, PNG, SAME, *_ZARR_OUTPUT_TYPES):
+    elif output_type not in (None, _types.PNG, *_types.ALL):
         raise ValueError(f"unknown output_type {output_type!r}")
     else:
-        zarr_output = output_type in (SAME, *_ZARR_OUTPUT_TYPES)
-    if output_type == SAME and not input_types:
-        raise ValueError('output_type="same" requires at least one declared zarr input')
+        zarr_output = output_type in _types.ALL
     if streaming and not zarr_output:
         raise ValueError("streaming requires a zarr output_type")
     if cache is False and not zarr_output:
@@ -626,9 +558,9 @@ def weather_skill(
     start_cfg = _normalize_date_toggle("start_time", start_time)
     end_cfg = _normalize_date_toggle("end_time", end_time)
     date_cfg = _normalize_date_toggle("date", date, extra_keys=("context",))
-    bbox_cfg = _normalize_mode_toggle("bbox", bbox, ("optional", "required"))
+    bbox_cfg = _normalize_mode_toggle("bbox", bbox, (_types.OPTIONAL, _types.REQUIRED))
     variable_cfg = _normalize_mode_toggle(
-        "variable", variable, ("single", "repeat"), extra_keys=("required",)
+        "variable", variable, (_types.SINGLE, _types.REPEAT), extra_keys=("required",)
     )
     workers_cfg = _normalize_workers_toggle(workers)
     if (start_cfg is None) != (end_cfg is None):
@@ -644,18 +576,31 @@ def weather_skill(
         reserved_dests.add("date")
     if bbox_cfg is not None:
         reserved_dests.add("bbox")
-    if input_paths:
-        reserved_dests.add("input_paths")
-    collisions = sorted(reserved_dests & set(extra_args or {}))
+    # Every argument reaches the function under one key, so the dests argparse
+    # derives must not collide with each other or with a standard parameter's.
+    extra_specs = list(extra_args or ())
+    extra_dests = [_arg_dest(spec) for spec in extra_specs]
+    duplicates = sorted({d for d in extra_dests if extra_dests.count(d) > 1})
+    if duplicates:
+        raise ValueError(f"extra_args declares dest(s) {duplicates} more than once")
+    specs_by_dest = dict(zip(extra_dests, extra_specs, strict=True))
+    collisions = sorted(reserved_dests & set(extra_dests))
     if collisions:
         raise ValueError(
             f"extra_args dest(s) {collisions} collide with standard parameter names "
             "the decorator resolves and passes itself; rename the extra argument(s)"
         )
+    orderable = set(extra_dests) | {"variable"}
+    unknown_preserved = sorted(set(preserve_order) - orderable)
+    if unknown_preserved:
+        raise ValueError(
+            f"preserve_order names {unknown_preserved}, which are not list-valued "
+            f"dests of this skill; expected some of {sorted(orderable)}"
+        )
     png_labels = history_labels if history_labels is not None else input_names
-    if output_type == PNG and not input_types:
-        raise ValueError('output_type="png" requires at least one declared zarr input')
-    if output_type == PNG and len(input_types) > 1:
+    if output_type == _types.PNG and not input_types:
+        raise ValueError("a png output_type requires at least one declared zarr input")
+    if output_type == _types.PNG and len(input_types) > 1:
         if png_labels is None or len(png_labels) != len(input_types):
             raise ValueError("a multi-input PNG skill must declare one history label per input")
         if len(set(png_labels)) != len(png_labels):
@@ -667,8 +612,7 @@ def weather_skill(
     input_dests = list(input_names) if input_names else (["input"] if input_types else [])
     input_dests = [d.replace("-", "_") for d in input_dests]
 
-    group_required, dest_to_group = _normalize_mutex_groups(mutex_groups, extra_args)
-    hit_label = cache_hit_label if cache_hit_label is not None else name
+    group_required, dest_to_group = _normalize_mutex_groups(mutex_groups, specs_by_dest)
 
     # Per-hook run-context opt-in, resolved once at declaration time.
     resolver_wants_ctx = latest_resolver is not None and _wants_context(latest_resolver)
@@ -680,7 +624,7 @@ def weather_skill(
 
     def decorate(fn):
         fn_wants_ctx = _wants_context(fn)
-        if fn_wants_ctx and "context" in (extra_args or {}):
+        if fn_wants_ctx and "context" in extra_dests:
             raise ValueError(
                 "extra_args may not use the dest 'context' when the wrapped function "
                 "declares a context parameter (the run context would clobber it)"
@@ -745,11 +689,11 @@ def weather_skill(
         if start_cfg is not None:
             parser.add_argument("--start", **_date_toggle_kwargs(start_cfg, _START_HELP))
         if end_cfg is not None:
-            parser.add_argument("--end", **_date_toggle_kwargs(end_cfg, _END_HELP))
+            parser.add_argument("--end", **_date_toggle_kwargs(end_cfg, _END_HELP, grammar=False))
         if date_cfg is not None:
             parser.add_argument("--date", **_date_toggle_kwargs(date_cfg, _DATE_HELP))
         if bbox_cfg is not None:
-            required = bbox_cfg["mode"] == "required"
+            required = bbox_cfg["mode"] == _types.REQUIRED
             default_help = _BBOX_REQUIRED_HELP if required else _BBOX_OPTIONAL_HELP
             kwargs = {"help": bbox_cfg.get("help", default_help)}
             if required:
@@ -759,7 +703,7 @@ def weather_skill(
             parser.add_argument("--bbox", **kwargs)
         if variable_cfg is not None:
             kwargs = {}
-            if variable_cfg["mode"] == "repeat":
+            if variable_cfg["mode"] == _types.REPEAT:
                 kwargs.update(action="append", default=None)
             if "help" in variable_cfg:
                 kwargs["help"] = variable_cfg["help"]
@@ -794,28 +738,25 @@ def weather_skill(
             group_name: parser.add_mutually_exclusive_group(required=required)
             for group_name, required in group_required.items()
         }
-        for dest, spec in (extra_args or {}).items():
+        for dest, spec in specs_by_dest.items():
             target = groups.get(dest_to_group.get(dest), parser)
-            _add_extra_argument(target, dest, spec)
+            names, kwargs = _split_arg_spec(spec)
+            target.add_argument(*names, **kwargs)
         return parser
 
     def _execute(fn, args, fn_wants_ctx):
-        context = RunContext(
-            args=args,
-            output_path=Path(args.output) if output_type is not None else None,
-        )
+        context = RunContext(args=args)
         if workers_cfg is not None and args.workers is not None and args.workers < 1:
             raise UsageError("--workers must be >= 1.")
         if validate_args is not None:
             _call_hook(validate_args, args, wants_context=validate_wants_ctx, context=context)
 
         paths = _input_paths(args)
-        context.input_paths = list(paths)
         for p in paths:
             if not p.exists():
                 raise UsageError(f"{p} not found.")
 
-        out = context.output_path
+        out = Path(args.output) if output_type is not None else None
         if zarr_output:
             _overlap_guard(paths, out, args)
 
@@ -851,7 +792,7 @@ def weather_skill(
                 if log_line is not None:
                     print(log_line, file=sys.stderr)
                 params["start_time"], params["end_time"] = start_d, end_d
-                context.start_time, context.end_time = start_d, end_d
+                context.start_time = start_d
                 resolved_dates["start"] = start_d.isoformat()
                 resolved_dates["end"] = end_d.isoformat()
             elif args.start is not None or args.end is not None:
@@ -867,7 +808,6 @@ def weather_skill(
                 if log_line is not None:
                     print(log_line, file=sys.stderr)
                 params["date"] = date_d
-                context.date = date_d
                 resolved_dates["date"] = date_d.isoformat()
             else:
                 params["date"] = None
@@ -881,32 +821,32 @@ def weather_skill(
             params["dims"] = args.dims
         if time_dim:
             params["time_dim"] = args.time_dim
-        for dest in extra_args or {}:
+        for dest in extra_dests:
             params[dest] = getattr(args, dest)
-        if input_paths:
-            params["input_paths"] = list(paths)
-        if fn_wants_ctx:
-            params["context"] = context
+        # The run context stays a separate opt-in keyword, never a dict entry.
+        ctx_kwargs = {"context": context} if fn_wants_ctx else {}
 
         if output_type is None:
-            fn(**params)
+            # No inputs to pass: a no-artifact skill may not declare any.
+            _call(fn, [], params, ctx_kwargs)
             return
 
         entry_args = _entry_args(args, resolved_dates, context)
 
-        if output_type == PNG:
-            _run_png(fn, args, paths, out, entry_args, params, context)
+        if output_type == _types.PNG:
+            _run_png(fn, args, paths, out, entry_args, params, ctx_kwargs, context)
             return
-        _run_zarr(fn, args, paths, out, entry_args, params, context)
+        _run_zarr(fn, args, paths, out, entry_args, params, ctx_kwargs, context)
 
     def _post_write(out, context):
         """Run the post-write hook, after the artifact write and before the Wrote line."""
         if post_write is not None:
             _call_hook(post_write, out, wants_context=post_wants_ctx, context=context)
 
-    def _check_output_union(ds):
+    def _check_output_union(ds, args):
         """Validate a returned dataset's detected shape against a union output_type."""
-        detected = _envelope.detect_type(ds)
+        # The --dims override names the run's spatial axes on the way out too.
+        detected = _envelope.detect_type(ds, args.dims if dims else None)
         if detected not in output_union:
             raise DataError(
                 f"{name} returned a {detected} envelope, but its declared "
@@ -957,6 +897,7 @@ def weather_skill(
             raw = _call_hook(
                 normalize_args, raw, wants_context=normalize_wants_ctx, context=context
             )
+        raw = _order_lists(raw, preserve_order)
         # Canonicalize through a JSON round-trip so the compared entry equals
         # the stamped entry's decoded form: a tuple from a normalize hook
         # serializes as a list, and without the round-trip the stamped store
@@ -982,21 +923,29 @@ def weather_skill(
                 raise UsageError(
                     f"{p} is not a readable Zarr store ({type(exc).__name__}: {exc})."
                 ) from None
-            # An input may declare alternatives with "|" (e.g. "gridded|forecast").
             _envelope.validate_input(
                 ds,
-                [t.strip() for t in declared.split("|")],
+                list(declared),
                 str(p),
                 dims=dims_override,
                 time_dim=time_dim_override,
             )
+            # The path rides on the dataset rather than a parallel argument,
+            # so it cannot desync from the inputs; stamp_zarr strips it before
+            # any write.
+            ds.attrs[_provenance.INPUT_PATH_ATTR] = str(p)
             datasets.append(ds)
         return datasets
 
-    def _call(fn, datasets, params):
+    def _call(fn, datasets, params, ctx_kwargs):
+        # Datasets stay positional; every argument arrives as one namespace
+        # after them. It is built HERE, from params, and never from the parsed
+        # namespace: that one keeps the raw --bbox string and the raw date
+        # tokens, and _entry_args records it verbatim.
+        arguments = argparse.Namespace(**params)
         if variadic_input:
-            return fn(datasets, **params)
-        return fn(*datasets, **params)
+            return fn(datasets, arguments, **ctx_kwargs)
+        return fn(*datasets, arguments, **ctx_kwargs)
 
     def _reference_inputs(args):
         refs = []
@@ -1009,7 +958,7 @@ def weather_skill(
                 refs.append(ref_p)
         return _provenance.reference_ref(refs) if refs else None
 
-    def _run_png(fn, args, paths, out, entry_args, params, context):
+    def _run_png(fn, args, paths, out, entry_args, params, ctx_kwargs, context):
         if out.is_dir():
             raise UsageError(
                 f"--output {args.output} exists and is a directory; the png "
@@ -1035,7 +984,7 @@ def weather_skill(
             chains.append((label, upstream + [entry]))
 
         datasets = _open_inputs(paths, args)
-        fig, _, summary = _split_extras(_call(fn, datasets, params), allow_override=False)
+        fig, _ = _split_extras(_call(fn, datasets, params, ctx_kwargs), allow_override=False)
 
         out.parent.mkdir(parents=True, exist_ok=True)
         fig.savefig(
@@ -1052,9 +1001,9 @@ def weather_skill(
         else:
             plt.close(fig)
         _post_write(out, context)
-        print(_wrote_line(args.output, "", summary), file=sys.stderr)
+        print(_wrote_line(args.output, ""), file=sys.stderr)
 
-    def _run_zarr(fn, args, paths, out, entry_args, params, context):
+    def _run_zarr(fn, args, paths, out, entry_args, params, ctx_kwargs, context):
         # The provenance entry is computed BEFORE the function runs: the entry
         # is the cache key, and a hit returns without calling the function or
         # touching the store.
@@ -1072,7 +1021,7 @@ def weather_skill(
             entry = _provenance.build_entry(name, version, entry_args, None, reference_inputs)
             if cache and _provenance.cache_hit(out, entry, fetcher=True, completeness_probe=probe):
                 print(
-                    f"Cache hit: {args.output} already matches requested params; skipping {hit_label}.",
+                    f"Cache hit: {args.output} already matches requested params; skipping {name}.",
                     file=sys.stderr,
                 )
                 return
@@ -1089,7 +1038,7 @@ def weather_skill(
                 out, entry, upstream, compare_hash=hash_input, completeness_probe=probe
             ):
                 print(
-                    f"Cache hit: {args.output} already matches requested params; skipping {hit_label}.",
+                    f"Cache hit: {args.output} already matches requested params; skipping {name}.",
                     file=sys.stderr,
                 )
                 return
@@ -1115,7 +1064,7 @@ def weather_skill(
             )
             if cache and _provenance.cache_hit(out, entry, upstream, completeness_probe=probe):
                 print(
-                    f"Cache hit: {args.output} already matches requested params; skipping {hit_label}.",
+                    f"Cache hit: {args.output} already matches requested params; skipping {name}.",
                     file=sys.stderr,
                 )
                 return
@@ -1128,22 +1077,22 @@ def weather_skill(
                     )
 
         datasets = _open_inputs(paths, args)
-        result = _call(fn, datasets, params)
+        result = _call(fn, datasets, params, ctx_kwargs)
 
         if streaming:
             _write_streaming(result, out, upstream, entry, args, context)
             return
 
-        result, override, summary = _split_extras(result)
+        result, override = _split_extras(result)
         if output_union is not None:
-            _check_output_union(result)
+            _check_output_union(result, args)
         if override is not None:
             entry = {**entry, "args": {**entry["args"], **override.args}}
         # Carry the first input's attrs (source metadata, upstream history)
         # under the function's own attrs, then stamp the new chain over both.
         if datasets:
             result.attrs = {**datasets[0].attrs, **result.attrs}
-        _provenance.stamp_zarr(result, upstream + [entry], source=source)
+        _provenance.stamp_zarr(result, upstream + [entry])
         if write_encoding is not None:
             _call_hook(write_encoding, result, wants_context=encoding_wants_ctx, context=context)
         _remove_existing(out)
@@ -1165,7 +1114,7 @@ def weather_skill(
                 )
             raise
         _post_write(out, context)
-        print(_wrote_line(args.output, f"{dict(result.sizes)}", summary), file=sys.stderr)
+        print(_wrote_line(args.output, f"{dict(result.sizes)}"), file=sys.stderr)
 
     def _write_streaming(gen, out, upstream, entry, args, context):
         # First write is mode="w"; later periods append along append_dim.
@@ -1178,20 +1127,16 @@ def weather_skill(
         # flips and so can never be deleted by the rollback.
         store_created = False
         total = 0
-        summary = None
         written_entry = None
         try:
             for item in gen:
                 if isinstance(item, EntryOverride):
                     entry = {**entry, "args": {**entry["args"], **item.args}}
                     continue
-                if isinstance(item, WroteSummary):
-                    summary = item
-                    continue
                 piece = item
                 if output_union is not None:
-                    _check_output_union(piece)
-                _provenance.stamp_zarr(piece, upstream + [entry], source=source)
+                    _check_output_union(piece, args)
+                _provenance.stamp_zarr(piece, upstream + [entry])
                 if write_encoding is not None:
                     _call_hook(
                         write_encoding, piece, wants_context=encoding_wants_ctx, context=context
@@ -1221,18 +1166,25 @@ def weather_skill(
             # the last stamp; correct the persisted chain in place.
             _provenance.restamp_zarr(out, upstream + [entry])
         _post_write(out, context)
-        print(_wrote_line(args.output, f"{append_dim}={total}", summary), file=sys.stderr)
+        print(_wrote_line(args.output, f"{append_dim}={total}"), file=sys.stderr)
 
     return decorate
 
 
 def _normalize_input_types(input_type):
-    """Normalize the ``input_type`` declaration to a list of per-input types."""
+    """Normalize the ``input_type`` declaration to one allowed-type tuple per input.
+
+    A single type, or a tuple/set of them, declares one input -- the tuple
+    being that input's allowed set. A list declares one entry per input, each
+    entry itself a type or a tuple/set of them.
+    """
     if input_type is None:
         return []
     if isinstance(input_type, str):
-        return [t.strip() for t in input_type.split(",")]
-    return list(input_type)
+        return [(input_type,)]
+    if isinstance(input_type, tuple | set | frozenset):
+        return [tuple(input_type)]
+    return [(entry,) if isinstance(entry, str) else tuple(entry) for entry in input_type]
 
 
 @dataclass(frozen=True)
@@ -1255,7 +1207,7 @@ class StandardParameter:
       the flags here are the default ``--input``/``-i`` surface.
     - ``arity`` -- ``"single"`` for one value per invocation, or
       ``"single_or_append"`` when a declaration mode selects between one value
-      and a repeatable flag (``variable="repeat"``; a multi-input or variadic
+      and a repeatable flag (``variable=types.REPEAT``; a multi-input or variadic
       ``--input``).
     - ``type_name`` -- the argparse ``type`` callable's name when the flag
       converts its value (``--workers`` parses through ``int``), else ``None``

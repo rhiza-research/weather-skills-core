@@ -9,23 +9,35 @@ and output writing (Zarr, streaming Zarr appends, or PNG figures).
 A skill declares its surface and keeps only its domain logic:
 
 ```python
+from weather_skills_core import types, weather_skill
+
+_SKILL_VERSION = "0.1.0"
+
+
 @weather_skill(
     "my-fancy-skill",
-    "0.1.0",
-    input_type="forecast, station",
-    output_type="forecast",
+    _SKILL_VERSION,
+    input_type=[types.FORECAST, types.STATION],
+    output_type=types.FORECAST,
+    input_names=["forecast", "stations"],
     start_time=True,
     end_time=True,
-    extra_args={"corr_coefficient": int, "interpolation_factor": {int, range(0, 2)}},
+    extra_args=[
+        ("--corr-coefficient", {"type": int, "required": True}),
+        ("--interpolation-factor", {"type": int, "choices": [0, 1, 2]}),
+    ],
 )
-def my_fancy_skill(
-    forecast_ds, station_ds, start_time, end_time, corr_coefficient, interpolation_factor
-): ...
+def my_fancy_skill(forecast_ds, station_ds, args):
+    """Correct a forecast against station observations."""
+    window = forecast_ds.sel(time=slice(args.start_time, args.end_time))
+    ...
+    return corrected_ds
 ```
 
-The wrapped function receives the input dataset(s) and resolved arguments and
-returns the output; the decorator does everything else, including skipping the
-call entirely on a cache hit.
+The wrapped function receives the opened input dataset(s) positionally, then
+one namespace holding every argument under its dest, and returns the output;
+the decorator does everything else, including skipping the call entirely on a
+cache hit. `skills/weather-skill-authoring/SKILL.md` is the authoring guide.
 
 ## Install
 

@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from weather_skills_core import types
 from weather_skills_core.lint.extract import (
     extract_script,
     extract_skill,
@@ -33,7 +34,9 @@ class TestDeclarationExtraction:
         assert decl.version_constant and decl.version_passed
         assert decl.has_input and decl.has_output
         assert decl.input_arity == "single"
-        assert decl.toggles["bbox"] == "optional"
+        # The fixture declares the toggle as types.OPTIONAL; extraction
+        # resolves the constant rather than recording it as dynamic.
+        assert decl.toggles["bbox"] == types.OPTIONAL
         shape = decl.extra_args["smoothing"]
         assert shape.flags == ("--smoothing",)
         assert shape.type_name == "int"
@@ -55,15 +58,15 @@ class TestDeclarationExtraction:
             @weather_skill(
                 "some-skill",
                 _SKILL_VERSION,
-                extra_args={
-                    "sender": {"flag": "--from", "required": True},
-                    "item": {"aliases": ["-x"], "repeat": True},
-                    "attach": {"nargs": "*", "default": []},
-                    "code": {"positional": True},
-                    "verbose": {"action": "store_true"},
-                },
+                extra_args=[
+                    ("--from", {"dest": "sender", "required": True}),
+                    ("--item", "-x", {"action": "append"}),
+                    ("--attach", {"nargs": "*", "default": []}),
+                    ("code",),
+                    ("--verbose", {"action": "store_true"}),
+                ],
             )
-            def some_skill(sender, item, attach, code, verbose):
+            def some_skill(args):
                 """Doc."""
             ''',
         )
@@ -76,7 +79,28 @@ class TestDeclarationExtraction:
         assert decl.extra_args["code"].positional and decl.extra_args["code"].flags == ()
         assert decl.extra_args["verbose"].arity == "store_true"
 
-    def test_bare_type_tuple_and_constraint_set_specs(self, tmp_path):
+    def test_dashed_positional_dest_matches_argparse(self, tmp_path):
+        # The decorator computes the same dest; the two must not diverge, or
+        # the linter reports a flag under a name the runtime never uses.
+        script, skill_dir = write_script(
+            tmp_path,
+            '''
+            """Doc."""
+            from weather_skills_core import weather_skill
+
+            _SKILL_VERSION = "0.1.0"
+
+
+            @weather_skill("some-skill", _SKILL_VERSION, extra_args=[("target-grid",)])
+            def some_skill(args):
+                """Doc."""
+            ''',
+        )
+        decl = extract_script(script, skill_dir)
+        assert list(decl.extra_args) == ["target-grid"]
+        assert decl.extra_args["target-grid"].positional
+
+    def test_typed_and_choice_kwargs(self, tmp_path):
         script, skill_dir = write_script(
             tmp_path,
             '''
@@ -89,14 +113,14 @@ class TestDeclarationExtraction:
             @weather_skill(
                 "some-skill",
                 _SKILL_VERSION,
-                extra_args={
-                    "factor": int,
-                    "flagged": bool,
-                    "mode": ("fast", "slow"),
-                    "level": {int, range(0, 3)},
-                },
+                extra_args=[
+                    ("--factor", {"type": int}),
+                    ("--flagged", {"action": "store_true"}),
+                    ("--mode", {"choices": ("fast", "slow")}),
+                    ("--level", {"type": int, "choices": (0, 1, 2)}),
+                ],
             )
-            def some_skill(factor, flagged, mode, level):
+            def some_skill(args):
                 """Doc."""
             ''',
         )
@@ -124,11 +148,11 @@ class TestDeclarationExtraction:
                 "some-skill",
                 _SKILL_VERSION,
                 workers={"default": DEFAULT, "help": f"threads ({DEFAULT})"},
-                extra_args={
-                    "pick": {"choices": OPTIONS, "help": "static"},
-                },
+                extra_args=[
+                    ("--pick", {"choices": OPTIONS, "help": "static"}),
+                ],
             )
-            def some_skill(workers, pick):
+            def some_skill(args):
                 """Doc."""
             ''',
         )
@@ -144,7 +168,7 @@ class TestDeclarationExtraction:
             tmp_path,
             '''
             """Doc."""
-            from weather_skills_core import weather_skill
+            from weather_skills_core import types, weather_skill
 
             _SKILL_VERSION = "0.1.0"
 
@@ -152,9 +176,9 @@ class TestDeclarationExtraction:
             @weather_skill(
                 "some-skill",
                 _SKILL_VERSION,
-                input_type=["any", "any"],
+                input_type=[types.ALL, types.ALL],
                 input_names=["forecast", "mclimate"],
-                output_type="png",
+                output_type=types.PNG,
             )
             def some_skill(a, b):
                 """Doc."""
@@ -194,7 +218,7 @@ class TestMalformedDeclarationHardening:
         assert decl.has_input
         assert any("input_type" in note and "arity unknown" in note for note in decl.notes)
 
-    def test_non_string_flag_and_string_aliases_are_noted_and_ignored(self, tmp_path):
+    def test_malformed_entries_are_noted_and_skipped(self, tmp_path):
         script, skill_dir = write_script(
             tmp_path,
             '''
@@ -207,25 +231,24 @@ class TestMalformedDeclarationHardening:
             @weather_skill(
                 "some-skill",
                 _SKILL_VERSION,
-                extra_args={
-                    "bad_flag": {"flag": 7},
-                    "bad_aliases": {"aliases": "-x"},
-                    "bad_choices": {"choices": 3},
-                },
+                extra_args=[
+                    (7, {"help": "a non-string flag"}),
+                    ("--bad-choices", {"choices": 3}),
+                    ("--fine",),
+                ],
             )
-            def some_skill(bad_flag, bad_aliases, bad_choices):
+            def some_skill(args):
                 """Doc."""
             ''',
         )
         decl = extract_script(script, skill_dir)
         assert decl.error is None
-        # A non-string flag falls back to the derived default; string aliases
-        # are dropped rather than spread into single characters.
-        assert decl.extra_args["bad_flag"].flags == ("--bad-flag",)
-        assert decl.extra_args["bad_aliases"].flags == ("--bad-aliases",)
+        # An unreadable entry is skipped and marks the flag set incomplete;
+        # the readable ones around it still extract.
+        assert set(decl.extra_args) == {"bad_choices", "fine"}
+        assert decl.extra_args_dynamic is True
         assert decl.extra_args["bad_choices"].choices is None
-        assert any("'flag' is not a string" in note for note in decl.notes)
-        assert any("'aliases' is not a list" in note for note in decl.notes)
+        assert any("non-literal flag" in note for note in decl.notes)
         assert any("'choices' is not a list" in note for note in decl.notes)
 
     def test_extra_args_name_reference_marks_dynamic(self, tmp_path):
@@ -264,7 +287,7 @@ class TestMalformedDeclarationHardening:
             @weather_skill(
                 "some-skill",
                 _SKILL_VERSION,
-                extra_args={**BASE, "extra": {"type": str}},
+                extra_args=[*BASE, ("--extra", {"type": str})],
             )
             def some_skill(pick, extra):
                 """Doc."""

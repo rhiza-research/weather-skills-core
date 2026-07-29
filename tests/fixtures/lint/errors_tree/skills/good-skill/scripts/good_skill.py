@@ -6,7 +6,7 @@
 # ///
 """Lint fixture: a conformant skill next to unanalyzable siblings. Never executed."""
 
-from weather_skills_core import weather_skill
+from weather_skills_core import types, weather_skill
 
 _SKILL_VERSION = "0.1.0"
 
@@ -14,10 +14,10 @@ _SKILL_VERSION = "0.1.0"
 @weather_skill(
     "good-skill",
     _SKILL_VERSION,
-    input_type="any",
-    output_type="same",
+    input_type=types.ALL,
+    output_type=types.ALL,
 )
-def good_skill(ds):
+def good_skill(ds, args):
     """Lint fixture; never executed."""
     return ds
 

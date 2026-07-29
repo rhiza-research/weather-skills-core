@@ -38,6 +38,119 @@ class TestCleanSkill:
         assert all("no corpus beyond the target" in s["reason"] for s in report.skipped_rules)
 
 
+class TestSourceRule:
+    """WSK102 keys on fetcher shape: a zarr envelope written from no zarr input."""
+
+    def _skill(self, tmp_path, name, decl, sig="args", body="    return xr.Dataset()\n"):
+        skill = tmp_path / name
+        (skill / "scripts").mkdir(parents=True)
+        (skill / "scripts" / "run.py").write_text(
+            _PEP723
+            + "import xarray as xr\n"
+            + "from weather_skills_core import set_source, types, weather_skill\n"
+            + '_SKILL_VERSION = "0.1.0"\n'
+            + f"@weather_skill({name!r}, _SKILL_VERSION, {decl})\n"
+            + f"def run({sig}):\n"
+            + body
+        )
+        (skill / "SKILL.md").write_text(_manifest([]))
+        return skill
+
+    def codes(self, report):
+        return [f.rule for f in report.findings]
+
+    def test_fetcher_without_a_source_fires(self, tmp_path):
+        skill = self._skill(tmp_path, "toy-fetch", "output_type=types.GRIDDED")
+        report = run_lint(skill, [])
+        assert "WSK102" in self.codes(report)
+        assert "never calls set_source()" in next(
+            f.message for f in report.findings if f.rule == "WSK102"
+        )
+
+    def test_fetcher_calling_set_source_is_clean(self, tmp_path):
+        skill = self._skill(
+            tmp_path,
+            "toy-fetch",
+            "output_type=types.GRIDDED",
+            body='    return set_source(xr.Dataset(), "toy")\n',
+        )
+        assert "WSK102" not in self.codes(run_lint(skill, []))
+
+    def test_transform_is_not_fetcher_shaped(self, tmp_path):
+        # It inherits the attr from its input, so it owes no source of its own.
+        skill = self._skill(
+            tmp_path,
+            "toy-transform",
+            "input_type=types.ALL, output_type=types.ALL",
+            sig="ds, args",
+            body="    return ds\n",
+        )
+        assert "WSK102" not in self.codes(run_lint(skill, []))
+
+    def test_png_and_no_artifact_skills_are_not_fetcher_shaped(self, tmp_path):
+        png = self._skill(
+            tmp_path,
+            "toy-plot",
+            "input_type=types.ALL, output_type=types.PNG",
+            sig="ds, args",
+            body="    import matplotlib.pyplot as plt\n\n    return plt.figure()\n",
+        )
+        assert "WSK102" not in self.codes(run_lint(png, []))
+        bare = self._skill(tmp_path, "toy-report", 'extra_args=[("--to",)]', body="    pass\n")
+        assert "WSK102" not in self.codes(run_lint(bare, []))
+
+    def test_union_of_zarr_types_is_still_fetcher_shaped(self, tmp_path):
+        skill = self._skill(tmp_path, "toy-fetch", "output_type=(types.GRIDDED, types.FORECAST)")
+        assert "WSK102" in self.codes(run_lint(skill, []))
+
+
+class TestValidateTypeDimsRule:
+    """WSK103 keys on the pair: a dims=True declaration and a dims-less assertion."""
+
+    def _skill(self, tmp_path, decl, body):
+        skill = tmp_path / "toy-transform"
+        (skill / "scripts").mkdir(parents=True)
+        (skill / "scripts" / "run.py").write_text(
+            _PEP723
+            + "from weather_skills_core import types, validate_type, weather_skill\n"
+            + '_SKILL_VERSION = "0.1.0"\n'
+            + "@weather_skill('toy-transform', _SKILL_VERSION, input_type=types.ALL, "
+            + f"output_type=types.ALL, {decl})\n"
+            + "def run(ds, args):\n"
+            + body
+        )
+        (skill / "SKILL.md").write_text(_manifest(["--dims"]))
+        return skill
+
+    def codes(self, tmp_path, decl, body):
+        return [f.rule for f in run_lint(self._skill(tmp_path, decl, body), []).findings]
+
+    def test_dims_skill_asserting_without_the_override_fires(self, tmp_path):
+        codes = self.codes(tmp_path, "dims=True", "    validate_type(ds, ds)\n    return ds\n")
+        assert "WSK103" in codes
+
+    def test_positional_dims_is_clean(self, tmp_path):
+        codes = self.codes(
+            tmp_path, "dims=True", '    validate_type(ds, ds, args["dims"])\n    return ds\n'
+        )
+        assert "WSK103" not in codes
+
+    def test_keyword_dims_is_clean(self, tmp_path):
+        codes = self.codes(
+            tmp_path, "dims=True", '    validate_type(ds, ds, dims=args["dims"])\n    return ds\n'
+        )
+        assert "WSK103" not in codes
+
+    def test_skill_without_the_toggle_owes_nothing(self, tmp_path):
+        # No --dims flag, so there is no override the assertion could ignore.
+        codes = self.codes(tmp_path, "title=True", "    validate_type(ds, ds)\n    return ds\n")
+        assert "WSK103" not in codes
+
+    def test_dims_skill_making_no_assertion_is_clean(self, tmp_path):
+        codes = self.codes(tmp_path, "dims=True", "    return ds\n")
+        assert "WSK103" not in codes
+
+
 class TestShadowRule:
     def test_each_shadowing_extra_arg_fires_wsk101(self):
         report = run_lint(FIXTURES / "shadow_tree", [])
@@ -79,7 +192,7 @@ class TestShadowRule:
             tmp_path,
             name="no-artifact",
             decorator_head="",
-            extra_args_src="{'input': {'help': 'x'}, 'output': {'help': 'y'}}",
+            extra_args_src="[('--input', {'help': 'x'}), ('--output', {'help': 'y'})]",
         )
         report = run_lint(skill, [])
         shadow = [f for f in report.findings if f.rule == "WSK101"]
@@ -92,7 +205,7 @@ class TestShadowRule:
             tmp_path,
             name="artifact",
             decorator_head="output_type='gridded', ",
-            extra_args_src="{'input': {'help': 'x'}}",
+            extra_args_src="[('--input', {'help': 'x'})]",
         )
         report = run_lint(skill, [])
         shadow = [f for f in report.findings if f.rule == "WSK101"]
@@ -105,7 +218,7 @@ class TestShadowRule:
             tmp_path,
             name="no-artifact-variable",
             decorator_head="",
-            extra_args_src="{'variable': {'help': 'x'}}",
+            extra_args_src="[('--variable', {'help': 'x'})]",
         )
         report = run_lint(skill, [])
         shadow = [f for f in report.findings if f.rule == "WSK101"]
@@ -217,11 +330,11 @@ _PEP723 = '# /// script\n# dependencies = ["weather-skills-core"]\n# ///\n'
 def _script(skill_name, func_name, extra_args_src):
     return (
         _PEP723
-        + "from weather_skills_core import weather_skill\n"
+        + "from weather_skills_core import types, weather_skill\n"
         + '_SKILL_VERSION = "0.1.0"\n'
-        + f"@weather_skill({skill_name!r}, _SKILL_VERSION, input_type='any', "
-        + f"output_type='same', extra_args={extra_args_src})\n"
-        + f"def {func_name}(ds):\n    return ds\n"
+        + f"@weather_skill({skill_name!r}, _SKILL_VERSION, input_type=types.ALL, "
+        + f"output_type=types.ALL, extra_args={extra_args_src})\n"
+        + f"def {func_name}(ds, args):\n    return ds\n"
     )
 
 
@@ -251,8 +364,8 @@ class TestMultiScriptSkill:
         skill = make_multi_script_skill(
             tmp_path,
             scripts={
-                "one.py": _script("one", "one", "{'shared': {'type': int, 'help': 'x'}}"),
-                "two.py": _script("two", "two", "{'shared': {'type': int, 'help': 'x'}}"),
+                "one.py": _script("one", "one", "[('--shared', {'type': int, 'help': 'x'})]"),
+                "two.py": _script("two", "two", "[('--shared', {'type': int, 'help': 'x'})]"),
             },
             manifest_flags=["--shared"],
         )
@@ -266,8 +379,8 @@ class TestMultiScriptSkill:
         skill = make_multi_script_skill(
             tmp_path,
             scripts={
-                "one.py": _script("one", "one", "{'foo': {'type': int, 'help': 'x'}}"),
-                "two.py": _script("two", "two", "{'bar': {'type': int, 'help': 'x'}}"),
+                "one.py": _script("one", "one", "[('--foo', {'type': int, 'help': 'x'})]"),
+                "two.py": _script("two", "two", "[('--bar', {'type': int, 'help': 'x'})]"),
             },
             manifest_flags=["--foo", "--bar"],
         )
@@ -280,8 +393,8 @@ class TestMultiScriptSkill:
         skill = make_multi_script_skill(
             tmp_path,
             scripts={
-                "one.py": _script("one", "one", "{'foo': {'type': int, 'help': 'x'}}"),
-                "two.py": _script("two", "two", "{'bar': {'type': int, 'help': 'x'}}"),
+                "one.py": _script("one", "one", "[('--foo', {'type': int, 'help': 'x'})]"),
+                "two.py": _script("two", "two", "[('--bar', {'type': int, 'help': 'x'})]"),
             },
             manifest_flags=["--foo", "--bar", "--ghost"],
         )
@@ -296,8 +409,8 @@ class TestMultiScriptSkill:
         skill = make_multi_script_skill(
             tmp_path,
             scripts={
-                "one.py": _script("dup", "one", "{'date': {'type': str, 'help': 'x'}}"),
-                "two.py": _script("dup", "two", "{'clean': {'type': int, 'help': 'x'}}"),
+                "one.py": _script("dup", "one", "[('--date', {'type': str, 'help': 'x'})]"),
+                "two.py": _script("dup", "two", "[('--clean', {'type': int, 'help': 'x'})]"),
             },
             manifest_flags=["--date", "--clean"],
         )
@@ -319,12 +432,12 @@ class TestMultiScriptSkill:
         scripts_dir.mkdir(parents=True)
         (scripts_dir / "one.py").write_text(
             _PEP723
-            + "from weather_skills_core import weather_skill\n"
+            + "from weather_skills_core import types, weather_skill\n"
             + '_SKILL_VERSION = "0.1.0"\n'
             + 'SHARED = {"foo": {"type": int}}\n'
-            + "@weather_skill('one', _SKILL_VERSION, input_type='any', "
-            + "output_type='same', extra_args=SHARED)\n"
-            + "def one(ds):\n    return ds\n"
+            + "@weather_skill('one', _SKILL_VERSION, input_type=types.ALL, "
+            + "output_type=types.ALL, extra_args=SHARED)\n"
+            + "def one(ds, args):\n    return ds\n"
         )
         (skill / "SKILL.md").write_text(_manifest(["--foo", "--bar", "--baz"]))
         report = run_lint(skill, [])
@@ -420,13 +533,13 @@ class TestSelectionEndToEnd:
 
 class TestScoreRubric:
     def test_warning_only_rule_scores_half_of_that_rule(self):
-        # shadow-skill: 4 applicable rules (no corpus), one rule at its
-        # warning floor -> (0.5 + 3) / 4 = 87.5, rounded to 88.
+        # shadow-skill: 6 applicable rules (no corpus), one rule at its
+        # warning floor -> (0.5 + 5) / 6 = 92.
         report = run_lint(FIXTURES / "shadow_tree", [])
-        assert score_of(report, "shadow-skill") == 88
+        assert score_of(report, "shadow-skill") == 92
 
     def test_cross_rules_excluded_from_the_denominator_when_skipped(self):
-        # Linted alone, clean-skill scores over the 4 per-skill rules only;
+        # Linted alone, clean-skill scores over the per-skill rules only;
         # skipped rules never count for or against it.
         report = run_lint(FIXTURES / "clean_tree" / "skills" / "clean-skill", [])
         assert score_of(report, "clean-skill") == 100

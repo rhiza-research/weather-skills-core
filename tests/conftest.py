@@ -23,6 +23,15 @@ def make_gridded(
     )
 
 
+def make_series(n_time=4, name="precip", start="2026-01-01"):
+    """A series envelope: a time axis and no spatial coords, as collapsing lat/lon leaves."""
+    times = np.arange(np.datetime64(start), np.datetime64(start) + np.timedelta64(n_time, "D"))
+    return xr.Dataset(
+        {name: (("time",), np.ones(n_time))},
+        coords={"time": times.astype("datetime64[ns]")},
+    )
+
+
 def make_forecast(n_number=3, n_step=4):
     data = np.ones((n_number, n_step, 2, 2))
     return xr.Dataset(

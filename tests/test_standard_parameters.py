@@ -2,7 +2,7 @@
 
 import pytest
 
-from weather_skills_core import standard_parameters, weather_skill
+from weather_skills_core import standard_parameters, types, weather_skill
 
 # A declaration enabling every standard toggle through its dict form (where one
 # exists), so the parser carries every standard flag with observable overrides.
@@ -20,13 +20,13 @@ DICT_CHOICES = {
 @weather_skill(
     "probe-all-toggles",
     "0.0.0",
-    output_type="gridded",
+    output_type=types.GRIDDED,
     start_time={"required": False, "help": DICT_HELP, "choices": DICT_CHOICES["start"]},
     end_time={"required": False, "help": DICT_HELP, "choices": DICT_CHOICES["end"]},
     date={"required": False, "help": DICT_HELP, "choices": DICT_CHOICES["date"]},
-    bbox={"mode": "optional", "help": DICT_HELP, "choices": DICT_CHOICES["bbox"]},
+    bbox={"mode": types.OPTIONAL, "help": DICT_HELP, "choices": DICT_CHOICES["bbox"]},
     variable={
-        "mode": "repeat",
+        "mode": types.REPEAT,
         "required": True,
         "help": DICT_HELP,
         "choices": DICT_CHOICES["variable"],
@@ -41,29 +41,29 @@ DICT_CHOICES = {
     dims=True,
     time_dim="time",
 )
-def probe_all_toggles(**params):
+def probe_all_toggles(args):
     """Probe declaration; never executed."""
 
 
 @weather_skill(
     "probe-io",
     "0.0.0",
-    input_type="any",
-    output_type="same",
-    variable="single",
+    input_type=types.ALL,
+    output_type=types.ALL,
+    variable=types.SINGLE,
 )
-def probe_io(ds, **params):
+def probe_io(ds, args):
     """Probe declaration; never executed."""
 
 
 @weather_skill(
     "probe-variadic",
     "0.0.0",
-    input_type="any",
-    output_type="same",
+    input_type=types.ALL,
+    output_type=types.ALL,
     variadic_input=True,
 )
-def probe_variadic(datasets, **params):
+def probe_variadic(datasets, args):
     """Probe declaration; never executed."""
 
 
@@ -99,7 +99,9 @@ class TestToggleSurface:
                 continue
             action = action_by_dest(parser, param.dest)
             if param.accepts_help:
-                assert action.help == DICT_HELP, param.name
+                # The declared help leads; a date flag then carries the
+                # decorator-appended grammar.
+                assert action.help.startswith(DICT_HELP), param.name
             else:
                 # No dict form: the decorator-owned help (or none) applies.
                 assert action.help != DICT_HELP, param.name
@@ -139,8 +141,8 @@ class TestToggleSurface:
             weather_skill(
                 "bad-bbox",
                 "0.0.0",
-                output_type="gridded",
-                bbox={"mode": "optional", "required": True},
+                output_type=types.GRIDDED,
+                bbox={"mode": types.OPTIONAL, "required": True},
             )
 
     def test_required_dict_key_honored_where_declared_accepted(self):

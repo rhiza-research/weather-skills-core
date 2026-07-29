@@ -303,9 +303,16 @@ class TestStampZarr:
         assert ds.attrs["weather_skills_history"] == json.dumps(chain, sort_keys=True)
         assert all(ds[v].encoding == {} for v in ds.variables)
 
-    def test_stamp_sets_source(self):
+    def test_set_source_names_the_data_product(self):
         ds = make_gridded()
-        provenance.stamp_zarr(ds, [], source="oisst")
+        assert provenance.set_source(ds, "oisst") is ds
+        assert ds.attrs["weather_skills_source"] == "oisst"
+
+    def test_stamp_leaves_a_body_set_source_alone(self):
+        # The fetcher sets it; the stamp must not clear or overwrite it, or it
+        # would never reach the written store.
+        ds = provenance.set_source(make_gridded(), "oisst")
+        provenance.stamp_zarr(ds, [])
         assert ds.attrs["weather_skills_source"] == "oisst"
 
     def test_stamp_leaves_unrelated_attrs_untouched(self):

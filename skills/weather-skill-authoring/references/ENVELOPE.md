@@ -19,9 +19,19 @@ A Zarr v3 store containing one or more data variables. Consumers also read Zarr 
 - 1-D coords `latitude(station_id)` and `longitude(station_id)`.
 - `time` dim as above.
 
+### Series envelope
+- No identifiable spatial dims — the shape left by collapsing `latitude` and `longitude` (e.g. `reduce --dim latitude --dim longitude`), by selecting a single row out of one of them, or by any source that carries no geography.
+- `time` dim as above; a series left by collapsing a forecast keeps its `step` axis and scalar `time` init coord. Other non-spatial dims (`number`, `level`) are preserved.
+
+### Detection
+
+A consumer classifies an input by shape, first match wins: a `station_id` dim is a station; without identifiable `latitude`/`longitude` coords it is a series; with them, a `step` dim plus a scalar `time` coord is a forecast and anything else is gridded. "Identifiable" means cf-xarray CF-attr resolution or the `lat`/`lon`/`y`/`x` name heuristics, with a `--dims LAT,LON` override preferred over both on a store carrying the dims it names — so a grid whose axes carry neither CF attrs nor a recognized name reads as a series until `--dims` names them.
+
+Gridded and forecast are positive tests, not fall-throughs: every store classified as one carries the spatial axes that shape's operations need. Collapsing latitude and longitude out of a forecast therefore leaves a series — `step` and the scalar init `time` survive, and every shape-agnostic skill can still read the store. A `station_id` dim without its `latitude(station_id)`/`longitude(station_id)` coords is a malformed station envelope, not another shape: it is rejected by name, because those coordinates are the station's geography and nothing downstream can supply them.
+
 ## Attrs
 
-`weather_skills_source` is optional metadata for human readability. `weather_skills_history` is the canonical provenance chain and is set by every zarr-writing skill.
+`weather_skills_source` names the data product a fetcher originated; every fetcher sets it (the WSK102 conformance rule requires it) and transforms carry it forward from their input. `weather_skills_history` is the canonical provenance chain and is set by every zarr-writing skill.
 
 | Attr | Set by | Meaning |
 |---|---|---|

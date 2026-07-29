@@ -56,11 +56,11 @@ def _clean_shared_flag_tree(root):
         scripts_dir.mkdir(parents=True)
         (scripts_dir / f"{name}.py").write_text(
             _PEP723
-            + "from weather_skills_core import weather_skill\n"
+            + "from weather_skills_core import types, weather_skill\n"
             + '_SKILL_VERSION = "0.1.0"\n'
-            + f"@weather_skill({name!r}, _SKILL_VERSION, input_type='any', "
-            + "output_type='same', extra_args={'method': {'type': str, 'help': 'x'}})\n"
-            + f"def {name}(ds):\n    return ds\n"
+            + f"@weather_skill({name!r}, _SKILL_VERSION, input_type=types.ALL, "
+            + "output_type=types.ALL, extra_args=[('--method', {'type': str, 'help': 'x'})])\n"
+            + f"def {name}(ds, args):\n    return ds\n"
         )
         (skills / name / "SKILL.md").write_text(
             "# skill\n\n## Usage\n\n### Arguments\n"
