@@ -1,26 +1,11 @@
 # CLI flag conventions
 
-Skills in this repo are independent single-file scripts that declare their CLI
-through the `@weather_skill` decorator from `weather_skills_core`, and they
-often expose the same conceptual parameter. To make skills easy to compose and
-easy to work on, **a flag that does the same thing on different skills must
-have the same name**.
+Same concept → same flag name across skills.
 
-This document is the canonical mapping. Standard flags (`--input`/`--output`,
-`--start`/`--end`/`--date`, `--bbox`, `--variable`, `--workers`, `--title`,
-`--dims`, `--time-dim`) come from the declaration's toggles; every other flag
-is declared under `extra_args`, and this table is normative for those names.
-When you add or change a CLI, match these names. New concepts that aren't
-covered here should be added to this file in the same PR that introduces them.
-
-The weather-skills-core conformance linter checks `extra_args` flag naming and
-shape across skills: WSK101 flags an extra argument that shadows a standard
-parameter, WSK201 flags a one-off flag name declared by more than one skill, and
-WSK202 flags a shared flag name whose shape diverges between skills. The
-forecasting-skills CI runs this linter as an advisory check on the skills changed
-in a pull request, posting the findings as a sticky comment; it does not block
-merge, so the naming convention is upheld by that advisory check together with
-review.
+Standard flags come from `required_args` / `optional_args` (`--input`/`--output`,
+`--time`, `--start`/`--end`, `--bbox`, `--variable`) plus decorator-owned
+`--check-cache`. Custom flags use `@weather_skill.argument` and should match
+this table when the concept already exists here.
 
 ## Canonical names
 
@@ -46,48 +31,20 @@ review.
 
 | Concept | Flag | Value shape | Notes |
 | --- | --- | --- | --- |
-| Date range | `--start` / `--end` | relative-or-absolute date token (see grammar below); both ends inclusive | Used by archive fetchers covering a span of dates. |
-| Single date | `--date` | relative-or-absolute date token (see grammar below) | Used when a skill operates on one timestamp (e.g. an init date for a forecast). |
+| Date range | `--start` / `--end` | `YYYY-MM-DD` or `latest`; both ends inclusive | Catalog args `start_time` / `end_time`. |
+| Single time | `--time` | `YYYY-MM-DD` or `latest` | Catalog arg `time`. |
 | Target CF calendar | `--calendar` | CF calendar name | Calendar to convert the time axis onto (e.g. `standard`, `proleptic_gregorian`, `noleap`, `360_day`, `all_leap`, `julian`). Used by `convert-calendar`. |
 | Calendar alignment mode | `--align-on` | `date` \| `year` | How `convert-calendar` maps dates across calendars. Required whenever the source or target calendar is `360_day`. `year` translates by relative position in the year (best for daily/sub-daily); `date` conserves month/day and drops invalid dates (best for coarser-than-daily). |
 
-#### Relative-or-absolute date grammar
+#### Date grammar
 
-`--start`, `--end`, and `--date` accept the **same** value grammar on every
-fetcher. A value is one of:
+`--time`, `--start`, and `--end` accept only:
 
-- an absolute ISO date `YYYY-MM-DD`;
-- `now` or `today` — the current UTC date;
-- `latest` — the newest date with available data, discovered per source
-  (imerg: max available granule date; chirps: backward HTTPS day-probe; tahmo:
-  max returned observation date over a bounded lookback; ecmwf: newest
-  accessible forecast init — embargoed (access-restricted) recent inits are
-  skipped);
-- an offset `now-<int>{d|w}` or `latest-<int>{d|w}` — the base minus N (`w` = 7
-  days, so `3w` = 21 days). The offset count is capped (36525 days). Future `+`
-  offsets, month/year units, and anything else are rejected with a non-zero exit
-  **before any network call**.
+- absolute `YYYY-MM-DD` (parsed by the decorator);
+- `latest` (passed through; the skill resolves it).
 
-Boundary handling for `--start`/`--end`: absolute endpoints and ordinary
-relative ranges are **inclusive of both ends**. The one exception is the
-**duration idiom** — start is `B-<int>{d|w}` and end is exactly the same base
-token `B` (both `now`, or both `latest`): the window is exactly N days, inclusive
-of `B`, with the far edge shifted in by one (so `latest-3w .. latest` →
-`[latest-20d, latest]` = 21 days incl. `latest`; `now-1w .. now` → 7 days).
-Tokens stay literal — `latest-3w` always means `latest − 21d`; only the
-`B-N .. B` shape moves the far edge. After resolution, `start <= end` or the run
-exits non-zero (pre-network).
-
-This section is the grammar's normative definition; its implementation lives
-in `weather_skills_core` (the decorator's `start_time`/`end_time`/`date`
-toggles), whose test suite enforces it. Each script supplies only its
-per-source `latest` resolver. `latest` discovery runs at most once per
-invocation and only when a token references `latest`; an all-absolute or
-`now`-only window performs no discovery call. The cache key /
-`weather_skills_history` args record the **resolved
-absolute dates**, never the relative token. For any invocation containing a
-relative token, the script prints a stderr line before fetching with the
-resolved concrete dates, the day count, and the boundary mode and its reason.
+Anything else exits 2 before network work. Prefer recording resolved absolute
+dates in provenance (e.g. via `EntryOverride`).
 
 ### Variables and dimensions
 
@@ -166,7 +123,7 @@ selects that variable facet (and is the output variable).
 - **No backwards-compat aliasing.** If a flag name changes, change every caller
   in the same PR. There are no external callers to preserve.
 - **Cross-skill behavior lives in `weather-skills-core`.** CLI construction,
-  envelope validation, the date grammar, provenance, caching, and output
+  dataset validation, the date grammar, provenance, caching, and output
   writing come from the `@weather_skill` decorator and its modules. Skills
   never import from each other; per-skill code is domain logic only.
 - **Don't reuse a canonical name for a different concept.** If you need a new

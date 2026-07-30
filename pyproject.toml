@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "weather-skills-core"
 version = "0.1.0"
-description = "Core library for weather skills: the @weather_skill decorator owning CLI construction, envelope validation, provenance, cache short-circuit, and output writing."
+description = "Core library for weather skills: the @weather_skill decorator owning CLI construction, standard-dataset validation, provenance, cache short-circuit, and output writing."
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
@@ -18,13 +18,10 @@ dependencies = [
     "zarr>=3.2",
 ]
 
-[project.scripts]
-weather-skills-core = "weather_skills_core.cli:main"
-
 [project.optional-dependencies]
-# udunits validation: envelope.udunits_error
+# udunits validation: dataset.udunits_error
 units = ["cf-units>=3.3.1"]
-# GeoJSON geometry: envelope.polygon_from_geojson
+# GeoJSON geometry: dataset.polygon_from_geojson
 geo = ["shapely>=2.1.2"]
 
 [dependency-groups]
@@ -43,16 +40,13 @@ packages = ["src/weather_skills_core"]
 testpaths = ["tests"]
 filterwarnings = [
     # zarr-python warns on every consolidated write; consolidated=True is part
-    # of the envelope contract, so the warning is expected noise in tests.
+    # of the standard dataset contract, so the warning is expected noise in tests.
     "ignore:Consolidated metadata is currently not part in the Zarr format 3 specification",
 ]
 
 [tool.ruff]
 line-length = 100
 target-version = "py312"
-# The broken-syntax lint fixture deliberately does not parse (it exercises the
-# linter's unparseable-script finding); ruff must not try to check it.
-extend-exclude = ["tests/fixtures/lint/errors_tree/skills/broken-syntax"]
 
 [tool.ruff.lint]
 extend-select = ["I", "B", "UP"]
