@@ -133,6 +133,13 @@ selects that variable facet (and is the output variable).
 | Color-scale mode | `--shared-scale` / `--independent-scale` | flag (mutually exclusive) | Forces one shared color scale across both rows, or a per-row scale + colorbar. Used by `plot-compare`. Default: shared when both rows resolve to the same variable AND matching units, else independent. |
 | Output view | `--format` | `human` \| `json` \| `script` | Selects how a read-only inspector renders its result. Used by `provenance`: `human` lineage, raw `json` chain, or a runnable reproduction `script`. |
 
+### Thresholds and comparisons
+
+| Concept | Flag | Value shape | Notes |
+| --- | --- | --- | --- |
+| Comparison threshold | `--threshold` | float | Scalar value compared against each element, in the target variable's own units. No unit conversion happens — use `unit-convert` upstream if the input isn't already in the desired units. Used by `exceedance-probability`. |
+| Comparison operator | `--comparison` | `gt` \| `ge` \| `lt` \| `le` | Which comparison to apply as `value <op> threshold`. Used by `exceedance-probability`. |
+
 ### Spatial grid targets
 
 | Concept | Flag | Value shape | Notes |
