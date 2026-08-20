@@ -484,7 +484,7 @@ def test_run_loop_write_normalizes_step_and_fills_stripped_units(tmp_path):
     written = xr.open_zarr(out, consolidated=True)
     assert written["step"].dtype == np.dtype("timedelta64[ns]")
     assert "units" in written["tp"].attrs
-    assert written["tp"].attrs["units"] in ("mm day-1", "millimeter / day")
+    assert written["tp"].attrs["units"] == "mm day-1"
 
 
 def test_run_loop_write_stamps_amount_standard_name(tmp_path):
