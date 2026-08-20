@@ -247,7 +247,8 @@ def test_quantify_dataset_quantifies_and_preserves_coord_attrs():
     assert q["latitude"].pint.units is None
     assert q["latitude"].attrs["units"] == "degrees_north"
     plain = dequantify_dataset(q)
-    assert "units" in plain["precip"].attrs
+    assert plain["precip"].attrs["units"] == "mm day-1"
+    assert plain["latitude"].attrs["units"] == "degrees_north"
 
 
 def test_format_cell_methods():

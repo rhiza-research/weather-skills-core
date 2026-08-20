@@ -491,9 +491,32 @@ def quantify_dataset(ds):
     return out
 
 
+def _on_disk_units(units: str) -> str:
+    """CF compact spelling for a pint-parseable unit string.
+
+    Pint's default dequantify writes ``millimeter / day``; on disk we want
+    ``mm day-1`` (and the other STANDARD display spellings).
+    """
+    for preferred in (spec["units"] for spec in STANDARD.values()):
+        if units_equal(units, preferred):
+            return preferred
+    try:
+        compact = format(ureg.Unit(units), "cf")
+    except Exception:  # noqa: BLE001 — leave unparseable strings alone
+        return units
+    if units_equal(compact, STANDARD["temp"]["units"]):
+        return STANDARD["temp"]["units"]
+    return compact.replace(" d-1", " day-1")
+
+
 def dequantify_dataset(ds):
-    """Strip pint quantities back to plain arrays with ``units`` attrs."""
-    return ds.pint.dequantify()
+    """Strip pint quantities back to plain arrays with CF ``units`` attrs."""
+    out = ds.pint.dequantify()
+    for name in list(out.data_vars) + list(out.coords):
+        units = out[name].attrs.get("units")
+        if isinstance(units, str) and units.strip():
+            out[name].attrs["units"] = _on_disk_units(units)
+    return out
 
 
 def convert_values(values, src_units: str, dst_units: str):
