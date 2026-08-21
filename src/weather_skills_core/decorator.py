@@ -204,7 +204,7 @@ def weather_skill(
 
     Stack ``@weather_skill.argument`` for flags. Use ``type=Dataset(...)`` for
     Zarr inputs (opened and dim-checked before the skill runs). Dataset
-    ``--input`` is passed to the skill as ``ds`` (a list when nargs/append).
+    ``--input`` is passed to the skill as ``ds`` (a list when ``action="append"``).
 
     When ``output=True`` (default), the decorator owns ``-o/--output``
     (repeatable). It injects ``output`` as a ``Path`` (one path) or

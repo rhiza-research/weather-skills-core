@@ -7,7 +7,9 @@ variables may include units optionally.
 
 On disk the attr is a string (`mm day-1`). In the skill body it is a
 pint quantity: the decorator **quantifies** on open and **dequantifies**
-before write. Implementation: `weather_skills_core.units`.
+before write. Figure labels use a short display form (`mm/day`, `°C`)
+via `format_units_for_display` — they do not change the on-disk string.
+Implementation: `weather_skills_core.units`.
 
 Dims and types: [STANDARD_DATASET.md](STANDARD_DATASET.md).
 

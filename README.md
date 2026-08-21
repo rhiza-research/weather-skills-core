@@ -150,15 +150,17 @@ ontology name or a type, not every possible name.
 | List | Any one of these (OR) | `Dataset(["forecast", "ensemble_forecast"])` |
 | `"any"` | Any Zarr (no dim check) | `Dataset("any")` |
 
-Pass several Zarrs on one flag with `nargs=2` (exactly two paths) or
-`nargs="+"` (one or more). `--input` still arrives as `ds`, now a list. Give
-each input its own flag when the roles differ (`--forecast` vs `--obs`).
+Pass several Zarrs by repeating the flag with `action="append"`
+(`-i a.zarr -i b.zarr`). `--input` still arrives as `ds`, now a list.
+`nargs="+"` looks similar but a second `-i` *replaces* the first, so only
+the last path is opened. Give each input its own flag when the roles
+differ (`--forecast` vs `--obs`).
 
 ```python
 @weather_skill(name="concat", version="0.1.0")
-@weather_skill.argument("-i", "--input", type=Dataset("any"), nargs="+", required=True)
+@weather_skill.argument("-i", "--input", type=Dataset("any"), action="append", required=True)
 def concat(ds, output, **kwargs):
-    # uv run concat.py -i a.zarr b.zarr -o stacked.zarr
+    # uv run concat.py -i a.zarr -i b.zarr -o stacked.zarr
     return xr.concat(ds, dim="member")
 
 

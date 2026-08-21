@@ -65,7 +65,7 @@ and custom flags alike.
 
 Use `type=Dataset(...)` for Zarr inputs. The decorator opens the path, checks
 required dims, quantifies units, and injects the opened dataset as `ds` (a
-list if you used `nargs`/`append`). Grammar:
+list if you used `action="append"`). Grammar:
 
 | Form | Meaning |
 | --- | --- |
@@ -76,8 +76,9 @@ list if you used `nargs`/`append`). Grammar:
 | `Dataset("any")` | any Zarr; skip dim checks |
 
 Opaque files (GeoJSON, …) use `type=Path`, not `Dataset`. Flag names are
-free-form (`-i/--input`, `--forecast`, …). Multi-input: `nargs=2` / `nargs="+"`
-or separate Dataset args.
+free-form (`-i/--input`, `--forecast`, …). Multi-input: `action="append"`
+(repeat `-i` once per Zarr) or separate Dataset args. Do not use `nargs="+"`
+for repeated `-i` — a second `-i` overwrites the first.
 
 ## Outputs
 

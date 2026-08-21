@@ -262,11 +262,14 @@ def test_run_loop_two_inputs(tmp_path):
     make_gridded(fill=2.0).to_zarr(b, mode="w", consolidated=True)
 
     @weather_skill(name="s", version="1.0.0")
-    @weather_skill.argument("-i", "--input", type=Dataset("observations"), nargs=2, required=True)
+    @weather_skill.argument("-i", "--input", type=Dataset("observations"), action="append", required=True)
     def skill(ds, output, **kwargs):
+        seen["n"] = len(ds)
         return ds[0]
 
-    skill(["-i", str(a), str(b), "-o", str(out)])
+    seen = {}
+    skill(["-i", str(a), "-i", str(b), "-o", str(out)])
+    assert seen["n"] == 2
     assert out.exists()
 
 
@@ -408,12 +411,12 @@ def test_run_loop_variadic_inputs(tmp_path):
     seen = {}
 
     @weather_skill(name="cat", version="0.1.0")
-    @weather_skill.argument("-i", "--input", type=Dataset("any"), nargs="+", required=True)
+    @weather_skill.argument("-i", "--input", type=Dataset("any"), action="append", required=True)
     def cat(ds, output, **kwargs):
         seen["n"] = len(ds)
         return ds[0]
 
-    argv = ["-i", *[str(p) for p in paths], "-o", str(out)]
+    argv = [token for p in paths for token in ("-i", str(p))] + ["-o", str(out)]
     cat(argv)
     assert seen["n"] == 3
 

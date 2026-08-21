@@ -21,6 +21,7 @@ from weather_skills_core.units import (
     filter_min_coverage,
     format_cell_methods,
     format_duration,
+    format_units_for_display,
     infer_timestep,
     looks_like_rate_display_name,
     parse_aggregation_period,
@@ -42,6 +43,16 @@ def test_units_equal_spelling():
     assert units_equal("mm/day", "mm day-1")
     assert units_equal("degC", "degree_Celsius")
     assert not units_equal("mm", "mm day-1")
+
+
+def test_format_units_for_display():
+    """Figure labels use mm/day and °C, not CF or pint pretty-print."""
+    assert format_units_for_display("mm day-1") == "mm/day"
+    assert format_units_for_display("millimeter / day") == "mm/day"
+    assert format_units_for_display("mm") == "mm"
+    assert format_units_for_display("degree_Celsius") == "°C"
+    assert format_units_for_display("") == ""
+    assert format_units_for_display(None) == ""
 
 
 def test_pentad_dekad_registry():

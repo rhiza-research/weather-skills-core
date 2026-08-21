@@ -204,6 +204,32 @@ def units_equal(a, b) -> bool:
         return False
 
 
+def format_units_for_display(units: str | None) -> str:
+    """Short figure-label spelling. On-disk attrs stay CF; colorbars do not.
+
+    ``mm day-1`` / ``millimeter / day`` → ``mm/day``; ``degree_Celsius`` →
+    ``°C``; other pint-parseable strings use CF compact form.
+    """
+    if not isinstance(units, str) or not units.strip():
+        return ""
+    raw = units.strip()
+    display = {
+        "precip": "mm/day",
+        "precip_amount": "mm",
+        "temp": "°C",
+    }
+    for kind, nice in display.items():
+        if units_equal(raw, STANDARD[kind]["units"]):
+            return nice
+    try:
+        compact = format(ureg.Unit(raw), "cf")
+    except Exception:  # noqa: BLE001 — leave unparseable strings alone
+        return raw
+    if units_equal(compact, STANDARD["temp"]["units"]):
+        return display["temp"]
+    return compact.replace(" d-1", "/day")
+
+
 def variable_units(da) -> str | None:
     """Units string from a pint Quantity, else from the ``units`` attr."""
     units = getattr(da.pint, "units", None)
