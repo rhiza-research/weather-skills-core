@@ -35,6 +35,7 @@ from weather_skills_core.units import (
     units_convertible,
     units_equal,
     ureg,
+    variable_label_for_display,
 )
 
 
@@ -53,6 +54,36 @@ def test_format_units_for_display():
     assert format_units_for_display("degree_Celsius") == "°C"
     assert format_units_for_display("") == ""
     assert format_units_for_display(None) == ""
+
+
+def test_variable_label_for_display_prefers_long_name():
+    """Colorbars use long_name even when a leftover GRIB rate name is present."""
+    da = make_forecast()["tp"]
+    da.attrs.update(
+        units="mm",
+        standard_name="lwe_thickness_of_precipitation_amount",
+        long_name="Total precipitation",
+        GRIB_name="Precipitation rate",
+    )
+    assert variable_label_for_display(da) == "Total precipitation [mm]"
+    assert variable_label_for_display(da, include_units=False) == "Total precipitation"
+
+    product = make_gridded()["precip"]
+    product.attrs["long_name"] = "IMERG daily precipitation"
+    assert variable_label_for_display(product) == "IMERG daily precipitation [mm/day]"
+
+    amount = make_forecast()["tp"]
+    amount.attrs.update(
+        units="mm",
+        standard_name="lwe_thickness_of_precipitation_amount",
+        long_name="precipitation rate",
+        GRIB_name="Precipitation rate",
+    )
+    assert variable_label_for_display(amount) == "Total precipitation [mm]"
+
+    bare = make_gridded()["precip"]
+    assert variable_label_for_display(bare) == "precip [mm/day]"
+    assert variable_label_for_display(bare, fallback="rainfall") == "rainfall [mm/day]"
 
 
 def test_pentad_dekad_registry():

@@ -652,6 +652,38 @@ def looks_like_rate_display_name(value) -> bool:
     return "rate" in lowered or "flux" in lowered
 
 
+def variable_label_for_display(
+    da, *, fallback: str | None = None, include_units: bool = True
+) -> str:
+    """Colorbar / axis label: ``long_name``, then ``GRIB_name``, then the name.
+
+    Leftover rate-like names on precip amounts become ``Total precipitation``.
+    Units are appended in display form (``mm/day``, ``°C``) when present.
+    """
+    label = None
+    for key in ("long_name", "GRIB_name"):
+        val = da.attrs.get(key)
+        if isinstance(val, str) and val.strip():
+            label = val.strip()
+            break
+    if label is None:
+        name = da.name if isinstance(da.name, str) and da.name.strip() else None
+        label = fallback or name or "value"
+    kind = classify_variable(
+        da.name or "",
+        units=variable_units(da),
+        standard_name=da.attrs.get("standard_name"),
+    )
+    if kind == "precip_amount" and looks_like_rate_display_name(label):
+        label = PRECIP_AMOUNT_LONG_NAME
+    if not include_units:
+        return label
+    units = format_units_for_display(variable_units(da))
+    if units:
+        return f"{label} [{units}]"
+    return label
+
+
 def stamp_precip_amounts(ds):
     """Stamp amount CF metadata when units are precip depth/mass (overwrite rate names)."""
     amount_sn = STANDARD["precip_amount"]["standard_name"]

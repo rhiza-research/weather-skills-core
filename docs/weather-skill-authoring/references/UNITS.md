@@ -7,8 +7,10 @@ variables may include units optionally.
 
 On disk the attr is a string (`mm day-1`). In the skill body it is a
 pint quantity: the decorator **quantifies** on open and **dequantifies**
-before write. Figure labels use a short display form (`mm/day`, `°C`)
-via `format_units_for_display` — they do not change the on-disk string.
+before write. Figure labels use the variable `long_name` (then
+`GRIB_name`, then the variable name) plus a short unit spelling
+(`mm/day`, `°C`) via `variable_label_for_display` /
+`format_units_for_display` — they do not change the on-disk string.
 Implementation: `weather_skills_core.units`.
 
 Dims and types: [STANDARD_DATASET.md](STANDARD_DATASET.md).
@@ -131,6 +133,8 @@ is not treated as precip.
 | Function | Role |
 | --- | --- |
 | `units_equal` | Spelling-independent equality (`mm/day` ≈ `mm day-1`) |
+| `format_units_for_display` | Short figure unit spelling (`mm/day`, `°C`) |
+| `variable_label_for_display` | Figure label: `long_name` → `GRIB_name` → name, plus units |
 | `convert_dataarray` / `convert_values` | Explicit unit ↔ unit |
 | `to_standard_units` | Temp / precip → standard display units |
 | `stamp_data_interval` | Uniform `data_interval` or CF `{dim}_bounds` on fetch / deaccumulate |
