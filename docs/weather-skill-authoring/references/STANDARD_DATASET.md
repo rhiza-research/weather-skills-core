@@ -92,8 +92,7 @@ def clip_region(ds, output, **kwargs):
 ```
 
 Several Zarrs: `action="append"` and repeat `-i` once per store.
-`--input` still arrives as `ds`, now a list. `nargs="+"` is not the
-same — a second `-i` replaces the first. Separate Dataset flags when
+`--input` still arrives as `ds`, now a list. Separate Dataset flags when
 the roles differ (`--forecast` vs `--obs`).
 
 The decorator owns `-o/--output`. There is no output dim check — the

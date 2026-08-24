@@ -152,9 +152,7 @@ ontology name or a type, not every possible name.
 
 Pass several Zarrs by repeating the flag with `action="append"`
 (`-i a.zarr -i b.zarr`). `--input` still arrives as `ds`, now a list.
-`nargs="+"` looks similar but a second `-i` *replaces* the first, so only
-the last path is opened. Give each input its own flag when the roles
-differ (`--forecast` vs `--obs`).
+Give each input its own flag when the roles differ (`--forecast` vs `--obs`).
 
 ```python
 @weather_skill(name="concat", version="0.1.0")

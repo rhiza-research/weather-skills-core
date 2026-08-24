@@ -66,7 +66,7 @@ Consumer skills take `--bbox`. Polygon clipping is skill-specific
 
 | Concept | Usual flag | Notes |
 | --- | --- | --- |
-| Zarr input | `-i` / `--input` | `type=Dataset(...)`. Arrives as `ds` (a list if `action="append"`). Repeat `-i` once per Zarr; do not use `nargs="+"` for that pattern. Name the flag by role when inputs differ (`--forecast`, `--obs`). |
+| Zarr input | `-i` / `--input` | `type=Dataset(...)`. Arrives as `ds` (a list if `action="append"`). Repeat `-i` once per Zarr. Name the flag by role when inputs differ (`--forecast`, `--obs`). |
 | Opaque file | whatever fits | GeoJSON, PNG, … — `type=Path`, not `Dataset`. |
 | Output path | `-o` / `--output`, repeatable | Owned by the decorator (`output=True` default). Count must match returned artifacts. |
 

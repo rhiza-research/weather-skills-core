@@ -62,11 +62,9 @@ stamps exactly one of:
 
 Never both. Deaccumulate uses the same pair.
 
-Once stamped, later skills **keep** that geometry. `stamp_data_interval`
-does not re-diff the ticks currently on the cube (`select` of two weekly
-leads must not become `14 day`). Infer only when geometry is missing.
-`period=` (the product) and deaccumulate's `origin` (new cells after
-dropping the first lead) are the exceptions that overwrite.
+Once stamped, later skills keep that geometry. `stamp_data_interval`
+infers spacing only when `data_interval` and CF bounds are missing.
+`period=` and deaccumulate's `origin` overwrite.
 
 **Aggregation** is a later window. Only `aggregate-temporal` stamps:
 

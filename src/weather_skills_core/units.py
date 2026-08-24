@@ -782,10 +782,8 @@ def stamp_data_interval(ds, period=None, dim=None, origin=None):
     """Stamp native cell geometry: scalar ``data_interval`` or CF bounds.
 
     ``period`` is a pint duration string (``"1 day"``, ``"30 minute"``) and
-    always writes the scalar attr (caller knows the product). When omitted,
-    an existing ``data_interval`` or CF bounds is kept — native geometry is a
-    fact about the source, not rediscovered from the ticks currently on the
-    cube (``select`` of two weekly leads must not become ``14 day``).
+    always writes the scalar attr. When omitted, an existing
+    ``data_interval`` or CF bounds is kept.
 
     If geometry is missing, spacing is inferred from ``dim`` (or ``time`` /
     ``step``): equal steps get ``data_interval``; unequal steps get

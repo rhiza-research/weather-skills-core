@@ -77,8 +77,7 @@ list if you used `action="append"`). Grammar:
 
 Opaque files (GeoJSON, …) use `type=Path`, not `Dataset`. Flag names are
 free-form (`-i/--input`, `--forecast`, …). Multi-input: `action="append"`
-(repeat `-i` once per Zarr) or separate Dataset args. Do not use `nargs="+"`
-for repeated `-i` — a second `-i` overwrites the first.
+(repeat `-i` once per Zarr) or separate Dataset args.
 
 ## Outputs
 
