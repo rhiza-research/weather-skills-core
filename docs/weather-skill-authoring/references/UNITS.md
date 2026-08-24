@@ -62,6 +62,12 @@ stamps exactly one of:
 
 Never both. Deaccumulate uses the same pair.
 
+Once stamped, later skills **keep** that geometry. `stamp_data_interval`
+does not re-diff the ticks currently on the cube (`select` of two weekly
+leads must not become `14 day`). Infer only when geometry is missing.
+`period=` (the product) and deaccumulate's `origin` (new cells after
+dropping the first lead) are the exceptions that overwrite.
+
 **Aggregation** is a later window. Only `aggregate-temporal` stamps:
 
 | Attr | Where | Meaning |
@@ -137,7 +143,7 @@ is not treated as precip.
 | `variable_label_for_display` | Figure label: `long_name` → `GRIB_name` → name, plus units |
 | `convert_dataarray` / `convert_values` | Explicit unit ↔ unit |
 | `to_standard_units` | Temp / precip → standard display units |
-| `stamp_data_interval` | Uniform `data_interval` or CF `{dim}_bounds` on fetch / deaccumulate |
+| `stamp_data_interval` | Native `data_interval` or CF bounds. Keeps an existing stamp; infers only when missing. `period=` and deaccumulate `origin` overwrite. |
 | `precip_amounts_to_rates` | Amount → `mm day-1` (deaccumulate amount vars on `step`, else ÷ interval) |
 | `stamp_precip_amounts` | Amount units → amount CF `standard_name`; rewrite rate display names |
 | `rate_to_total` | Rate × period → amount (refuses precip totals) |

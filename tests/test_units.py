@@ -380,11 +380,46 @@ def test_stamp_data_interval_explicit_and_inferred():
     assert daily["precip"].attrs[DATA_INTERVAL_ATTR] == "1 day"
 
 
+def test_stamp_data_interval_singleton_step_with_origin():
+    """One remaining forecast step stamps from the dropped previous lead."""
+    step = np.array([np.timedelta64(7, "D")], dtype="timedelta64[ns]")
+    ds = xr.Dataset(
+        {"tp": (("step",), np.ones(1), {"units": "mm day-1"})},
+        coords={"step": step, "time": np.datetime64("2026-01-01", "ns")},
+    )
+    out = stamp_data_interval(ds, dim="step", origin=np.timedelta64(0, "D"))
+    assert out["tp"].attrs[DATA_INTERVAL_ATTR] == "7 day"
+
+
+def test_stamp_data_interval_singleton_step_without_origin_is_noop():
+    """A lone step cannot infer spacing; keep any existing interval and do not error."""
+    step = np.array([np.timedelta64(7, "D")], dtype="timedelta64[ns]")
+    ds = xr.Dataset(
+        {
+            "tp": (
+                ("step",),
+                np.ones(1),
+                {"units": "mm day-1", DATA_INTERVAL_ATTR: "6 hour"},
+            )
+        },
+        coords={"step": step, "time": np.datetime64("2026-01-01", "ns")},
+    )
+    out = stamp_data_interval(ds)
+    assert out["tp"].attrs[DATA_INTERVAL_ATTR] == "6 hour"
+
+    bare = xr.Dataset(
+        {"tp": (("step",), np.ones(1), {"units": "mm day-1"})},
+        coords={"step": step, "time": np.datetime64("2026-01-01", "ns")},
+    )
+    kept = stamp_data_interval(bare)
+    assert DATA_INTERVAL_ATTR not in kept["tp"].attrs
+
+
 def test_stamp_data_interval_irregular_step_writes_cf_bounds():
-    """Irregular step drops a scalar interval and writes CF bounds."""
+    """Irregular step with no existing geometry writes CF bounds."""
     days = np.array([7, 10, 14, 21], dtype="timedelta64[D]").astype("timedelta64[ns]")
     ds = xr.Dataset(
-        {"tp": (("step",), np.ones(4), {"units": "mm day-1", DATA_INTERVAL_ATTR: "1 day"})},
+        {"tp": (("step",), np.ones(4), {"units": "mm day-1"})},
         coords={"step": days},
     )
     out = stamp_data_interval(ds)
@@ -397,6 +432,38 @@ def test_stamp_data_interval_irregular_step_writes_cf_bounds():
         bounds[:, 0],
         np.array([0, 7, 10, 14], dtype="timedelta64[D]").astype("timedelta64[ns]"),
     )
+
+
+def test_stamp_data_interval_keeps_existing_when_ticks_would_differ():
+    """A stamped 7-day interval survives select of two leads 14 days apart."""
+    days = np.array([7, 21], dtype="timedelta64[D]").astype("timedelta64[ns]")
+    ds = xr.Dataset(
+        {"tp": (("step",), np.ones(2), {"units": "mm day-1", DATA_INTERVAL_ATTR: "7 day"})},
+        coords={"step": days, "time": np.datetime64("2026-01-01", "ns")},
+    )
+    out = stamp_data_interval(ds)
+    assert out["tp"].attrs[DATA_INTERVAL_ATTR] == "7 day"
+    assert "step_bounds" not in out.variables
+
+
+def test_stamp_data_interval_explicit_period_overwrites():
+    """period= is the product telling us the interval; it replaces a prior stamp."""
+    ds = make_gridded(n_time=3)
+    ds["precip"].attrs[DATA_INTERVAL_ATTR] = "1 day"
+    out = stamp_data_interval(ds, period="30 minute")
+    assert out["precip"].attrs[DATA_INTERVAL_ATTR] == "30 minute"
+
+
+def test_deaccumulate_origin_restamps_existing_interval():
+    """Deaccumulate changes cell geometry, so origin overrides a leftover interval."""
+    ds = make_forecast(n_number=None, n_step=4)
+    ds["tp"].attrs.update(
+        units="mm",
+        standard_name="lwe_thickness_of_precipitation_amount",
+        **{DATA_INTERVAL_ATTR: "6 hour"},
+    )
+    out = deaccumulate_along_step(ds)
+    assert out["tp"].attrs[DATA_INTERVAL_ATTR] == "1 day"
 
 
 def test_stamp_data_interval_irregular_datetime_defaults_origin():
@@ -435,6 +502,17 @@ def test_deaccumulate_stamps_scalar_on_daily_step():
     out = deaccumulate_along_step(ds)
     assert out["tp"].attrs[DATA_INTERVAL_ATTR] == "1 day"
     assert "step_bounds" not in out.variables
+
+
+def test_deaccumulate_two_steps_stamps_remaining_interval():
+    """Deaccumulating two leads leaves one step whose interval is still known."""
+    ds = make_forecast(n_number=None, n_step=2)
+    ds["tp"].attrs.update(units="mm", standard_name="lwe_thickness_of_precipitation_amount")
+    ds["tp"].values[:] = np.array([[[1.0, 1.0], [1.0, 1.0]], [[3.0, 3.0], [3.0, 3.0]]])
+    out = deaccumulate_along_step(ds)
+    assert out.sizes["step"] == 1
+    assert out["tp"].attrs[DATA_INTERVAL_ATTR] == "1 day"
+    np.testing.assert_allclose(out["tp"].values, 2.0)
 
 
 def test_deaccumulate_stamps_bounds_on_irregular_step():
