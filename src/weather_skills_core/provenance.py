@@ -16,10 +16,11 @@ SOURCE_ATTR = "weather_skills_source"
 DEFAULT_SOFTWARE = "forecasting-skills"
 OFFICIAL_MARK_TEXT = "weather-skills provenance verified"
 # Circular rubber-stamp arcs (drawn uppercase for an inked look).
+# Keep each arc short so letters stay large enough to read at corner size.
 _MARK_ARC_TOP = "WEATHER-SKILLS"
-_MARK_ARC_BOTTOM = "PROVENANCE VERIFIED"
+_MARK_ARC_BOTTOM = "VERIFIED"
 # Classic crimson rubber-stamp ink (RGBA) — opaque enough to read on maps.
-_MARK_INK = (158, 18, 36, 245)
+_MARK_INK = (139, 15, 32, 250)
 
 _EXIF_USER_COMMENT = 0x9286  # EXIF UserComment tag
 _HTML_META_RE = re.compile(
@@ -178,10 +179,10 @@ def _paste_rotated_char(stamp, char, font, fill, cx, cy, angle_deg, *, scale: in
     from PIL import Image, ImageDraw
 
     # Oversized tile so rotated glyphs are not clipped.
-    tile_size = 48 * scale
+    tile_size = max(48 * scale, int(getattr(font, "size", 12) * 3))
     tile = Image.new("RGBA", (tile_size, tile_size), (0, 0, 0, 0))
     draw = ImageDraw.Draw(tile)
-    stroke = max(1, getattr(font, "size", 12) // 16)
+    stroke = max(scale, getattr(font, "size", 12) // 10)
     bbox = draw.textbbox((0, 0), char, font=font)
     tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
     draw.text(
@@ -190,31 +191,46 @@ def _paste_rotated_char(stamp, char, font, fill, cx, cy, angle_deg, *, scale: in
         font=font,
         fill=fill,
         stroke_width=stroke,
-        stroke_fill=(255, 255, 255, 230),
+        stroke_fill=(255, 255, 255, 250),
     )
     rotated = tile.rotate(-angle_deg, resample=Image.Resampling.BICUBIC, expand=True)
     stamp.paste(rotated, (int(cx - rotated.width / 2), int(cy - rotated.height / 2)), rotated)
 
 
+def _glyph_width(char: str, font) -> float:
+    """Advance width of ``char`` in the given font."""
+    from PIL import Image, ImageDraw
+
+    draw = ImageDraw.Draw(Image.new("L", (1, 1)))
+    bbox = draw.textbbox((0, 0), char, font=font)
+    return max(1.0, float(bbox[2] - bbox[0]))
+
+
 def _draw_arc_text(stamp, text, cx, cy, radius, font, fill, *, top: bool, scale: int):
-    """Draw ``text`` along a circular arc (top over the top; bottom under)."""
+    """Draw ``text`` along a circular arc, spaced by glyph width (top over; bottom under)."""
     import math
 
     if not text:
         return
-    # Angular span ~110° so labels stay readable and don't collide.
-    span = min(2.0, 0.22 * len(text) + 0.7)
+    tracking = max(float(scale), font.size * 0.12)
+    widths = [_glyph_width(ch, font) for ch in text]
+    total = sum(widths) + tracking * max(len(text) - 1, 0)
+    # Cap the arc so type stays upright enough to read (~135°).
+    span = min(total / max(radius, 1.0), 2.35)
     if top:
         start = -math.pi / 2 - span / 2
-        step = span / max(len(text) - 1, 1)
+        direction = 1.0
     else:
         start = math.pi / 2 + span / 2
-        step = -span / max(len(text) - 1, 1)
+        direction = -1.0
 
-    for i, char in enumerate(text):
+    cursor = 0.0
+    for char, width in zip(text, widths, strict=True):
+        mid = cursor + width / 2.0
+        angle = start + direction * (mid / total) * span
+        cursor += width + tracking
         if char == " ":
             continue
-        angle = start + i * step
         x = cx + radius * math.cos(angle)
         y = cy + radius * math.sin(angle)
         tangent_deg = math.degrees(angle) + (90.0 if top else -90.0)
@@ -242,22 +258,21 @@ def _render_circular_stamp(diameter: int):
         outline=ink,
         width=max(2 * scale, size // 22),
     )
-    inner_r = outer_r * 0.78
+    inner_r = outer_r * 0.70
     draw.ellipse(
         (cx - inner_r, cy - inner_r, cx + inner_r, cy + inner_r),
         outline=ink,
-        width=max(scale, size // 36),
+        width=max(scale, size // 40),
     )
 
-    # Slightly larger type relative to diameter so arc text stays legible when small.
-    font = _load_mark_font(max(8 * scale, int(size * 0.125)))
-    _draw_arc_text(stamp, _MARK_ARC_TOP, cx, cy, outer_r * 0.87, font, ink, top=True, scale=scale)
+    font = _load_mark_font(max(12 * scale, int(size * 0.17)))
+    _draw_arc_text(stamp, _MARK_ARC_TOP, cx, cy, outer_r * 0.85, font, ink, top=True, scale=scale)
     _draw_arc_text(
-        stamp, _MARK_ARC_BOTTOM, cx, cy, outer_r * 0.87, font, ink, top=False, scale=scale
+        stamp, _MARK_ARC_BOTTOM, cx, cy, outer_r * 0.85, font, ink, top=False, scale=scale
     )
 
-    # Center medallion: a filled star so the stamp reads at a glance.
-    star_r = outer_r * 0.22
+    # Small center star — keep the rubber-stamp look without crowding the type.
+    star_r = outer_r * 0.16
     pts = []
     for i in range(10):
         r = star_r if i % 2 == 0 else star_r * 0.42
@@ -266,7 +281,7 @@ def _render_circular_stamp(diameter: int):
     draw.polygon(pts, fill=ink)
 
     # Slight rotation so it looks hand-inked rather than UI chrome.
-    stamp = stamp.rotate(-12, resample=Image.Resampling.BICUBIC, expand=True)
+    stamp = stamp.rotate(-6, resample=Image.Resampling.BICUBIC, expand=True)
     out_w = max(1, round(stamp.width / scale))
     out_h = max(1, round(stamp.height / scale))
     return stamp.resize((out_w, out_h), resample=Image.Resampling.LANCZOS)
@@ -283,8 +298,8 @@ def _draw_official_mark(img):
     if min(w, h) < 96:
         return img.copy()
 
-    # Small corner mark (~10% of the short side) so it reads as ink, not chrome.
-    diameter = max(36, min(int(min(w, h) * 0.10), 72))
+    # Corner mark large enough for the arc type to stay legible on typical plots.
+    diameter = max(72, min(int(min(w, h) * 0.22), 168))
     stamp = _render_circular_stamp(diameter)
     margin = max(4, int(min(w, h) * 0.015))
     if stamp.width + 2 * margin > w or stamp.height + 2 * margin > h:
