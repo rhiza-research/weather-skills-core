@@ -152,17 +152,21 @@ def chain_is_intact(history) -> bool:
 
 
 def _load_mark_font(size: int):
-    """Prefer a bold/readable TrueType font; fall back to PIL's default bitmap font."""
+    """Prefer a condensed display face so arc type stays readable at small diameter."""
     from PIL import ImageFont
 
+    # Condensed first: the circle is small, and a wide bold face collides on the arc.
     candidates = (
-        "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
-        "/System/Library/Fonts/Supplemental/Arial.ttf",
-        "/System/Library/Fonts/Helvetica.ttc",
+        "/System/Library/Fonts/Supplemental/Arial Narrow Bold.ttf",
+        "/System/Library/Fonts/Supplemental/DIN Condensed Bold.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSansNarrow-Bold.ttf",
+        "/usr/share/fonts/truetype/liberation2/LiberationSansNarrow-Bold.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSansCondensed-Bold.ttf",
+        "/System/Library/Fonts/Supplemental/Impact.ttf",
         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
         "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
-        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+        "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+        "/System/Library/Fonts/Helvetica.ttc",
         "DejaVuSans-Bold.ttf",
         "DejaVuSans.ttf",
     )
@@ -182,16 +186,25 @@ def _paste_rotated_char(stamp, char, font, fill, cx, cy, angle_deg, *, scale: in
     tile_size = max(48 * scale, int(getattr(font, "size", 12) * 3))
     tile = Image.new("RGBA", (tile_size, tile_size), (0, 0, 0, 0))
     draw = ImageDraw.Draw(tile)
-    stroke = max(scale, getattr(font, "size", 12) // 10)
     bbox = draw.textbbox((0, 0), char, font=font)
     tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+    pos = (tile_size / 2 - bbox[0] - tw / 2, tile_size / 2 - bbox[1] - th / 2)
+    # White halo for contrast on maps, then a same-ink stroke so stems stay thick.
     draw.text(
-        (tile_size / 2 - bbox[0] - tw / 2, tile_size / 2 - bbox[1] - th / 2),
+        pos,
         char,
         font=font,
         fill=fill,
-        stroke_width=stroke,
-        stroke_fill=(255, 255, 255, 250),
+        stroke_width=max(2, scale // 2),
+        stroke_fill=(255, 255, 255, 230),
+    )
+    draw.text(
+        pos,
+        char,
+        font=font,
+        fill=fill,
+        stroke_width=max(1, scale // 3),
+        stroke_fill=fill,
     )
     rotated = tile.rotate(-angle_deg, resample=Image.Resampling.BICUBIC, expand=True)
     stamp.paste(rotated, (int(cx - rotated.width / 2), int(cy - rotated.height / 2)), rotated)
@@ -199,6 +212,9 @@ def _paste_rotated_char(stamp, char, font, fill, cx, cy, angle_deg, *, scale: in
 
 def _glyph_width(char: str, font) -> float:
     """Advance width of ``char`` in the given font."""
+    getlength = getattr(font, "getlength", None)
+    if getlength is not None:
+        return max(1.0, float(getlength(char)))
     from PIL import Image, ImageDraw
 
     draw = ImageDraw.Draw(Image.new("L", (1, 1)))
@@ -212,7 +228,7 @@ def _draw_arc_text(stamp, text, cx, cy, radius, font, fill, *, top: bool, scale:
 
     if not text:
         return
-    tracking = max(float(scale), font.size * 0.12)
+    tracking = max(float(scale) * 0.5, font.size * 0.08)
     widths = [_glyph_width(ch, font) for ch in text]
     total = sum(widths) + tracking * max(len(text) - 1, 0)
     # Cap the arc so type stays upright enough to read (~135°).
@@ -243,8 +259,8 @@ def _render_circular_stamp(diameter: int):
 
     from PIL import Image, ImageDraw
 
-    # Draw at 3× then downscale so type stays sharp at the smaller display size.
-    scale = 3
+    # Draw at 4× then downscale so condensed type stays sharp at corner size.
+    scale = 4
     size = max(diameter, 32) * scale
     stamp = Image.new("RGBA", (size, size), (0, 0, 0, 0))
     draw = ImageDraw.Draw(stamp)
@@ -256,20 +272,19 @@ def _render_circular_stamp(diameter: int):
     draw.ellipse(
         (cx - outer_r, cy - outer_r, cx + outer_r, cy + outer_r),
         outline=ink,
-        width=max(2 * scale, size // 22),
+        width=max(2 * scale, size // 28),
     )
-    inner_r = outer_r * 0.70
+    inner_r = outer_r * 0.64
     draw.ellipse(
         (cx - inner_r, cy - inner_r, cx + inner_r, cy + inner_r),
         outline=ink,
-        width=max(scale, size // 40),
+        width=max(scale, size // 50),
     )
 
-    font = _load_mark_font(max(12 * scale, int(size * 0.17)))
-    _draw_arc_text(stamp, _MARK_ARC_TOP, cx, cy, outer_r * 0.85, font, ink, top=True, scale=scale)
-    _draw_arc_text(
-        stamp, _MARK_ARC_BOTTOM, cx, cy, outer_r * 0.85, font, ink, top=False, scale=scale
-    )
+    font = _load_mark_font(max(10 * scale, int(size * 0.115)))
+    text_r = (outer_r + inner_r) / 2
+    _draw_arc_text(stamp, _MARK_ARC_TOP, cx, cy, text_r, font, ink, top=True, scale=scale)
+    _draw_arc_text(stamp, _MARK_ARC_BOTTOM, cx, cy, text_r, font, ink, top=False, scale=scale)
 
     # Small center star — keep the rubber-stamp look without crowding the type.
     star_r = outer_r * 0.16
@@ -298,8 +313,8 @@ def _draw_official_mark(img):
     if min(w, h) < 96:
         return img.copy()
 
-    # Corner mark large enough for the arc type to stay legible on typical plots.
-    diameter = max(72, min(int(min(w, h) * 0.22), 168))
+    # Compact corner mark; condensed type stays legible around ~12% of the short side.
+    diameter = max(72, min(int(min(w, h) * 0.12), 96))
     stamp = _render_circular_stamp(diameter)
     margin = max(4, int(min(w, h) * 0.015))
     if stamp.width + 2 * margin > w or stamp.height + 2 * margin > h:

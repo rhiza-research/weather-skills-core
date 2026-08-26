@@ -71,7 +71,7 @@ infers spacing only when `data_interval` and CF bounds are missing.
 | Attr | Where | Meaning |
 | --- | --- | --- |
 | `aggregation_period` | data variable (pint string) | Length of each aggregated interval (`7 day`, `21 day`) |
-| `aggregation_coverage` | time/step coordinate, 0–1 | Fraction of native samples present in that interval |
+| `aggregation_coverage` | time/step coordinate, 0–1 | Fraction of native samples with finite data in that interval (all-NaN times do not count) |
 | `cell_methods` | data variable | The operation (`time: mean`, `time: sum`) |
 
 `data_interval` is not the aggregation window. Convert-to-totals
