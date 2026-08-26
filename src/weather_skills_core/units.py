@@ -366,22 +366,6 @@ def _axis_tick_diffs(values):
     raise UsageError(f"could not infer spacing: {failure}")
 
 
-def _duration_between(start, end) -> str | None:
-    """Compact duration from ``start`` to ``end``, or None if it is not a positive span."""
-    end_arr = np.asarray(end).reshape(())
-    try:
-        start_arr = np.asarray(start).reshape(()).astype(end_arr.dtype, copy=False)
-    except (TypeError, ValueError):
-        return None
-    try:
-        diffs, unit = _axis_tick_diffs(np.stack([start_arr, end_arr]))
-    except UsageError:
-        return None
-    if diffs.size != 1 or diffs[0] <= 0:
-        return None
-    return format_duration(ureg.Quantity(float(diffs[0]), unit).to("day"))
-
-
 def assert_nonoverlapping_intervals(ds, dim: str, period: str) -> None:
     """Refuse convert-to-totals when consecutive labels are finer than ``period``.
 
@@ -753,28 +737,15 @@ def _cf_bounds_name(ds, axis) -> str | None:
     return extra if extra in ds else None
 
 
-def _has_native_geometry(ds, axis) -> bool:
-    """True if ``data_interval`` or CF bounds are already stamped."""
-    return data_interval_of(ds) is not None or _cf_bounds_name(ds, axis) is not None
-
-
-def _drop_cf_bounds(ds, axis):
-    """Drop CF bounds for ``axis`` so scalar ``data_interval`` stays XOR."""
-    name = _cf_bounds_name(ds, axis)
-    if name is None:
-        return ds
-    out = ds.drop_vars(name)
-    if axis in out.coords or axis in out.dims:
-        out[axis].attrs.pop("bounds", None)
-    return out
-
-
 def _apply_scalar_interval(ds, period, axis=None):
-    """Write ``data_interval`` on every data var; drop bounds on ``axis``."""
-    if axis is not None:
-        ds = _drop_cf_bounds(ds, axis)
-    for name in ds.data_vars:
-        ds[name].attrs[DATA_INTERVAL_ATTR] = period
+    """Write ``data_interval`` on every data var; drop bounds so XOR holds."""
+    name = _cf_bounds_name(ds, axis) if axis is not None else None
+    if name is not None:
+        ds = ds.drop_vars(name)
+        if axis in ds.coords or axis in ds.dims:
+            ds[axis].attrs.pop("bounds", None)
+    for var in ds.data_vars:
+        ds[var].attrs[DATA_INTERVAL_ATTR] = period
     return ds
 
 
@@ -803,7 +774,7 @@ def stamp_data_interval(ds, period=None, dim=None, origin=None):
     axis = _time_or_step_dim(ds, dim)
     if axis is None:
         raise UsageError("cannot stamp data_interval: no time/step dim and no period given")
-    if origin is None and _has_native_geometry(ds, axis):
+    if origin is None and (data_interval_of(ds) is not None or _cf_bounds_name(ds, axis)):
         return ds
     values = np.asarray(ds[axis].values)
     if values.size == 0:
@@ -811,10 +782,11 @@ def stamp_data_interval(ds, period=None, dim=None, origin=None):
     if values.size == 1:
         if origin is None:
             return ds
-        stamped = _duration_between(origin, values[0])
-        if stamped is None:
+        try:
+            left = np.asarray(origin).reshape(()).astype(values.dtype, copy=False)
+        except (TypeError, ValueError):
             return ds
-        return _apply_scalar_interval(ds, stamped, axis=axis)
+        values = np.stack([left, values.reshape(())])
     diffs, unit = _axis_tick_diffs(values)
     if diffs.size == 0 or np.any(diffs <= 0):
         raise UsageError(f"{axis!r} must be strictly increasing to stamp spacing")
