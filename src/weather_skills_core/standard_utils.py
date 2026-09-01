@@ -8,7 +8,7 @@ from calendar import day_name, monthrange
 from datetime import date, datetime, timedelta
 
 from weather_skills_core.errors import DataError, UsageError
-from weather_skills_core.standard_dataset import detect_spatial_dims
+from weather_skills_core.standard_dataset import detect_spatial_dims, names_for
 
 _ABS_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
@@ -201,30 +201,122 @@ def polygon_from_geojson(path, *, flag: str = "--mask-geojson"):
         raise UsageError(f"{flag} {path} has no usable geometry ({exc}).") from None
 
 
-def normalize_longitude(ds, lon_dim: str = "longitude"):
+def normalize_longitude(obj, lon_dim: str = "longitude"):
     """Map a 0..360 longitude axis to [-180, 180) and sort ascending.
 
-    Keeps coord attrs; drops duplicate labels produced by wrapping 0 and 360.
+    Accepts a Dataset or DataArray. Keeps coord attrs; drops duplicate labels
+    produced by wrapping 0 and 360. If ``lon_dim`` is not a dimension (station
+    longitudes), values are wrapped in place and not sorted.
     """
     import numpy as np
+    import xarray as xr
 
+    is_da = isinstance(obj, xr.DataArray)
+    da_name = obj.name if is_da else None
+    ds = obj.to_dataset(name=da_name or "_") if is_da else obj
     attrs = dict(ds[lon_dim].attrs)
     lon = ((ds[lon_dim] + 180) % 360) - 180
     lon.attrs = attrs
     ds = ds.assign_coords({lon_dim: lon})
-    # np.unique returns each unique value's first-occurrence index; keeping
-    # those (in input order) drops any later duplicate the wrap produced.
-    _, first = np.unique(ds[lon_dim].values, return_index=True)
-    if len(first) < ds.sizes[lon_dim]:
-        ds = ds.isel({lon_dim: np.sort(first)})
-    return ds.sortby(lon_dim)
+    if lon_dim in ds.dims:
+        # np.unique returns each unique value's first-occurrence index; keeping
+        # those (in input order) drops any later duplicate the wrap produced.
+        _, first = np.unique(ds[lon_dim].values, return_index=True)
+        if len(first) < ds.sizes[lon_dim]:
+            ds = ds.isel({lon_dim: np.sort(first)})
+        ds = ds.sortby(lon_dim)
+    if is_da:
+        out = ds[da_name or "_"]
+        if da_name is None:
+            out.name = None
+        return out
+    return ds
+
+
+def ensure_normalized_longitude(obj, lon_dim: str | None = None):
+    """Wrap 0..360 longitude to [-180, 180) when needed; otherwise leave ``obj``.
+
+    No-op when ``lon_dim`` is missing, empty, or already ≤ 180. Accepts a
+    Dataset or DataArray.
+    """
+    import numpy as np
+    import xarray as xr
+
+    ds = obj.to_dataset(name=obj.name or "_") if isinstance(obj, xr.DataArray) else obj
+    if lon_dim is None:
+        try:
+            _, lon_dim = detect_spatial_dims(ds)
+        except UsageError:
+            return obj
+    if lon_dim not in obj.coords and lon_dim not in getattr(obj, "variables", ()):
+        return obj
+    lon_vals = np.asarray(obj[lon_dim].values)
+    if not lon_vals.size or float(np.nanmax(lon_vals)) <= 180.0:
+        return obj
+    return normalize_longitude(obj, lon_dim=lon_dim)
+
+
+def _point_id_dim(ds) -> str | None:
+    """``station_id`` / ``point_id`` dim, or None if this is not tabular point_obs."""
+    return next((n for n in names_for("point_id") if n in ds.dims), None)
+
+
+def _point_lat_lon(ds, point_dim: str) -> tuple[str, str]:
+    """1-D latitude/longitude coord names attached to ``point_dim``."""
+    lat = next(
+        (n for n in names_for("lat") if n in ds.coords and tuple(ds[n].dims) == (point_dim,)),
+        None,
+    )
+    lon = next(
+        (n for n in names_for("lon") if n in ds.coords and tuple(ds[n].dims) == (point_dim,)),
+        None,
+    )
+    if lat is None or lon is None:
+        raise UsageError(
+            f"station clip requires 1-D latitude/longitude coords on {point_dim} "
+            f"(coords: {list(ds.coords)})"
+        )
+    return lat, lon
+
+
+def _lon_in_span(lon, west: float, east: float):
+    """Boolean mask: lon in [west, east], wrapping the antimeridian when west > east."""
+    if west <= east:
+        return (lon >= west) & (lon <= east)
+    return (lon >= west) | (lon <= east)
+
+
+def _bbox_subset_points(ds, bbox: tuple[float, float, float, float], point_dim: str):
+    """Keep stations whose lat/lon coords fall in ``N/W/S/E`` (order on ``point_dim`` is kept)."""
+    import numpy as np
+
+    north, west, south, east = bbox
+    lat_name, lon_name = _point_lat_lon(ds, point_dim)
+    ds = ensure_normalized_longitude(ds, lon_dim=lon_name)
+    lat = np.asarray(ds[lat_name].values)
+    lon = np.asarray(ds[lon_name].values)
+    mask = (lat >= south) & (lat <= north) & _lon_in_span(lon, west, east)
+    if not np.any(mask):
+        bbox_str = f"{north}/{west}/{south}/{east}"
+        kind = "stations"
+        if west > east:
+            raise DataError(
+                f"--bbox {bbox_str} crosses the antimeridian (west {west} > east {east}) "
+                f"but selects no {kind}; check the N/S extent and that west/east "
+                "bracket the intended dateline-crossing span."
+            )
+        raise DataError(
+            f"--bbox {bbox_str} selects no {kind}; check the extent and N/W/S/E order."
+        )
+    return ds.isel({point_dim: np.nonzero(mask)[0]})
 
 
 def bbox_subset(ds, bbox, *, lat_dim: str | None = None, lon_dim: str | None = None):
-    """Subset a gridded dataset to an ``N/W/S/E`` bbox (string or tuple).
+    """Subset a gridded or station dataset to an ``N/W/S/E`` bbox (string or tuple).
 
-    Wraps 0..360 lon, supports antimeridian (west > east), auto-detects dims
-    unless given. Empty selection raises DataError.
+    Point obs (``station_id`` / ``point_id`` with 1-D lat/lon coords) are filtered
+    per station; grids are sliced on lat/lon dims. Wraps 0..360 lon, supports
+    antimeridian (west > east). Empty selection raises DataError.
     """
     import numpy as np
 
@@ -232,15 +324,16 @@ def bbox_subset(ds, bbox, *, lat_dim: str | None = None, lon_dim: str | None = N
         north, west, south, east = parse_bbox(bbox)
     else:
         north, west, south, east = bbox
+    point_dim = _point_id_dim(ds)
+    if point_dim is not None:
+        return _bbox_subset_points(ds, (north, west, south, east), point_dim)
     if lat_dim is None or lon_dim is None:
         lat_dim, lon_dim = detect_spatial_dims(ds)
 
     # Wrap lon to [-180, 180] before the slice so a 0..360 input grid still
     # intersects bboxes that use negative west/east values.
+    ds = ensure_normalized_longitude(ds, lon_dim=lon_dim)
     lon_vals = np.asarray(ds[lon_dim].values)
-    if lon_vals.size and float(np.nanmax(lon_vals)) > 180.0:
-        ds = ds.assign_coords({lon_dim: ((ds[lon_dim] + 180) % 360 - 180)}).sortby(lon_dim)
-        lon_vals = np.asarray(ds[lon_dim].values)
     if lon_vals.size == 0:
         raise UsageError("lon axis has length 0; cannot subset.")
     if lon_vals.size == 1:
@@ -325,27 +418,23 @@ def clip_by_geometry(
 
     if geometry is None:
         return ds
-    if "station_id" in ds.dims:
-        for name in ("latitude", "longitude"):
-            if name not in ds.coords:
-                raise UsageError(
-                    f"station clip requires {name!r} coord (coords: {list(ds.coords)})"
-                )
+    point_dim = _point_id_dim(ds)
+    if point_dim is not None:
+        lat_name, lon_name = _point_lat_lon(ds, point_dim)
+        ds = ensure_normalized_longitude(ds, lon_dim=lon_name)
         mask = shapely.contains_xy(
             geometry,
-            np.asarray(ds["longitude"].values),
-            np.asarray(ds["latitude"].values),
+            np.asarray(ds[lon_name].values),
+            np.asarray(ds[lat_name].values),
         )
         if not mask.any():
             raise DataError("geometry selects no stations")
-        keep = xr.DataArray(mask, dims="station_id")
-        return ds.isel(station_id=np.nonzero(mask)[0]) if drop else ds.where(keep, drop=False)
+        keep = xr.DataArray(mask, dims=point_dim)
+        return ds.isel({point_dim: np.nonzero(mask)[0]}) if drop else ds.where(keep, drop=False)
 
     if lat_dim is None or lon_dim is None:
         lat_dim, lon_dim = detect_spatial_dims(ds)
-    lon_vals = np.asarray(ds[lon_dim].values)
-    if lon_vals.size and float(np.nanmax(lon_vals)) > 180.0:
-        ds = ds.assign_coords({lon_dim: ((ds[lon_dim] + 180) % 360 - 180)}).sortby(lon_dim)
+    ds = ensure_normalized_longitude(ds, lon_dim=lon_dim)
     lon2d, lat2d = np.meshgrid(ds[lon_dim].values, ds[lat_dim].values)
     mask = shapely.contains_xy(geometry, lon2d, lat2d)
     mask_da = xr.DataArray(

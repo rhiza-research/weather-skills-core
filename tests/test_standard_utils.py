@@ -3,7 +3,7 @@ from datetime import date
 import numpy as np
 import pytest
 import xarray as xr
-from conftest import make_gridded
+from conftest import make_gridded, make_station
 
 from weather_skills_core import standard_utils as utils
 from weather_skills_core.errors import DataError, UsageError
@@ -153,6 +153,44 @@ def test_bbox_subset_data_selected_matches_coords():
     sub = utils.bbox_subset(ds, (2.5, 10.5, 0.5, 12.5))
     assert sub["precip"].shape == (2, 2, 2)
     assert isinstance(sub, xr.Dataset)
+
+
+def test_bbox_subset_stations_keeps_in_box():
+    ds = make_station()
+    sub = utils.bbox_subset(ds, (0.5, 35.0, -0.5, 37.5))
+    assert list(sub.station_id.values) == ["TA0001"]
+    assert sub.sizes["time"] == 2
+
+
+def test_bbox_subset_stations_unsorted_lat_lon():
+    ds = make_station(n_station=3)
+    ds = ds.assign_coords(
+        latitude=("station_id", [1.28, -4.04, 0.51]),
+        longitude=("station_id", [36.82, 39.67, 34.77]),
+    )
+    sub = utils.bbox_subset(ds, (-3.9187, 39.5667, -4.1550, 39.7639))
+    assert list(sub.station_id.values) == ["TA0001"]
+
+
+def test_bbox_subset_stations_empty_is_data_error():
+    with pytest.raises(DataError, match="no stations"):
+        utils.bbox_subset(make_station(), (60.0, 10.0, 50.0, 13.0))
+
+
+def test_bbox_subset_point_id_dim():
+    ds = make_station().rename({"station_id": "point_id"})
+    sub = utils.bbox_subset(ds, (0.5, 35.0, -0.5, 37.5))
+    assert list(sub.point_id.values) == ["TA0001"]
+
+
+def test_bbox_subset_stations_antimeridian():
+    ds = make_station(n_station=3)
+    ds = ds.assign_coords(
+        latitude=("station_id", [0.0, 0.0, 0.0]),
+        longitude=("station_id", [170.0, 0.0, -175.0]),
+    )
+    sub = utils.bbox_subset(ds, (1.0, 165.0, -1.0, -170.0))
+    assert list(sub.station_id.values) == ["TA0000", "TA0002"]
 
 
 def test_lat_slice_ascending():
@@ -330,6 +368,30 @@ def test_normalize_longitude_duplicate_drop_keeps_the_first_occurrence():
     ds["precip"][:, :, 4] = 9.0
     out = utils.normalize_longitude(ds)
     assert float(out["precip"].sel(longitude=0.0).isel(time=0, latitude=0)) == 5.0
+
+
+def test_normalize_longitude_accepts_dataarray():
+    ds = make_gridded(lons=(0.0, 90.0, 180.0, 270.0))
+    out = utils.normalize_longitude(ds["precip"])
+    assert list(out["longitude"].values) == [-180.0, -90.0, 0.0, 90.0]
+
+
+def test_ensure_normalized_longitude_is_noop_when_already_180():
+    ds = make_gridded(lons=(-90.0, 0.0, 90.0))
+    assert utils.ensure_normalized_longitude(ds) is ds
+
+
+def test_ensure_normalized_longitude_wraps_0_360():
+    ds = make_gridded(lons=(0.0, 90.0, 180.0, 270.0))
+    out = utils.ensure_normalized_longitude(ds)
+    assert list(out["longitude"].values) == [-180.0, -90.0, 0.0, 90.0]
+
+
+def test_ensure_normalized_longitude_wraps_station_coord():
+    ds = make_station(n_station=2)
+    ds = ds.assign_coords(longitude=("station_id", [10.0, 270.0]))
+    out = utils.ensure_normalized_longitude(ds, lon_dim="longitude")
+    assert list(out["longitude"].values) == [10.0, -90.0]
 
 
 @pytest.mark.parametrize(
@@ -514,6 +576,21 @@ def test_clip_by_geometry_empty_raises():
 
     with pytest.raises(DataError, match="no grid cells"):
         utils.clip_by_geometry(make_gridded(), box(50, 50, 51, 51), drop=True)
+
+
+def test_clip_by_geometry_stations_drop():
+    from shapely.geometry import box
+
+    ds = make_station()
+    out = utils.clip_by_geometry(ds, box(36.5, -0.5, 37.5, 0.5), drop=True)
+    assert list(out.station_id.values) == ["TA0001"]
+
+
+def test_clip_by_geometry_stations_empty_raises():
+    from shapely.geometry import box
+
+    with pytest.raises(DataError, match="no stations"):
+        utils.clip_by_geometry(make_station(), box(50, 50, 51, 51), drop=True)
 
 
 def test_stride_dates_daily():
