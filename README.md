@@ -289,6 +289,8 @@ Country polygons and Natural Earth region labels (continent, UN subregion,
 World Bank region, …) live in
 `src/weather_skills_core/data/countries.geojson`. `resolve-region` groups
 those features at runtime, so names like `East Africa` need no sidecar.
+A few briefing boxes that are not Natural Earth labels (e.g.
+`Kenya OND region`) are listed in `region.py` as custom rectangles.
 Rebuild the file from upstream Natural Earth 110m admin-0
 (`uv run python tools/build_countries.py --help` for the contract):
 

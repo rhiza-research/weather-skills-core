@@ -248,7 +248,7 @@ def _mount_kenya_hit(*, geojson=None):
 
 
 def test_should_geocode_landmarks_not_admin_keys():
-    """Landmarks may hit Nominatim; ISO3, admin keys, and NE regions must not."""
+    """Landmarks may hit Nominatim; ISO3, admin keys, NE regions, and custom boxes must not."""
     assert should_geocode("Mount Kenya") is True
     assert should_geocode("Mount Kenya, Kenya") is True
     assert should_geocode("kenya-nairbi") is False
@@ -259,6 +259,9 @@ def test_should_geocode_landmarks_not_admin_keys():
     assert should_geocode("Eastern Africa") is False
     assert should_geocode("Western Africa") is False
     assert should_geocode("Sub-Saharan Africa") is False
+    assert should_geocode("Kenya OND region") is False
+    assert should_geocode("Kenya OND") is False
+    assert should_geocode("CE Kenya") is False
 
 
 def test_lookup_ne_eastern_africa_not_nominatim(monkeypatch):
@@ -284,6 +287,39 @@ def test_lookup_ne_eastern_africa_not_nominatim(monkeypatch):
     # UN-style Eastern Africa includes Madagascar, not a Ugandan POI.
     assert s < -20
     assert n > 10
+
+
+def test_lookup_kenya_ond_region_not_nominatim(monkeypatch):
+    """Kenya OND region is a bundled forecast box, never Nominatim."""
+
+    def _fail_nominatim(query):
+        raise AssertionError(f"Nominatim should not run for named region; got {query!r}")
+
+    monkeypatch.setattr("weather_skills_core.region._load_nominatim", _fail_nominatim)
+
+    kenya = lookup_region("KEN")
+    kn, kw, ks, ke = bbox_from_feature(kenya)
+    feature = lookup_region("Kenya OND region")
+    props = feature["properties"]
+    assert props["name"] == "Kenya OND region"
+    assert props["level"] == "custom"
+    assert props["iso3"] == "KEN"
+    assert props["country"] == "Kenya"
+    n, w, s, e = bbox_from_feature(feature)
+    assert (n, w, s, e) == (1.0, 36.5, -3.0, 39.0)
+    assert ks <= s < n <= kn
+    assert kw <= w < e <= ke
+    assert feature["geometry"]["type"] == "Polygon"
+
+    aliases = (
+        lookup_region("Kenya OND"),
+        lookup_region("OND Kenya"),
+        lookup_region("Central-Eastern Kenya"),
+        lookup_region("CE Kenya"),
+    )
+    for other in aliases:
+        assert bbox_from_feature(other) == (n, w, s, e)
+        assert other["properties"]["name"] == "Kenya OND region"
 
 
 def test_south_africa_is_the_country_not_the_subregion():
