@@ -391,6 +391,17 @@ def test_stamp_data_interval_singleton_step_with_origin():
     assert out["tp"].attrs[DATA_INTERVAL_ATTR] == "7 day"
 
 
+def test_stamp_data_interval_singleton_left_labeled_origin():
+    """Origin after the tick is the right edge of a left-labeled cell."""
+    step = np.array([np.timedelta64(0, "D")], dtype="timedelta64[ns]")
+    ds = xr.Dataset(
+        {"tp": (("step",), np.ones(1), {"units": "mm day-1"})},
+        coords={"step": step, "time": np.datetime64("2026-01-01", "ns")},
+    )
+    out = stamp_data_interval(ds, dim="step", origin=np.timedelta64(7, "D"))
+    assert out["tp"].attrs[DATA_INTERVAL_ATTR] == "7 day"
+
+
 def test_stamp_data_interval_singleton_step_without_origin_is_noop():
     """A lone step cannot infer spacing; keep any existing interval and do not error."""
     step = np.array([np.timedelta64(7, "D")], dtype="timedelta64[ns]")
@@ -502,6 +513,10 @@ def test_deaccumulate_stamps_scalar_on_daily_step():
     out = deaccumulate_along_step(ds)
     assert out["tp"].attrs[DATA_INTERVAL_ATTR] == "1 day"
     assert "step_bounds" not in out.variables
+    np.testing.assert_array_equal(
+        np.asarray(out["step"].values).astype("timedelta64[D]"),
+        np.array([0, 1, 2], dtype="timedelta64[D]"),
+    )
 
 
 def test_deaccumulate_two_steps_stamps_remaining_interval():
@@ -513,10 +528,11 @@ def test_deaccumulate_two_steps_stamps_remaining_interval():
     assert out.sizes["step"] == 1
     assert out["tp"].attrs[DATA_INTERVAL_ATTR] == "1 day"
     np.testing.assert_allclose(out["tp"].values, 2.0)
+    assert out["step"].values[0].astype("timedelta64[D]") == np.timedelta64(0, "D")
 
 
 def test_deaccumulate_stamps_bounds_on_irregular_step():
-    """Irregular step deaccumulation writes CF bounds from the previous sample."""
+    """Irregular step deaccumulation writes CF bounds on left-labeled cells."""
     days = [0, 7, 10, 14, 20, 21, 28]
     steps = np.array(days, dtype="timedelta64[D]")
     accum = np.cumsum(np.arange(len(days), dtype=float))
@@ -533,12 +549,18 @@ def test_deaccumulate_stamps_bounds_on_irregular_step():
     out = deaccumulate_along_step(ds)
     assert DATA_INTERVAL_ATTR not in out["tp"].attrs
     assert out["step"].attrs["bounds"] == "step_bounds"
+    np.testing.assert_array_equal(
+        np.asarray(out["step"].values).astype("timedelta64[D]"),
+        np.array([0, 7, 10, 14, 20, 21], dtype="timedelta64[D]"),
+    )
     bounds = np.asarray(out["step_bounds"].values)
-    # First kept step is 7d; origin is the dropped 0d sample.
+    # Coord is the left edge; origin is the dropped last sample (28d).
     assert bounds[0, 0] == np.timedelta64(0, "D")
     assert bounds[0, 1] == np.timedelta64(7, "D")
     assert bounds[1, 0] == np.timedelta64(7, "D")
     assert bounds[1, 1] == np.timedelta64(10, "D")
+    assert bounds[-1, 0] == np.timedelta64(21, "D")
+    assert bounds[-1, 1] == np.timedelta64(28, "D")
 
 
 def test_expected_samples_and_filter_min_coverage():
@@ -629,6 +651,10 @@ def test_precip_amounts_to_rates_daily_and_step():
     )
     rates = precip_amounts_to_rates(tp)
     assert rates.sizes["step"] == 2
+    np.testing.assert_array_equal(
+        np.asarray(rates["step"].values).astype("timedelta64[D]"),
+        np.array([1, 2], dtype="timedelta64[D]"),
+    )
     np.testing.assert_allclose(rates["tp"].values, [2.0, 3.0])
     assert rates["tp"].attrs["units"] == STANDARD["precip"]["units"]
 
@@ -637,7 +663,11 @@ def test_precip_amounts_to_rates_daily_and_step():
     mixed_out = precip_amounts_to_rates(mixed)
     assert mixed_out.sizes["step"] == 2
     np.testing.assert_allclose(mixed_out["tp"].values, [2.0, 3.0])
-    np.testing.assert_allclose(mixed_out["t2m"].values, [281.0, 282.0])
+    np.testing.assert_allclose(mixed_out["t2m"].values, [280.0, 281.0])
+
+    daily_step = precip_amounts_to_rates(tp, interval="1 day", deaccumulate=False)
+    assert daily_step.sizes["step"] == 3
+    np.testing.assert_allclose(daily_step["tp"].values, [1.0, 3.0, 6.0])
 
 
 def test_precip_convertible_names_skips_temp_with_leftover_precip_standard_name():

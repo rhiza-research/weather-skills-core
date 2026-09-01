@@ -24,8 +24,9 @@ are passed through.
 
 Fetch writes accumulated variables as **rates**. Use ``precip_amounts_to_rates``
 (deaccumulate cumulative-since-init ``step`` amounts, else divide by
-``data_interval``). Period **totals** come from ``rate_to_total`` after
-``aggregate-temporal`` stamps ``aggregation_period``. That helper refuses
+``data_interval``). Deaccumulate labels each interval at its **left** edge
+(lead 0 = first native period). Period **totals** come from ``rate_to_total``
+after ``aggregate-temporal`` stamps ``aggregation_period``. That helper refuses
 amounts (and ``cell_methods`` ``sum``) so multiplying by the period cannot
 double-count. Plotters may convert in memory via ``precip_for_display``.
 
@@ -759,7 +760,9 @@ def stamp_data_interval(ds, period=None, dim=None, origin=None):
     If geometry is missing, spacing is inferred from ``dim`` (or ``time`` /
     ``step``): equal steps get ``data_interval``; unequal steps get
     ``{dim}_bounds``. ``origin`` (deaccumulate) forces a restamp from the
-    dropped lead even when an interval was already present. A singleton axis
+    dropped lead even when an interval was already present: a value **before**
+    the first tick is the left edge of a right-labeled cell; a value **after**
+    the last tick is the right edge of a left-labeled cell. A singleton axis
     with ``origin`` stamps that one cell; without ``origin`` it is a no-op.
     """
     if period is not None:
@@ -783,10 +786,16 @@ def stamp_data_interval(ds, period=None, dim=None, origin=None):
         if origin is None:
             return ds
         try:
-            left = np.asarray(origin).reshape(()).astype(values.dtype, copy=False)
+            other = np.asarray(origin).reshape(()).astype(values.dtype, copy=False)
         except (TypeError, ValueError):
             return ds
-        values = np.stack([left, values.reshape(())])
+        coord = values.reshape(())
+        if other < coord:
+            values = np.stack([other, coord])
+        elif other > coord:
+            values = np.stack([coord, other])
+        else:
+            return ds
     diffs, unit = _axis_tick_diffs(values)
     if diffs.size == 0 or np.any(diffs <= 0):
         raise UsageError(f"{axis!r} must be strictly increasing to stamp spacing")
@@ -794,24 +803,44 @@ def stamp_data_interval(ds, period=None, dim=None, origin=None):
         period = format_duration(ureg.Quantity(float(diffs[0]), unit).to("day"))
         return _apply_scalar_interval(ds, period, axis=axis)
 
+    ticks = np.asarray(ds[axis].values)
     if origin is None:
-        origin = _default_bounds_origin(values)
+        origin = _default_bounds_origin(ticks)
         if origin is None:
             raise UsageError(
                 f"irregular {axis!r} axis needs an origin for CF bounds "
                 "(timedelta step defaults to 0; datetime defaults to t0 minus the first gap)"
             )
-    n = values.size
-    pairs = np.empty((n, 2), dtype=values.dtype)
-    pairs[0, 0] = np.asarray(origin).astype(values.dtype, copy=False)
-    pairs[1:, 0] = values[:-1]
-    pairs[:, 1] = values
+    n = ticks.size
+    pairs = np.empty((n, 2), dtype=ticks.dtype)
+    origin_arr = np.asarray(origin).astype(ticks.dtype, copy=False)
+    if _origin_is_right_of_last(origin_arr, ticks):
+        pairs[:, 0] = ticks
+        pairs[:-1, 1] = ticks[1:]
+        pairs[-1, 1] = origin_arr
+    else:
+        pairs[0, 0] = origin_arr
+        pairs[1:, 0] = ticks[:-1]
+        pairs[:, 1] = ticks
     bound_name = f"{axis}_bounds"
     out = ds.assign_coords({bound_name: ((axis, _BOUNDS_NV_DIM), pairs)})
     out[axis].attrs["bounds"] = bound_name
     for name in out.data_vars:
         out[name].attrs.pop(DATA_INTERVAL_ATTR, None)
     return out
+
+
+def _origin_is_right_of_last(origin, ticks) -> bool:
+    """True when ``origin`` is after the last tick (left-labeled coords)."""
+    ticks = np.asarray(ticks)
+    if ticks.size == 0:
+        return False
+    try:
+        o = np.asarray(origin).reshape(())
+        last = ticks.reshape(-1)[-1]
+        return o > last
+    except (TypeError, ValueError):
+        return False
 
 
 def _default_bounds_origin(values):
@@ -901,12 +930,14 @@ def _broadcast_along_step(delta_days, dims):
 def deaccumulate_along_step(ds, names=None):
     """Per-step diff along ``step``. Precip amounts become ``mm day-1`` rates.
 
-    Drops the first step. Refuses variables that already look like rates.
+    Labels each interval at its left edge (lead 0 = first period) and drops
+    the last input step. Refuses variables that already look like rates.
     """
     if "step" not in ds.dims:
         raise UsageError("deaccumulate requires a step dim")
     names = list(names) if names is not None else list(ds.data_vars)
-    out = ds.isel(step=slice(1, None))
+    had_valid = "valid_time" in ds.variables
+    out = ds.isel(step=slice(0, -1))
     delta_days = _step_delta_days(ds)
     for name in names:
         if name not in ds.data_vars:
@@ -920,9 +951,9 @@ def deaccumulate_along_step(ds, names=None):
             raise UsageError(f"'{name}' looks like a rate; refuse to deaccumulate")
         plain = da.pint.dequantify() if da.pint.units is not None else da
         src_units = plain.attrs.get("units") or units
-        sliced = plain.isel(step=slice(1, None))
+        left = plain.isel(step=slice(0, -1))
         diffs = np.clip(
-            sliced.values - plain.isel(step=slice(0, -1)).values,
+            plain.isel(step=slice(1, None)).values - left.values,
             a_min=0,
             a_max=None,
         )
@@ -931,28 +962,36 @@ def deaccumulate_along_step(ds, names=None):
             kind = kind_from_units(src_units)
         attrs = dict(plain.attrs)
         if kind == "precip_amount":
-            if "step" not in sliced.dims:
+            if "step" not in left.dims:
                 raise UsageError(f"variable {name!r} has no step dim")
             mm, _ = convert_values(diffs, src_units, STANDARD["precip_amount"]["units"])
-            rate = mm / _broadcast_along_step(delta_days, sliced.dims)
-            diffed = sliced.copy(data=rate)
+            rate = mm / _broadcast_along_step(delta_days, left.dims)
+            diffed = left.copy(data=rate)
             attrs["units"] = STANDARD["precip"]["units"]
             attrs["standard_name"] = STANDARD["precip"]["standard_name"]
         else:
-            diffed = sliced.copy(data=diffs)
+            diffed = left.copy(data=diffs)
         diffed.attrs = attrs
         out[name] = diffed
-    origin = np.asarray(ds["step"].values)[0]
+    if had_valid and "valid_time" in out.variables:
+        out = out.drop_vars("valid_time")
+        if "time" in out.coords and getattr(out["time"], "ndim", 1) == 0:
+            try:
+                out = out.assign_coords(valid_time=("step", out["time"].values + out["step"].values))
+            except (TypeError, ValueError):
+                pass
+    origin = np.asarray(ds["step"].values)[-1]
     return stamp_data_interval(out, dim="step", origin=origin)
 
 
-def precip_amounts_to_rates(ds, *, interval=None):
+def precip_amounts_to_rates(ds, *, interval=None, deaccumulate=True):
     """Convert precip-amount data vars to ``mm day-1`` rates.
 
     Cumulative-since-init forecast amounts on ``step`` are deaccumulated
-    (companion non-amount vars keep their values but share the shortened
-    step axis). Otherwise amounts are divided by ``interval`` or
-    stamped/inferred ``data_interval``. Already-rate precip is unchanged.
+    when ``deaccumulate`` is true (companion non-amount vars keep their values
+    but share the shortened step axis, labeled at each interval's left edge).
+    Otherwise amounts are divided by ``interval`` or stamped/inferred
+    ``data_interval``. Already-rate precip is unchanged.
     """
     amount_names = []
     for name in ds.data_vars:
@@ -964,7 +1003,7 @@ def precip_amounts_to_rates(ds, *, interval=None):
     if not amount_names:
         return ds
 
-    if "step" in ds.dims and ds.sizes["step"] >= 2:
+    if deaccumulate and "step" in ds.dims and ds.sizes["step"] >= 2:
         return deaccumulate_along_step(ds, names=amount_names)
 
     period = interval or data_interval_of(ds)

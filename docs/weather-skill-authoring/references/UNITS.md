@@ -62,6 +62,13 @@ stamps exactly one of:
 
 Never both. Deaccumulate uses the same pair.
 
+**Forecast interval fields are left-labeled.** After deaccumulate (or a
+fetch that writes per-step rates), `step = 0` is the first native period
+`[init, init+interval)` — for daily precip, the 24h from init `2025-01-01`
+to `2025-01-02`. `step-to-time` stays `valid = init + step`, so that cell
+is `2025-01-01`. Instantaneous fields (analysis winds at 00Z) keep
+`step = 0` as the init instant.
+
 Once stamped, later skills keep that geometry. `stamp_data_interval`
 infers spacing only when `data_interval` and CF bounds are missing.
 `period=` and deaccumulate's `origin` overwrite.
@@ -142,7 +149,7 @@ is not treated as precip.
 | `convert_dataarray` / `convert_values` | Explicit unit ↔ unit |
 | `to_standard_units` | Temp / precip → standard display units |
 | `stamp_data_interval` | Native `data_interval` or CF bounds. Keeps an existing stamp; infers only when missing. `period=` and deaccumulate `origin` overwrite. |
-| `precip_amounts_to_rates` | Amount → `mm day-1` (deaccumulate amount vars on `step`, else ÷ interval) |
+| `precip_amounts_to_rates` | Amount → `mm day-1` (deaccumulate amount vars on `step` at the left edge, else ÷ interval) |
 | `stamp_precip_amounts` | Amount units → amount CF `standard_name`; rewrite rate display names |
 | `rate_to_total` | Rate × period → amount (refuses precip totals) |
 | `parse_aggregation_period` | Parse an `aggregation_period` / duration string |
