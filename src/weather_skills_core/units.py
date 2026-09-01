@@ -499,6 +499,7 @@ def quantify_dataset(ds):
             )
 
     out = ds.copy(deep=False)
+    saved_encoding = dict(out.encoding)
     saved_coord_units = {}
     for name in list(out.coords):
         if "units" in out[name].attrs:
@@ -515,6 +516,8 @@ def quantify_dataset(ds):
 
     for name, units in saved_coord_units.items():
         out[name].attrs["units"] = units
+    # pint.quantify() drops Dataset.encoding (Zarr source path); restore it.
+    out.encoding.update(saved_encoding)
     return out
 
 

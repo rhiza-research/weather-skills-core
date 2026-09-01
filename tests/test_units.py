@@ -228,6 +228,14 @@ def test_quantify_dataset_accepts_amount_totals():
     assert q["precip"].pint.units is not None
 
 
+def test_quantify_dataset_preserves_encoding_source():
+    """Zarr ``encoding['source']`` survives pint.quantify for legend filenames."""
+    ds = make_gridded()
+    ds.encoding["source"] = "/tmp/ta00072.zarr"
+    q = quantify_dataset(ds)
+    assert q.encoding.get("source") == "/tmp/ta00072.zarr"
+
+
 def test_quantify_dataset_accepts_cell_methods_sum():
     """A summed rate still quantifies."""
     ds = make_gridded(name="precip", units="mm day-1")
