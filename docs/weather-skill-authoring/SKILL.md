@@ -33,6 +33,7 @@ One question per file:
 # ///
 from weather_skills_core import Dataset, weather_skill
 
+# Keep in lockstep with SKILL.md metadata.version; do not edit by hand.
 _SKILL_VERSION = "0.1.0"
 
 
@@ -53,6 +54,13 @@ def my_skill(ds, output, bbox, start_time, end_time, variable, smoothing, **kwar
 
 if __name__ == "__main__":
     my_skill()
+```
+
+Pair that constant with SKILL.md frontmatter (do not edit either by hand; CI bumps both):
+
+```yaml
+metadata:
+  version: "0.1.0"
 ```
 
 `@weather_skill.argument(...)` mirrors
@@ -146,5 +154,7 @@ mark.
 
 ## Layout
 
-Keep the script as domain logic. Put version in `_SKILL_VERSION`. Declare
+Keep the script as domain logic. Put the published identity in SKILL.md
+`metadata.version` (Agent Skills spec) and a matching `_SKILL_VERSION` in
+the script; CI rewrites both. Declare
 `weather-skills-core` in the PEP 723 block. Document every flag in SKILL.md.
