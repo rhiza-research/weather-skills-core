@@ -147,11 +147,51 @@ def write_output(value, out_path, history, first_ds):
     print(f"Wrote: {out_path}", file=sys.stderr)
 
 
+def _open_zarr(path, io_spec=None):
+    """Open, validate, and quantify one Zarr store."""
+    if not path.exists():
+        raise UsageError(f"input not found: {path}")
+    ds = xr.open_zarr(path, consolidated=True)
+    if io_spec is not None:
+        std.validate_input(ds, io_spec, str(path))
+    ds = normalize_unit_strings(ds)
+    ds = normalize_step_coord(ds)
+    return quantify_dataset(ds)
+
+
+def _iter_zarr_path_holders(value):
+    """Yield objects that expose ``zarr_paths()`` (e.g. plot ``LayerSpec``)."""
+    if value is None:
+        return
+    items = value if isinstance(value, (list, tuple)) else (value,)
+    for item in items:
+        fn = getattr(item, "zarr_paths", None)
+        if callable(fn):
+            yield item
+
+
 def open_dataset_params(params, arguments):
-    """Replace Dataset-typed Path values with opened/validated/quantified datasets."""
+    """Replace Dataset-typed Path values with opened/validated/quantified datasets.
+
+    Values (or list items) that expose ``zarr_paths() -> list[Path]`` are also
+    opened and hashed. Identical paths are opened once and reused. Each holder
+    gets ``.ds`` (one path) or ``.datasets`` (several).
+    """
     input_paths: list[Path] = []
     upstream: list = []
     first_ds = None
+    cache: dict[Path, xr.Dataset] = {}
+
+    def remember(path, ds):
+        nonlocal first_ds
+        resolved = path.resolve()
+        cache[resolved] = ds
+        if resolved not in {p.resolve() for p in input_paths}:
+            input_paths.append(path)
+            upstream.append(provenance_mod.load_history(path))
+        if first_ds is None:
+            first_ds = ds
+        return ds
 
     for arg in arguments:
         if arg.dataset_type is None:
@@ -164,19 +204,33 @@ def open_dataset_params(params, arguments):
             continue
         opened = []
         for path in paths:
-            if not path.exists():
-                raise UsageError(f"input not found: {path}")
-            ds = xr.open_zarr(path, consolidated=True)
-            std.validate_input(ds, arg.dataset_type.io_spec, str(path))
-            ds = normalize_unit_strings(ds)
-            ds = normalize_step_coord(ds)
-            ds = quantify_dataset(ds)
-            opened.append(ds)
-            input_paths.append(path)
-            upstream.append(provenance_mod.load_history(path))
-            if first_ds is None:
-                first_ds = ds
+            resolved = path.resolve()
+            ds = cache.get(resolved)
+            if ds is None:
+                ds = _open_zarr(path, arg.dataset_type.io_spec)
+            opened.append(remember(path, ds))
         params[dest] = opened if isinstance(raw, (list, tuple)) else opened[0]
+
+    seen_holders: list[object] = []
+    for raw in list(params.values()):
+        for holder in _iter_zarr_path_holders(raw):
+            if holder in seen_holders:
+                continue
+            seen_holders.append(holder)
+            opened = []
+            for path in holder.zarr_paths() or []:
+                path = Path(path)
+                resolved = path.resolve()
+                ds = cache.get(resolved)
+                if ds is None:
+                    ds = _open_zarr(path)
+                opened.append(remember(path, ds))
+            if not opened:
+                continue
+            if len(opened) == 1:
+                holder.ds = opened[0]
+            else:
+                holder.datasets = opened
 
     return params, input_paths, upstream, first_ds
 
@@ -205,6 +259,9 @@ def weather_skill(
     Stack ``@weather_skill.argument`` for flags. Use ``type=Dataset(...)`` for
     Zarr inputs (opened and dim-checked before the skill runs). Dataset
     ``--input`` is passed to the skill as ``ds`` (a list when ``action="append"``).
+    Converted values that expose ``zarr_paths() -> list[Path]`` are opened and
+    hashed the same way (identical paths are reused); each holder gets ``.ds``
+    or ``.datasets``.
 
     When ``output=True`` (default), the decorator owns ``-o/--output``
     (repeatable). It injects ``output`` as a ``Path`` (one path) or

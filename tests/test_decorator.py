@@ -262,7 +262,9 @@ def test_run_loop_two_inputs(tmp_path):
     make_gridded(fill=2.0).to_zarr(b, mode="w", consolidated=True)
 
     @weather_skill(name="s", version="1.0.0")
-    @weather_skill.argument("-i", "--input", type=Dataset("observations"), action="append", required=True)
+    @weather_skill.argument(
+        "-i", "--input", type=Dataset("observations"), action="append", required=True
+    )
     def skill(ds, output, **kwargs):
         seen["n"] = len(ds)
         return ds[0]
@@ -516,3 +518,57 @@ def test_run_loop_none_return_skips_write(tmp_path):
 
     compose(["-o", str(out)])
     assert out.read_text() == "ok"
+
+
+class _LayerHolder:
+    """Minimal zarr_paths() holder for decorator tests."""
+
+    def __init__(self, path):
+        self.path = Path(path)
+        self.ds = None
+        self.raw = f"heatmap:{path}"
+
+    def zarr_paths(self):
+        return [self.path]
+
+    def __str__(self):
+        return self.raw
+
+
+def test_zarr_paths_holder_is_opened_and_hashed(tmp_path):
+    src = tmp_path / "in.zarr"
+    out = tmp_path / "out.zarr"
+    make_gridded().to_zarr(src, mode="w", consolidated=True)
+    seen = {}
+
+    @weather_skill(name="layered", version="0.1.0")
+    @weather_skill.argument("--layer", action="append", type=_LayerHolder)
+    def layered(output, layer, **kwargs):
+        seen["ds"] = layer[0].ds
+        return layer[0].ds
+
+    layered(["--layer", str(src), "-o", str(out)])
+    assert seen["ds"] is not None
+    assert "precip" in seen["ds"]
+    history = load_history(out)
+    assert history[-1]["skill"] == "layered"
+    assert history[-1]["input"]["basename"] == "in.zarr"
+
+
+def test_zarr_paths_dedupes_identical_paths(tmp_path):
+    src = tmp_path / "in.zarr"
+    out = tmp_path / "out.zarr"
+    make_gridded().to_zarr(src, mode="w", consolidated=True)
+    seen = {}
+
+    @weather_skill(name="layered", version="0.1.0")
+    @weather_skill.argument("--layer", action="append", type=_LayerHolder)
+    def layered(output, layer, **kwargs):
+        seen["layers"] = layer
+        return layer[0].ds
+
+    layered(["--layer", str(src), "--layer", str(src), "-o", str(out)])
+    assert seen["layers"][0].ds is seen["layers"][1].ds
+    history = load_history(out)
+    inp = history[-1]["input"]
+    assert inp["basename"] == "in.zarr"
