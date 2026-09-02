@@ -5,7 +5,7 @@ Lookup order (no network until a later step):
 1. Bundled Natural Earth countries — ISO3 or country name.
 2. Bundled Natural Earth groupings — continent / UN / World Bank labels
    (``East Africa``, ``Sub-Saharan Africa``, …).
-3. Bundled custom forecast boxes — ``Kenya OND region``, ….
+3. Bundled custom forecast boxes — ``Kenya OND region``, ``Indian Ocean basin``, ….
 4. geoBoundaries admin-1 / admin-2 — ``kenya-nairobi`` or ``KEN-nairobi``.
 5. OSM Nominatim — landmarks only, via :func:`geocode_nominatim`.
 
@@ -86,6 +86,18 @@ _CUSTOM_REGIONS = {
             "Central Eastern Kenya",
             "Central and Eastern Kenya",
             "CE Kenya",
+        ),
+    },
+    "indian_ocean_basin": {
+        "name": "Indian Ocean basin",
+        "bbox": (30.0, 20.0, -40.0, 120.0),
+        "iso3": None,
+        "country": None,
+        "aliases": (
+            "Indian Ocean",
+            "Indian Ocean Basin",
+            "Indian Ocean basin region",
+            "IOB",
         ),
     },
 }
@@ -313,11 +325,11 @@ def _slim_custom(spec: dict) -> dict:
     north, west, south, east = spec["bbox"]
     return _feature(
         _bbox_rectangle(north, west, south, east),
-        iso3=spec["iso3"],
+        iso3=spec.get("iso3"),
         name=spec["name"],
         region_name=clean_region_name(spec["name"]),
         level="custom",
-        country=spec["country"],
+        country=spec.get("country"),
         bbox=[north, west, south, east],
     )
 
