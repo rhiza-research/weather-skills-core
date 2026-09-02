@@ -329,9 +329,10 @@ def _draw_official_mark(img):
     marked = Image.alpha_composite(base, overlay)
     if img.mode == "RGBA":
         return marked
-    if img.mode == "RGB":
-        return marked.convert("RGB")
-    return marked.convert(img.mode)
+    # Stay in RGB after compositing. Converting a palette image back to ``P``
+    # requantizes and can merge nearby fills (BoM IOD pink / blue both become
+    # one purple).
+    return marked.convert("RGB")
 
 
 def load_history(zarr_path: Path) -> list:

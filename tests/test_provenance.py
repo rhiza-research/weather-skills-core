@@ -113,6 +113,31 @@ def test_visualization_png_no_mark_when_empty_or_invalid(tmp_path):
         assert before == after
 
 
+def test_visualization_png_palette_keeps_distinct_fills(tmp_path):
+    """BoM IOD graphs are 8-bit colormaps; stamping must not merge pastel fills."""
+    pink = (255, 234, 234)
+    blue = (226, 226, 255)
+    img = Image.new("P", (400, 300))
+    palette = [0] * (256 * 3)
+    palette[0:3] = pink
+    palette[3:6] = blue
+    palette[6:9] = (255, 255, 255)
+    img.putpalette(palette)
+    pixels = img.load()
+    for y in range(300):
+        index = 0 if y < 150 else 1
+        for x in range(400):
+            pixels[x, y] = index
+    path = tmp_path / "palette.png"
+    img.save(path)
+
+    provenance.stamp_figure(path, [entry()])
+
+    out = Image.open(path).convert("RGB")
+    assert out.getpixel((20, 20)) == pink
+    assert out.getpixel((20, 280)) == blue
+
+
 def test_visualization_jpeg_official_mark_when_intact(tmp_path):
     path = tmp_path / "marked.jpg"
     Image.new("RGB", (400, 300), color=(220, 220, 220)).save(path, quality=95)
