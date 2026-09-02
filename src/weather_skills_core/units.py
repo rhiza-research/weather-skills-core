@@ -981,7 +981,9 @@ def deaccumulate_along_step(ds, names=None):
         out = out.drop_vars("valid_time")
         if "time" in out.coords and getattr(out["time"], "ndim", 1) == 0:
             try:
-                out = out.assign_coords(valid_time=("step", out["time"].values + out["step"].values))
+                out = out.assign_coords(
+                    valid_time=("step", out["time"].values + out["step"].values)
+                )
             except (TypeError, ValueError):
                 pass
     origin = np.asarray(ds["step"].values)[-1]

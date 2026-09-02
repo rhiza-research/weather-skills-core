@@ -2,9 +2,10 @@
 
 import json
 
+from conftest import make_gridded
+
 from weather_skills_core import display_labels as dl
 from weather_skills_core.errors import UsageError
-from conftest import make_gridded
 
 
 def test_dataset_display_label_from_history():

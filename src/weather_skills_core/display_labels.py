@@ -134,9 +134,7 @@ def resolve_input_labels(
     if not labels:
         return [None] * n
     if len(labels) != n:
-        raise UsageError(
-            f"expected {n} --label values (one per {input_flag}), got {len(labels)}"
-        )
+        raise UsageError(f"expected {n} --label values (one per {input_flag}), got {len(labels)}")
     return list(labels)
 
 

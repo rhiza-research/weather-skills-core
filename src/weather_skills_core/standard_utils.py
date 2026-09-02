@@ -360,9 +360,7 @@ def _bbox_subset_points(ds, bbox: tuple[float, float, float, float], point_dim: 
                 f"but selects no {kind}; check the N/S extent and that west/east "
                 "bracket the intended dateline-crossing span."
             )
-        raise DataError(
-            f"--bbox {bbox_str} selects no {kind}; check the extent and N/W/S/E order."
-        )
+        raise DataError(f"--bbox {bbox_str} selects no {kind}; check the extent and N/W/S/E order.")
     return ds.isel({point_dim: np.nonzero(mask)[0]})
 
 
