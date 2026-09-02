@@ -445,7 +445,8 @@ def precip_for_display(ds, name: str):
     Uses stamped ``aggregation_period`` (from ``aggregate-temporal``). No-op
     when the variable is not a precip rate, has no period, or the time axis
     would overlap (same gates as convert-to-totals). Plotters call this so
-    precip defaults to ``mm`` totals without a separate Zarr.
+    precip defaults to ``mm`` totals without a separate Zarr. The period attr
+    is kept so colormap selection can stay period-aware.
     """
     if name not in ds.data_vars:
         return ds
@@ -473,7 +474,7 @@ def precip_for_display(ds, name: str):
     if looks_like_rate_display_name(attrs.get("GRIB_name")):
         attrs["GRIB_name"] = PRECIP_AMOUNT_LONG_NAME
     attrs["cell_methods"] = format_cell_methods(dim, "sum")
-    attrs.pop(AGGREGATION_PERIOD_ATTR, None)
+    # Keep aggregation_period so plotters can pick a period-aware precip palette.
     out = ds.copy(deep=False)
     out[name] = plain
     out[name].attrs = attrs

@@ -269,6 +269,7 @@ def test_precip_for_display_converts_aggregated_rate():
     out = precip_for_display(ds, "precip")
     assert out["precip"].attrs["units"] == STANDARD["precip_amount"]["units"]
     assert out["precip"].attrs["long_name"] == PRECIP_AMOUNT_LONG_NAME
+    assert out["precip"].attrs["aggregation_period"] == "1 day"
     np.testing.assert_allclose(out["precip"].values, 2.0)
 
 
