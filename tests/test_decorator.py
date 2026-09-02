@@ -509,6 +509,31 @@ def test_run_loop_write_stamps_amount_standard_name(tmp_path):
     assert written["tp"].attrs["standard_name"] == "lwe_thickness_of_precipitation_amount"
 
 
+def test_run_loop_write_snaps_latlon_to_float32(tmp_path):
+    src = tmp_path / "in.zarr"
+    out = tmp_path / "out.zarr"
+    ds = make_gridded(lats=(5.9749990996248385, -1.2750010213), lons=(33.0, 36.825))
+    ds.to_zarr(src, mode="w", consolidated=True)
+
+    @weather_skill(name="copy", version="0.1.0")
+    @weather_skill.argument("-i", "--input", type=Dataset("observations"), required=True)
+    def copy(ds, output, **kwargs):
+        return ds
+
+    copy(["-i", str(src), "-o", str(out)])
+    written = xr.open_zarr(out, consolidated=True)
+    assert written["latitude"].dtype == np.float32
+    assert written["longitude"].dtype == np.float32
+    np.testing.assert_array_equal(
+        written["latitude"].values,
+        np.round(np.array([5.9749990996248385, -1.2750010213]), 5).astype(np.float32),
+    )
+    np.testing.assert_array_equal(
+        written["longitude"].values,
+        np.round(np.array([33.0, 36.825]), 5).astype(np.float32),
+    )
+
+
 def test_run_loop_none_return_skips_write(tmp_path):
     out = tmp_path / "out.txt"
 

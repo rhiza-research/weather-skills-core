@@ -17,6 +17,7 @@ from weather_skills_core.dataset_type import Dataset
 from weather_skills_core.errors import SkillError, UsageError
 from weather_skills_core.standard_utils import (
     fill_missing_data_var_attrs,
+    normalize_latlon_coords,
     normalize_step_coord,
 )
 from weather_skills_core.units import (
@@ -102,6 +103,7 @@ def prepare_dataset_output(ds, *, first_ds=None):
     - GRIB-style ``kg m**-2`` → pint/CF strings
     - precip amount units → amount CF ``standard_name``
     - ``step`` timedelta → ``timedelta64[ns]``
+    - lat/lon coords → 5 decimal places, ``float32``
     - fill attrs stripped by geometry ops from the first input (same var names)
     """
     if first_ds is not None:
@@ -111,7 +113,8 @@ def prepare_dataset_output(ds, *, first_ds=None):
         ds = fill_missing_data_var_attrs(ref, ds)
     ds = normalize_unit_strings(ds)
     ds = stamp_precip_amounts(ds)
-    return normalize_step_coord(ds)
+    ds = normalize_step_coord(ds)
+    return normalize_latlon_coords(ds)
 
 
 def write_output(value, out_path, history, first_ds):
@@ -278,9 +281,10 @@ def weather_skill(
 
     On every Dataset write the decorator also normalizes GRIB unit strings,
     stamps precip-amount CF names when units are amounts, casts ``step`` to
-    ``timedelta64[ns]``, and fills data-var attrs stripped by the skill from
-    the first input (same variable names). Value conversion
-    (``to_standard_units``) stays skill-owned.
+    ``timedelta64[ns]``, rounds lat/lon to 5 decimal places as ``float32``,
+    and fills data-var attrs stripped by the skill from the first input
+    (same variable names). Value conversion (``to_standard_units``) stays
+    skill-owned.
     """
 
     def decorator(fn):

@@ -490,6 +490,19 @@ def test_grid_spacing_median_spacing():
     assert utils.grid_spacing([0.0, 0.25, 0.5, 0.75]) == pytest.approx(0.25)
 
 
+def test_spacing_is_finer_rejects_true_halving():
+    assert utils.spacing_is_finer(0.025, 0.05)
+    assert utils.spacing_is_finer(0.05, 0.1)
+
+
+def test_spacing_is_finer_allows_lateral_and_float_noise():
+    assert not utils.spacing_is_finer(0.05, 0.05)
+    assert not utils.spacing_is_finer(0.05, 0.05000000000000044)
+    assert not utils.spacing_is_finer(0.0499, 0.05)
+    assert not utils.spacing_is_finer(0.0501, 0.05)
+    assert not utils.spacing_is_finer(0.05, 0.0499)
+
+
 def test_pick_time_dim_prefers_time():
     ds = make_gridded()
     assert utils.pick_time_dim(ds) == "time"
@@ -548,6 +561,59 @@ def test_normalize_step_coord_casts_timedelta_us_to_ns():
     out = utils.normalize_step_coord(ds)
     assert out["step"].dtype == np.dtype("timedelta64[ns]")
     assert out["step"].values[0] == np.timedelta64(7, "D")
+
+
+def test_normalize_latlon_coords_rounds_and_casts_float32():
+    import numpy as np
+
+    ds = make_gridded(
+        lats=(5.9749990996248385, -1.2750010213),
+        lons=(33.0, 36.800000000000004),
+    )
+    out = utils.normalize_latlon_coords(ds)
+    assert out["latitude"].dtype == np.float32
+    assert out["longitude"].dtype == np.float32
+    np.testing.assert_array_equal(
+        out["latitude"].values,
+        np.round(np.array([5.9749990996248385, -1.2750010213]), 5).astype(np.float32),
+    )
+    np.testing.assert_array_equal(
+        out["longitude"].values,
+        np.round(np.array([33.0, 36.800000000000004]), 5).astype(np.float32),
+    )
+    assert out["latitude"].attrs == ds["latitude"].attrs
+
+
+def test_normalize_latlon_coords_keeps_half_cell_offset():
+    import numpy as np
+
+    kenya = make_gridded(lats=(-1.275,), lons=(36.80,))
+    chirps = make_gridded(lats=(-1.275,), lons=(36.825,))
+    k = utils.normalize_latlon_coords(kenya)
+    c = utils.normalize_latlon_coords(chirps)
+    np.testing.assert_array_equal(k["latitude"].values, c["latitude"].values)
+    assert not np.array_equal(k["longitude"].values, c["longitude"].values)
+
+
+def test_normalize_latlon_coords_point_obs_and_aliases():
+    import numpy as np
+
+    ds = make_station()
+    ds = ds.assign_coords(latitude=ds["latitude"].values + 1e-8)
+    out = utils.normalize_latlon_coords(ds)
+    assert out["latitude"].dtype == np.float32
+    assert out["longitude"].dtype == np.float32
+
+    aliased = make_gridded().rename({"latitude": "lat", "longitude": "lon"})
+    out_a = utils.normalize_latlon_coords(aliased)
+    assert out_a["lat"].dtype == np.float32
+    assert out_a["lon"].dtype == np.float32
+
+
+def test_normalize_latlon_coords_idempotent():
+    first = utils.normalize_latlon_coords(make_gridded())
+    second = utils.normalize_latlon_coords(first)
+    assert second is first
 
 
 def test_normalize_step_coord_noop_when_already_ns():

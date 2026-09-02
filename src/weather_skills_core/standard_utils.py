@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 import re
 from calendar import day_name, monthrange
@@ -55,6 +56,60 @@ def normalize_step_coord(ds, dim: str = "step"):
     if values.dtype == np.dtype("timedelta64[ns]"):
         return ds
     return ds.assign_coords({dim: values.astype("timedelta64[ns]")})
+
+
+_LATLON_DECIMALS = 5
+
+
+def _latlon_coord_names(ds) -> list[str]:
+    """Coord names that are geographic latitude or longitude."""
+    names: list[str] = []
+    seen: set[str] = set()
+    for preferred in ("lat", "lon"):
+        for name in names_for(preferred):
+            if name in ds.coords and name not in seen:
+                names.append(name)
+                seen.add(name)
+    for name in ds.coords:
+        if name in seen:
+            continue
+        std = ds[name].attrs.get("standard_name")
+        if std in ("latitude", "longitude"):
+            names.append(name)
+            seen.add(name)
+    return names
+
+
+def normalize_latlon_coords(ds):
+    """Round lat/lon coords to 5 decimals and store them as float32.
+
+    Snaps float64 noise (Kenya ``5.9749991`` vs CHIRPS ``5.975``) so grids
+    that are the same at ~1 m join. A real half-cell offset (0.025°) is kept.
+    """
+    import numpy as np
+
+    updates = {}
+    for name in _latlon_coord_names(ds):
+        values = np.asarray(ds[name].values)
+        if not np.issubdtype(values.dtype, np.floating):
+            continue
+        snapped = np.round(np.asarray(values, dtype=np.float64), _LATLON_DECIMALS).astype(
+            np.float32
+        )
+        already = (
+            values.dtype == np.float32
+            and values.shape == snapped.shape
+            and np.array_equal(values, snapped)
+        )
+        if already:
+            continue
+        updates[name] = (ds[name].dims, snapped, dict(ds[name].attrs))
+    if not updates:
+        return ds
+    out = ds.assign_coords(updates)
+    for name in updates:
+        out[name].encoding["dtype"] = "float32"
+    return out
 
 
 def fill_missing_data_var_attrs(src, dst):
@@ -456,6 +511,22 @@ def grid_spacing(coord_vals) -> float:
     if coord.size < 2:
         raise ValueError(f"Cannot infer spacing for coord with size {coord.size}")
     return float(abs(np.median(np.diff(coord))))
+
+
+# Near-equal spacings (float rounding, irregular CHIRPS cells, a half-cell
+# lateral shift at the same nominal resolution) are not a resolution change.
+_SPACING_REL_TOL = 1e-2
+
+
+def spacing_is_finer(target: float, source: float, *, rel_tol: float = _SPACING_REL_TOL) -> bool:
+    """True if ``target`` spacing is meaningfully smaller than ``source``.
+
+    ``math.isclose`` with ``rel_tol`` (default 1%) treats a lateral shift or
+    float-rounded 0.05° vs 0.0500001° as equal, so coarsen/downscale do not
+    ping-pong when one axis measures slightly finer and the other slightly
+    coarser.
+    """
+    return target < source and not math.isclose(target, source, rel_tol=rel_tol, abs_tol=0.0)
 
 
 def pick_time_dim(obj, override=None) -> str:
