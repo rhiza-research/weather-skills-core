@@ -432,8 +432,42 @@ def clip_by_geometry(
     if lat_dim is None or lon_dim is None:
         lat_dim, lon_dim = detect_spatial_dims(ds)
     ds = ensure_normalized_longitude(ds, lon_dim=lon_dim)
-    lon2d, lat2d = np.meshgrid(ds[lon_dim].values, ds[lat_dim].values)
-    mask = shapely.contains_xy(geometry, lon2d, lat2d)
+
+    def _edges(vals: np.ndarray) -> np.ndarray:
+        vals = np.asarray(vals, dtype=float)
+        if vals.size == 0:
+            raise UsageError("spatial axis has length 0; cannot clip by geometry.")
+        if vals.size == 1:
+            # No spacing to infer cell area: treat as a point cell.
+            return np.array([vals[0], vals[0]], dtype=float)
+        diffs = np.diff(vals)
+        if not ((diffs > 0).all() or (diffs < 0).all()):
+            raise UsageError(
+                "spatial axis is non-monotonic; cannot infer cell boundaries for clipping."
+            )
+        mids = (vals[:-1] + vals[1:]) / 2.0
+        first = vals[0] - (vals[1] - vals[0]) / 2.0
+        last = vals[-1] + (vals[-1] - vals[-2]) / 2.0
+        return np.concatenate(([first], mids, [last]))
+
+    lat_edges = _edges(np.asarray(ds[lat_dim].values))
+    lon_edges = _edges(np.asarray(ds[lon_dim].values))
+
+    if len(lat_edges) == 2 or len(lon_edges) == 2:
+        # Degenerate 1-cell axis: fall back to center-point containment.
+        lon2d, lat2d = np.meshgrid(ds[lon_dim].values, ds[lat_dim].values)
+        mask = shapely.contains_xy(geometry, lon2d, lat2d)
+    else:
+        west = np.minimum(lon_edges[:-1], lon_edges[1:])
+        east = np.maximum(lon_edges[:-1], lon_edges[1:])
+        south = np.minimum(lat_edges[:-1], lat_edges[1:])
+        north = np.maximum(lat_edges[:-1], lat_edges[1:])
+        west2d, south2d = np.meshgrid(west, south)
+        east2d, north2d = np.meshgrid(east, north)
+        cells = shapely.box(west2d, south2d, east2d, north2d)
+        # Keep cells with a positive-area overlap (not just edge/corner touch).
+        mask = shapely.area(shapely.intersection(cells, geometry)) > 0.0
+
     mask_da = xr.DataArray(
         mask, dims=(lat_dim, lon_dim), coords={lat_dim: ds[lat_dim], lon_dim: ds[lon_dim]}
     )

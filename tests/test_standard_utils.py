@@ -593,6 +593,17 @@ def test_clip_by_geometry_grid_drop():
     assert list(out.longitude.values) == [11.0, 12.0]
 
 
+def test_clip_by_geometry_grid_keeps_any_cell_overlap():
+    from shapely.geometry import box
+
+    ds = make_gridded()
+    # Touches the left half of the lon=11 cell (cell span is 10.5..11.5),
+    # but does not contain the center point (11, 1).
+    out = utils.clip_by_geometry(ds, box(10.6, 0.6, 10.9, 1.4), drop=True)
+    assert list(out.latitude.values) == [1.0]
+    assert list(out.longitude.values) == [11.0]
+
+
 def test_clip_by_geometry_empty_raises():
     from shapely.geometry import box
 
