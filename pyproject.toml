@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "weather-skills-core"
-version = "0.1.0"
+version = "0.1.1"
 description = "Core library for weather skills: the @weather_skill decorator owning CLI construction, standard-dataset validation, provenance, and output writing."
 readme = "README.md"
 license = "MIT"

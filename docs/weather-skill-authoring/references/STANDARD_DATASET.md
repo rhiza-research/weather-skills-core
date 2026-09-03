@@ -91,9 +91,9 @@ def clip_region(ds, output, **kwargs):
     return ds
 ```
 
-Several Zarrs on one flag: `nargs=2` or `nargs="+"`. `--input` still
-arrives as `ds`, now a list. Separate Dataset flags when the roles
-differ (`--forecast` vs `--obs`).
+Several Zarrs: `action="append"` and repeat `-i` once per store.
+`--input` still arrives as `ds`, now a list. Separate Dataset flags when
+the roles differ (`--forecast` vs `--obs`).
 
 The decorator owns `-o/--output`. There is no output dim check — the
 returned cube is whatever the skill produced. Return count must match
@@ -105,7 +105,7 @@ Every writing skill appends one step to `weather_skills_history`.
 
 | Attr | Who sets it | Meaning |
 | --- | --- | --- |
-| `weather_skills_source` | fetchers (optional) | Where the data came from, e.g. `chirps` |
+| `weather_skills_source` | fetchers (optional) | Where the data came from, e.g. `chirps` or `dynamical:<catalog-id>`. Plots prettify this token for the short product name, so pick something that title-cases cleanly. |
 | `weather_skills_history` | every writing skill | JSON list of `{skill, version, args, input}` |
 
 `input` is `{basename, hash}` of the upstream Zarr. Path write targets

@@ -21,6 +21,7 @@ from weather_skills_core.units import (
     filter_min_coverage,
     format_cell_methods,
     format_duration,
+    format_units_for_display,
     infer_timestep,
     looks_like_rate_display_name,
     parse_aggregation_period,
@@ -34,6 +35,7 @@ from weather_skills_core.units import (
     units_convertible,
     units_equal,
     ureg,
+    variable_label_for_display,
 )
 
 
@@ -42,6 +44,46 @@ def test_units_equal_spelling():
     assert units_equal("mm/day", "mm day-1")
     assert units_equal("degC", "degree_Celsius")
     assert not units_equal("mm", "mm day-1")
+
+
+def test_format_units_for_display():
+    """Figure labels use mm/day and °C, not CF or pint pretty-print."""
+    assert format_units_for_display("mm day-1") == "mm/day"
+    assert format_units_for_display("millimeter / day") == "mm/day"
+    assert format_units_for_display("mm") == "mm"
+    assert format_units_for_display("degree_Celsius") == "°C"
+    assert format_units_for_display("") == ""
+    assert format_units_for_display(None) == ""
+
+
+def test_variable_label_for_display_prefers_long_name():
+    """Colorbars use long_name even when a leftover GRIB rate name is present."""
+    da = make_forecast()["tp"]
+    da.attrs.update(
+        units="mm",
+        standard_name="lwe_thickness_of_precipitation_amount",
+        long_name="Total precipitation",
+        GRIB_name="Precipitation rate",
+    )
+    assert variable_label_for_display(da) == "Total precipitation [mm]"
+    assert variable_label_for_display(da, include_units=False) == "Total precipitation"
+
+    product = make_gridded()["precip"]
+    product.attrs["long_name"] = "IMERG daily precipitation"
+    assert variable_label_for_display(product) == "IMERG daily precipitation [mm/day]"
+
+    amount = make_forecast()["tp"]
+    amount.attrs.update(
+        units="mm",
+        standard_name="lwe_thickness_of_precipitation_amount",
+        long_name="precipitation rate",
+        GRIB_name="Precipitation rate",
+    )
+    assert variable_label_for_display(amount) == "Total precipitation [mm]"
+
+    bare = make_gridded()["precip"]
+    assert variable_label_for_display(bare) == "precip [mm/day]"
+    assert variable_label_for_display(bare, fallback="rainfall") == "rainfall [mm/day]"
 
 
 def test_pentad_dekad_registry():
@@ -186,6 +228,14 @@ def test_quantify_dataset_accepts_amount_totals():
     assert q["precip"].pint.units is not None
 
 
+def test_quantify_dataset_preserves_encoding_source():
+    """Zarr ``encoding['source']`` survives pint.quantify for legend filenames."""
+    ds = make_gridded()
+    ds.encoding["source"] = "/tmp/ta00072.zarr"
+    q = quantify_dataset(ds)
+    assert q.encoding.get("source") == "/tmp/ta00072.zarr"
+
+
 def test_quantify_dataset_accepts_cell_methods_sum():
     """A summed rate still quantifies."""
     ds = make_gridded(name="precip", units="mm day-1")
@@ -219,6 +269,7 @@ def test_precip_for_display_converts_aggregated_rate():
     out = precip_for_display(ds, "precip")
     assert out["precip"].attrs["units"] == STANDARD["precip_amount"]["units"]
     assert out["precip"].attrs["long_name"] == PRECIP_AMOUNT_LONG_NAME
+    assert out["precip"].attrs["aggregation_period"] == "1 day"
     np.testing.assert_allclose(out["precip"].values, 2.0)
 
 
@@ -338,11 +389,57 @@ def test_stamp_data_interval_explicit_and_inferred():
     assert daily["precip"].attrs[DATA_INTERVAL_ATTR] == "1 day"
 
 
+def test_stamp_data_interval_singleton_step_with_origin():
+    """One remaining forecast step stamps from the dropped previous lead."""
+    step = np.array([np.timedelta64(7, "D")], dtype="timedelta64[ns]")
+    ds = xr.Dataset(
+        {"tp": (("step",), np.ones(1), {"units": "mm day-1"})},
+        coords={"step": step, "time": np.datetime64("2026-01-01", "ns")},
+    )
+    out = stamp_data_interval(ds, dim="step", origin=np.timedelta64(0, "D"))
+    assert out["tp"].attrs[DATA_INTERVAL_ATTR] == "7 day"
+
+
+def test_stamp_data_interval_singleton_left_labeled_origin():
+    """Origin after the tick is the right edge of a left-labeled cell."""
+    step = np.array([np.timedelta64(0, "D")], dtype="timedelta64[ns]")
+    ds = xr.Dataset(
+        {"tp": (("step",), np.ones(1), {"units": "mm day-1"})},
+        coords={"step": step, "time": np.datetime64("2026-01-01", "ns")},
+    )
+    out = stamp_data_interval(ds, dim="step", origin=np.timedelta64(7, "D"))
+    assert out["tp"].attrs[DATA_INTERVAL_ATTR] == "7 day"
+
+
+def test_stamp_data_interval_singleton_step_without_origin_is_noop():
+    """A lone step cannot infer spacing; keep any existing interval and do not error."""
+    step = np.array([np.timedelta64(7, "D")], dtype="timedelta64[ns]")
+    ds = xr.Dataset(
+        {
+            "tp": (
+                ("step",),
+                np.ones(1),
+                {"units": "mm day-1", DATA_INTERVAL_ATTR: "6 hour"},
+            )
+        },
+        coords={"step": step, "time": np.datetime64("2026-01-01", "ns")},
+    )
+    out = stamp_data_interval(ds)
+    assert out["tp"].attrs[DATA_INTERVAL_ATTR] == "6 hour"
+
+    bare = xr.Dataset(
+        {"tp": (("step",), np.ones(1), {"units": "mm day-1"})},
+        coords={"step": step, "time": np.datetime64("2026-01-01", "ns")},
+    )
+    kept = stamp_data_interval(bare)
+    assert DATA_INTERVAL_ATTR not in kept["tp"].attrs
+
+
 def test_stamp_data_interval_irregular_step_writes_cf_bounds():
-    """Irregular step drops a scalar interval and writes CF bounds."""
+    """Irregular step with no existing geometry writes CF bounds."""
     days = np.array([7, 10, 14, 21], dtype="timedelta64[D]").astype("timedelta64[ns]")
     ds = xr.Dataset(
-        {"tp": (("step",), np.ones(4), {"units": "mm day-1", DATA_INTERVAL_ATTR: "1 day"})},
+        {"tp": (("step",), np.ones(4), {"units": "mm day-1"})},
         coords={"step": days},
     )
     out = stamp_data_interval(ds)
@@ -355,6 +452,38 @@ def test_stamp_data_interval_irregular_step_writes_cf_bounds():
         bounds[:, 0],
         np.array([0, 7, 10, 14], dtype="timedelta64[D]").astype("timedelta64[ns]"),
     )
+
+
+def test_stamp_data_interval_keeps_existing_when_ticks_would_differ():
+    """A stamped 7-day interval survives select of two leads 14 days apart."""
+    days = np.array([7, 21], dtype="timedelta64[D]").astype("timedelta64[ns]")
+    ds = xr.Dataset(
+        {"tp": (("step",), np.ones(2), {"units": "mm day-1", DATA_INTERVAL_ATTR: "7 day"})},
+        coords={"step": days, "time": np.datetime64("2026-01-01", "ns")},
+    )
+    out = stamp_data_interval(ds)
+    assert out["tp"].attrs[DATA_INTERVAL_ATTR] == "7 day"
+    assert "step_bounds" not in out.variables
+
+
+def test_stamp_data_interval_explicit_period_overwrites():
+    """period= is the product telling us the interval; it replaces a prior stamp."""
+    ds = make_gridded(n_time=3)
+    ds["precip"].attrs[DATA_INTERVAL_ATTR] = "1 day"
+    out = stamp_data_interval(ds, period="30 minute")
+    assert out["precip"].attrs[DATA_INTERVAL_ATTR] == "30 minute"
+
+
+def test_deaccumulate_origin_restamps_existing_interval():
+    """Deaccumulate changes cell geometry, so origin overrides a leftover interval."""
+    ds = make_forecast(n_number=None, n_step=4)
+    ds["tp"].attrs.update(
+        units="mm",
+        standard_name="lwe_thickness_of_precipitation_amount",
+        **{DATA_INTERVAL_ATTR: "6 hour"},
+    )
+    out = deaccumulate_along_step(ds)
+    assert out["tp"].attrs[DATA_INTERVAL_ATTR] == "1 day"
 
 
 def test_stamp_data_interval_irregular_datetime_defaults_origin():
@@ -393,10 +522,26 @@ def test_deaccumulate_stamps_scalar_on_daily_step():
     out = deaccumulate_along_step(ds)
     assert out["tp"].attrs[DATA_INTERVAL_ATTR] == "1 day"
     assert "step_bounds" not in out.variables
+    np.testing.assert_array_equal(
+        np.asarray(out["step"].values).astype("timedelta64[D]"),
+        np.array([0, 1, 2], dtype="timedelta64[D]"),
+    )
+
+
+def test_deaccumulate_two_steps_stamps_remaining_interval():
+    """Deaccumulating two leads leaves one step whose interval is still known."""
+    ds = make_forecast(n_number=None, n_step=2)
+    ds["tp"].attrs.update(units="mm", standard_name="lwe_thickness_of_precipitation_amount")
+    ds["tp"].values[:] = np.array([[[1.0, 1.0], [1.0, 1.0]], [[3.0, 3.0], [3.0, 3.0]]])
+    out = deaccumulate_along_step(ds)
+    assert out.sizes["step"] == 1
+    assert out["tp"].attrs[DATA_INTERVAL_ATTR] == "1 day"
+    np.testing.assert_allclose(out["tp"].values, 2.0)
+    assert out["step"].values[0].astype("timedelta64[D]") == np.timedelta64(0, "D")
 
 
 def test_deaccumulate_stamps_bounds_on_irregular_step():
-    """Irregular step deaccumulation writes CF bounds from the previous sample."""
+    """Irregular step deaccumulation writes CF bounds on left-labeled cells."""
     days = [0, 7, 10, 14, 20, 21, 28]
     steps = np.array(days, dtype="timedelta64[D]")
     accum = np.cumsum(np.arange(len(days), dtype=float))
@@ -413,12 +558,18 @@ def test_deaccumulate_stamps_bounds_on_irregular_step():
     out = deaccumulate_along_step(ds)
     assert DATA_INTERVAL_ATTR not in out["tp"].attrs
     assert out["step"].attrs["bounds"] == "step_bounds"
+    np.testing.assert_array_equal(
+        np.asarray(out["step"].values).astype("timedelta64[D]"),
+        np.array([0, 7, 10, 14, 20, 21], dtype="timedelta64[D]"),
+    )
     bounds = np.asarray(out["step_bounds"].values)
-    # First kept step is 7d; origin is the dropped 0d sample.
+    # Coord is the left edge; origin is the dropped last sample (28d).
     assert bounds[0, 0] == np.timedelta64(0, "D")
     assert bounds[0, 1] == np.timedelta64(7, "D")
     assert bounds[1, 0] == np.timedelta64(7, "D")
     assert bounds[1, 1] == np.timedelta64(10, "D")
+    assert bounds[-1, 0] == np.timedelta64(21, "D")
+    assert bounds[-1, 1] == np.timedelta64(28, "D")
 
 
 def test_expected_samples_and_filter_min_coverage():
@@ -509,6 +660,10 @@ def test_precip_amounts_to_rates_daily_and_step():
     )
     rates = precip_amounts_to_rates(tp)
     assert rates.sizes["step"] == 2
+    np.testing.assert_array_equal(
+        np.asarray(rates["step"].values).astype("timedelta64[D]"),
+        np.array([1, 2], dtype="timedelta64[D]"),
+    )
     np.testing.assert_allclose(rates["tp"].values, [2.0, 3.0])
     assert rates["tp"].attrs["units"] == STANDARD["precip"]["units"]
 
@@ -517,7 +672,11 @@ def test_precip_amounts_to_rates_daily_and_step():
     mixed_out = precip_amounts_to_rates(mixed)
     assert mixed_out.sizes["step"] == 2
     np.testing.assert_allclose(mixed_out["tp"].values, [2.0, 3.0])
-    np.testing.assert_allclose(mixed_out["t2m"].values, [281.0, 282.0])
+    np.testing.assert_allclose(mixed_out["t2m"].values, [280.0, 281.0])
+
+    daily_step = precip_amounts_to_rates(tp, interval="1 day", deaccumulate=False)
+    assert daily_step.sizes["step"] == 3
+    np.testing.assert_allclose(daily_step["tp"].values, [1.0, 3.0, 6.0])
 
 
 def test_precip_convertible_names_skips_temp_with_leftover_precip_standard_name():

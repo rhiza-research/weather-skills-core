@@ -16,10 +16,11 @@ SOURCE_ATTR = "weather_skills_source"
 DEFAULT_SOFTWARE = "forecasting-skills"
 OFFICIAL_MARK_TEXT = "weather-skills provenance verified"
 # Circular rubber-stamp arcs (drawn uppercase for an inked look).
+# Keep each arc short so letters stay large enough to read at corner size.
 _MARK_ARC_TOP = "WEATHER-SKILLS"
-_MARK_ARC_BOTTOM = "PROVENANCE VERIFIED"
+_MARK_ARC_BOTTOM = "VERIFIED"
 # Classic crimson rubber-stamp ink (RGBA) — opaque enough to read on maps.
-_MARK_INK = (158, 18, 36, 245)
+_MARK_INK = (139, 15, 32, 250)
 
 _EXIF_USER_COMMENT = 0x9286  # EXIF UserComment tag
 _HTML_META_RE = re.compile(
@@ -151,17 +152,21 @@ def chain_is_intact(history) -> bool:
 
 
 def _load_mark_font(size: int):
-    """Prefer a bold/readable TrueType font; fall back to PIL's default bitmap font."""
+    """Prefer a condensed display face so arc type stays readable at small diameter."""
     from PIL import ImageFont
 
+    # Condensed first: the circle is small, and a wide bold face collides on the arc.
     candidates = (
-        "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
-        "/System/Library/Fonts/Supplemental/Arial.ttf",
-        "/System/Library/Fonts/Helvetica.ttc",
+        "/System/Library/Fonts/Supplemental/Arial Narrow Bold.ttf",
+        "/System/Library/Fonts/Supplemental/DIN Condensed Bold.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSansNarrow-Bold.ttf",
+        "/usr/share/fonts/truetype/liberation2/LiberationSansNarrow-Bold.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSansCondensed-Bold.ttf",
+        "/System/Library/Fonts/Supplemental/Impact.ttf",
         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
         "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
-        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+        "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+        "/System/Library/Fonts/Helvetica.ttc",
         "DejaVuSans-Bold.ttf",
         "DejaVuSans.ttf",
     )
@@ -178,43 +183,70 @@ def _paste_rotated_char(stamp, char, font, fill, cx, cy, angle_deg, *, scale: in
     from PIL import Image, ImageDraw
 
     # Oversized tile so rotated glyphs are not clipped.
-    tile_size = 48 * scale
+    tile_size = max(48 * scale, int(getattr(font, "size", 12) * 3))
     tile = Image.new("RGBA", (tile_size, tile_size), (0, 0, 0, 0))
     draw = ImageDraw.Draw(tile)
-    stroke = max(1, getattr(font, "size", 12) // 16)
     bbox = draw.textbbox((0, 0), char, font=font)
     tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+    pos = (tile_size / 2 - bbox[0] - tw / 2, tile_size / 2 - bbox[1] - th / 2)
+    # White halo for contrast on maps, then a same-ink stroke so stems stay thick.
     draw.text(
-        (tile_size / 2 - bbox[0] - tw / 2, tile_size / 2 - bbox[1] - th / 2),
+        pos,
         char,
         font=font,
         fill=fill,
-        stroke_width=stroke,
+        stroke_width=max(2, scale // 2),
         stroke_fill=(255, 255, 255, 230),
+    )
+    draw.text(
+        pos,
+        char,
+        font=font,
+        fill=fill,
+        stroke_width=max(1, scale // 3),
+        stroke_fill=fill,
     )
     rotated = tile.rotate(-angle_deg, resample=Image.Resampling.BICUBIC, expand=True)
     stamp.paste(rotated, (int(cx - rotated.width / 2), int(cy - rotated.height / 2)), rotated)
 
 
+def _glyph_width(char: str, font) -> float:
+    """Advance width of ``char`` in the given font."""
+    getlength = getattr(font, "getlength", None)
+    if getlength is not None:
+        return max(1.0, float(getlength(char)))
+    from PIL import Image, ImageDraw
+
+    draw = ImageDraw.Draw(Image.new("L", (1, 1)))
+    bbox = draw.textbbox((0, 0), char, font=font)
+    return max(1.0, float(bbox[2] - bbox[0]))
+
+
 def _draw_arc_text(stamp, text, cx, cy, radius, font, fill, *, top: bool, scale: int):
-    """Draw ``text`` along a circular arc (top over the top; bottom under)."""
+    """Draw ``text`` along a circular arc, spaced by glyph width (top over; bottom under)."""
     import math
 
     if not text:
         return
-    # Angular span ~110° so labels stay readable and don't collide.
-    span = min(2.0, 0.22 * len(text) + 0.7)
+    tracking = max(float(scale) * 0.5, font.size * 0.08)
+    widths = [_glyph_width(ch, font) for ch in text]
+    total = sum(widths) + tracking * max(len(text) - 1, 0)
+    # Cap the arc so type stays upright enough to read (~135°).
+    span = min(total / max(radius, 1.0), 2.35)
     if top:
         start = -math.pi / 2 - span / 2
-        step = span / max(len(text) - 1, 1)
+        direction = 1.0
     else:
         start = math.pi / 2 + span / 2
-        step = -span / max(len(text) - 1, 1)
+        direction = -1.0
 
-    for i, char in enumerate(text):
+    cursor = 0.0
+    for char, width in zip(text, widths, strict=True):
+        mid = cursor + width / 2.0
+        angle = start + direction * (mid / total) * span
+        cursor += width + tracking
         if char == " ":
             continue
-        angle = start + i * step
         x = cx + radius * math.cos(angle)
         y = cy + radius * math.sin(angle)
         tangent_deg = math.degrees(angle) + (90.0 if top else -90.0)
@@ -227,8 +259,8 @@ def _render_circular_stamp(diameter: int):
 
     from PIL import Image, ImageDraw
 
-    # Draw at 3× then downscale so type stays sharp at the smaller display size.
-    scale = 3
+    # Draw at 4× then downscale so condensed type stays sharp at corner size.
+    scale = 4
     size = max(diameter, 32) * scale
     stamp = Image.new("RGBA", (size, size), (0, 0, 0, 0))
     draw = ImageDraw.Draw(stamp)
@@ -240,24 +272,22 @@ def _render_circular_stamp(diameter: int):
     draw.ellipse(
         (cx - outer_r, cy - outer_r, cx + outer_r, cy + outer_r),
         outline=ink,
-        width=max(2 * scale, size // 22),
+        width=max(2 * scale, size // 28),
     )
-    inner_r = outer_r * 0.78
+    inner_r = outer_r * 0.64
     draw.ellipse(
         (cx - inner_r, cy - inner_r, cx + inner_r, cy + inner_r),
         outline=ink,
-        width=max(scale, size // 36),
+        width=max(scale, size // 50),
     )
 
-    # Slightly larger type relative to diameter so arc text stays legible when small.
-    font = _load_mark_font(max(8 * scale, int(size * 0.125)))
-    _draw_arc_text(stamp, _MARK_ARC_TOP, cx, cy, outer_r * 0.87, font, ink, top=True, scale=scale)
-    _draw_arc_text(
-        stamp, _MARK_ARC_BOTTOM, cx, cy, outer_r * 0.87, font, ink, top=False, scale=scale
-    )
+    font = _load_mark_font(max(10 * scale, int(size * 0.115)))
+    text_r = (outer_r + inner_r) / 2
+    _draw_arc_text(stamp, _MARK_ARC_TOP, cx, cy, text_r, font, ink, top=True, scale=scale)
+    _draw_arc_text(stamp, _MARK_ARC_BOTTOM, cx, cy, text_r, font, ink, top=False, scale=scale)
 
-    # Center medallion: a filled star so the stamp reads at a glance.
-    star_r = outer_r * 0.22
+    # Small center star — keep the rubber-stamp look without crowding the type.
+    star_r = outer_r * 0.16
     pts = []
     for i in range(10):
         r = star_r if i % 2 == 0 else star_r * 0.42
@@ -266,7 +296,7 @@ def _render_circular_stamp(diameter: int):
     draw.polygon(pts, fill=ink)
 
     # Slight rotation so it looks hand-inked rather than UI chrome.
-    stamp = stamp.rotate(-12, resample=Image.Resampling.BICUBIC, expand=True)
+    stamp = stamp.rotate(-6, resample=Image.Resampling.BICUBIC, expand=True)
     out_w = max(1, round(stamp.width / scale))
     out_h = max(1, round(stamp.height / scale))
     return stamp.resize((out_w, out_h), resample=Image.Resampling.LANCZOS)
@@ -283,8 +313,8 @@ def _draw_official_mark(img):
     if min(w, h) < 96:
         return img.copy()
 
-    # Small corner mark (~10% of the short side) so it reads as ink, not chrome.
-    diameter = max(36, min(int(min(w, h) * 0.10), 72))
+    # Compact corner mark; condensed type stays legible around ~12% of the short side.
+    diameter = max(72, min(int(min(w, h) * 0.12), 96))
     stamp = _render_circular_stamp(diameter)
     margin = max(4, int(min(w, h) * 0.015))
     if stamp.width + 2 * margin > w or stamp.height + 2 * margin > h:
@@ -299,9 +329,10 @@ def _draw_official_mark(img):
     marked = Image.alpha_composite(base, overlay)
     if img.mode == "RGBA":
         return marked
-    if img.mode == "RGB":
-        return marked.convert("RGB")
-    return marked.convert(img.mode)
+    # Stay in RGB after compositing. Converting a palette image back to ``P``
+    # requantizes and can merge nearby fills (BoM IOD pink / blue both become
+    # one purple).
+    return marked.convert("RGB")
 
 
 def load_history(zarr_path: Path) -> list:

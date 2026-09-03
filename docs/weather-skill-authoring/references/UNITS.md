@@ -7,7 +7,11 @@ variables may include units optionally.
 
 On disk the attr is a string (`mm day-1`). In the skill body it is a
 pint quantity: the decorator **quantifies** on open and **dequantifies**
-before write. Implementation: `weather_skills_core.units`.
+before write. Figure labels use the variable `long_name` (then
+`GRIB_name`, then the variable name) plus a short unit spelling
+(`mm/day`, `°C`) via `variable_label_for_display` /
+`format_units_for_display` — they do not change the on-disk string.
+Implementation: `weather_skills_core.units`.
 
 Dims and types: [STANDARD_DATASET.md](STANDARD_DATASET.md).
 
@@ -58,12 +62,23 @@ stamps exactly one of:
 
 Never both. Deaccumulate uses the same pair.
 
+**Forecast interval fields are left-labeled.** After deaccumulate (or a
+fetch that writes per-step rates), `step = 0` is the first native period
+`[init, init+interval)` — for daily precip, the 24h from init `2025-01-01`
+to `2025-01-02`. `step-to-time` stays `valid = init + step`, so that cell
+is `2025-01-01`. Instantaneous fields (analysis winds at 00Z) keep
+`step = 0` as the init instant.
+
+Once stamped, later skills keep that geometry. `stamp_data_interval`
+infers spacing only when `data_interval` and CF bounds are missing.
+`period=` and deaccumulate's `origin` overwrite.
+
 **Aggregation** is a later window. Only `aggregate-temporal` stamps:
 
 | Attr | Where | Meaning |
 | --- | --- | --- |
 | `aggregation_period` | data variable (pint string) | Length of each aggregated interval (`7 day`, `21 day`) |
-| `aggregation_coverage` | time/step coordinate, 0–1 | Fraction of native samples present in that interval |
+| `aggregation_coverage` | time/step coordinate, 0–1 | Fraction of native samples with finite data in that interval (all-NaN times do not count) |
 | `cell_methods` | data variable | The operation (`time: mean`, `time: sum`) |
 
 `data_interval` is not the aggregation window. Convert-to-totals
@@ -129,10 +144,12 @@ is not treated as precip.
 | Function | Role |
 | --- | --- |
 | `units_equal` | Spelling-independent equality (`mm/day` ≈ `mm day-1`) |
+| `format_units_for_display` | Short figure unit spelling (`mm/day`, `°C`) |
+| `variable_label_for_display` | Figure label: `long_name` → `GRIB_name` → name, plus units |
 | `convert_dataarray` / `convert_values` | Explicit unit ↔ unit |
 | `to_standard_units` | Temp / precip → standard display units |
-| `stamp_data_interval` | Uniform `data_interval` or CF `{dim}_bounds` on fetch / deaccumulate |
-| `precip_amounts_to_rates` | Amount → `mm day-1` (deaccumulate amount vars on `step`, else ÷ interval) |
+| `stamp_data_interval` | Native `data_interval` or CF bounds. Keeps an existing stamp; infers only when missing. `period=` and deaccumulate `origin` overwrite. |
+| `precip_amounts_to_rates` | Amount → `mm day-1` (deaccumulate amount vars on `step` at the left edge, else ÷ interval) |
 | `stamp_precip_amounts` | Amount units → amount CF `standard_name`; rewrite rate display names |
 | `rate_to_total` | Rate × period → amount (refuses precip totals) |
 | `parse_aggregation_period` | Parse an `aggregation_period` / duration string |

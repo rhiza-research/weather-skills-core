@@ -33,6 +33,7 @@ One question per file:
 # ///
 from weather_skills_core import Dataset, weather_skill
 
+# Keep in lockstep with SKILL.md metadata.version; do not edit by hand.
 _SKILL_VERSION = "0.1.0"
 
 
@@ -55,6 +56,13 @@ if __name__ == "__main__":
     my_skill()
 ```
 
+Pair that constant with SKILL.md frontmatter (do not edit either by hand; CI bumps both):
+
+```yaml
+metadata:
+  version: "0.1.0"
+```
+
 `@weather_skill.argument(...)` mirrors
 `argparse.ArgumentParser.add_argument`. Stack one decorator per flag. The skill
 function **must** accept `**kwargs`. **Every** declared flag is injected as a
@@ -65,7 +73,7 @@ and custom flags alike.
 
 Use `type=Dataset(...)` for Zarr inputs. The decorator opens the path, checks
 required dims, quantifies units, and injects the opened dataset as `ds` (a
-list if you used `nargs`/`append`). Grammar:
+list if you used `action="append"`). Grammar:
 
 | Form | Meaning |
 | --- | --- |
@@ -76,8 +84,8 @@ list if you used `nargs`/`append`). Grammar:
 | `Dataset("any")` | any Zarr; skip dim checks |
 
 Opaque files (GeoJSON, …) use `type=Path`, not `Dataset`. Flag names are
-free-form (`-i/--input`, `--forecast`, …). Multi-input: `nargs=2` / `nargs="+"`
-or separate Dataset args.
+free-form (`-i/--input`, `--forecast`, …). Multi-input: `action="append"`
+(repeat `-i` once per Zarr) or separate Dataset args.
 
 ## Outputs
 
@@ -146,5 +154,7 @@ mark.
 
 ## Layout
 
-Keep the script as domain logic. Put version in `_SKILL_VERSION`. Declare
+Keep the script as domain logic. Put the published identity in SKILL.md
+`metadata.version` (Agent Skills spec) and a matching `_SKILL_VERSION` in
+the script; CI rewrites both. Declare
 `weather-skills-core` in the PEP 723 block. Document every flag in SKILL.md.
