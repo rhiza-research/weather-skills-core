@@ -20,6 +20,29 @@ def test_dataset_display_label_from_source_token():
     assert dl.dataset_display_label(ds, "fallback") == "ECMWF S2S"
 
 
+def test_dataset_display_label_source_wins_over_history():
+    ds = make_gridded()
+    ds.attrs["weather_skills_source"] = "dynamical:nasa-imerg-analysis-late"
+    ds.attrs["weather_skills_history"] = json.dumps([{"skill": "dynamical-fetch"}])
+    assert dl.dataset_display_label(ds, "fallback") == "Nasa IMERG Analysis Late"
+
+
+def test_label_from_source_token_colon_catalog():
+    assert (
+        dl.label_from_source_token("dynamical:nasa-imerg-analysis-late")
+        == "Nasa IMERG Analysis Late"
+    )
+
+
+def test_label_from_source_token_colon_path():
+    assert dl.label_from_source_token("kenya-forecasting-data:gefs/gefs_kenya.zarr") == "GEFS"
+    assert dl.label_from_source_token("cmip6:ACCESS-CM2/ssp585/r1i1p1f1/Amon/pr/gn") == "Access Cm2"
+
+
+def test_label_from_source_token_path_stem():
+    assert dl.label_from_source_token("/tmp/chirps_2024-01-01.zarr") == "CHIRPS"
+
+
 def test_dataset_display_label_fallback():
     assert dl.dataset_display_label(make_gridded(), "input 1") == "input 1"
 
