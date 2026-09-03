@@ -24,15 +24,6 @@ def test_parse_date_rejects_compact():
         utils.parse_date("20260115")
 
 
-def test_parse_range_ok():
-    assert utils.parse_range("2026-01-01", "2026-01-07") == (date(2026, 1, 1), date(2026, 1, 7))
-
-
-def test_parse_range_reversed():
-    with pytest.raises(UsageError, match="reversed"):
-        utils.parse_range("2026-01-10", "2026-01-01")
-
-
 def test_parse_bbox_valid():
     assert utils.parse_bbox("1/2/3/4") == (1.0, 2.0, 3.0, 4.0)
 
@@ -318,62 +309,17 @@ def test_polygon_from_geojson_malformed_coordinates_raise_usage_error_not_a_trac
         utils.polygon_from_geojson(_polygon_from_geojson_write(tmp_path, payload))
 
 
-def test_normalize_longitude_0_360_axis_wraps_and_sorts():
+def test_ensure_normalized_longitude_wraps_and_sorts():
     ds = make_gridded(lons=(0.0, 90.0, 180.0, 270.0))
-    out = utils.normalize_longitude(ds)
+    out = utils.ensure_normalized_longitude(ds)
     assert list(out["longitude"].values) == [-180.0, -90.0, 0.0, 90.0]
 
 
-def test_normalize_longitude_values_follow_their_cells():
+def test_ensure_normalized_longitude_values_follow_their_cells():
     ds = make_gridded(lons=(0.0, 90.0, 180.0, 270.0))
     ds["precip"][:, :, 3] = 7.0
-    out = utils.normalize_longitude(ds)
+    out = utils.ensure_normalized_longitude(ds)
     assert float(out["precip"].sel(longitude=-90.0).isel(time=0, latitude=0)) == 7.0
-
-
-def test_normalize_longitude_already_normalized_axis_is_unchanged():
-    ds = make_gridded(lons=(-90.0, 0.0, 90.0))
-    out = utils.normalize_longitude(ds)
-    assert list(out["longitude"].values) == [-90.0, 0.0, 90.0]
-
-
-def test_normalize_longitude_custom_dim_name():
-    ds = make_gridded(lons=(0.0, 270.0)).rename({"longitude": "lon"})
-    out = utils.normalize_longitude(ds, lon_dim="lon")
-    assert list(out["lon"].values) == [-90.0, 0.0]
-
-
-def test_normalize_longitude_longitude_attrs_preserved_across_the_wrap():
-    ds = make_gridded(lons=(0.0, 90.0, 180.0, 270.0))
-    ds["longitude"].attrs = {"standard_name": "longitude", "units": "degrees_east", "axis": "X"}
-    out = utils.normalize_longitude(ds)
-    assert out["longitude"].attrs == {
-        "standard_name": "longitude",
-        "units": "degrees_east",
-        "axis": "X",
-    }
-
-
-def test_normalize_longitude_duplicate_endpoint_is_dropped_and_axis_stays_sorted():
-    ds = make_gridded(lons=(0.0, 90.0, 180.0, 270.0, 360.0))
-    out = utils.normalize_longitude(ds)
-    lons = list(out["longitude"].values)
-    assert lons == [-180.0, -90.0, 0.0, 90.0]
-    assert len(lons) == len(set(lons))
-
-
-def test_normalize_longitude_duplicate_drop_keeps_the_first_occurrence():
-    ds = make_gridded(lons=(0.0, 90.0, 180.0, 270.0, 360.0))
-    ds["precip"][:, :, 0] = 5.0
-    ds["precip"][:, :, 4] = 9.0
-    out = utils.normalize_longitude(ds)
-    assert float(out["precip"].sel(longitude=0.0).isel(time=0, latitude=0)) == 5.0
-
-
-def test_normalize_longitude_accepts_dataarray():
-    ds = make_gridded(lons=(0.0, 90.0, 180.0, 270.0))
-    out = utils.normalize_longitude(ds["precip"])
-    assert list(out["longitude"].values) == [-180.0, -90.0, 0.0, 90.0]
 
 
 def test_ensure_normalized_longitude_is_noop_when_already_180():
@@ -381,9 +327,42 @@ def test_ensure_normalized_longitude_is_noop_when_already_180():
     assert utils.ensure_normalized_longitude(ds) is ds
 
 
-def test_ensure_normalized_longitude_wraps_0_360():
+def test_ensure_normalized_longitude_custom_dim_name():
+    ds = make_gridded(lons=(0.0, 270.0)).rename({"longitude": "lon"})
+    out = utils.ensure_normalized_longitude(ds, lon_dim="lon")
+    assert list(out["lon"].values) == [-90.0, 0.0]
+
+
+def test_ensure_normalized_longitude_attrs_preserved_across_the_wrap():
     ds = make_gridded(lons=(0.0, 90.0, 180.0, 270.0))
+    ds["longitude"].attrs = {"standard_name": "longitude", "units": "degrees_east", "axis": "X"}
     out = utils.ensure_normalized_longitude(ds)
+    assert out["longitude"].attrs == {
+        "standard_name": "longitude",
+        "units": "degrees_east",
+        "axis": "X",
+    }
+
+
+def test_ensure_normalized_longitude_duplicate_endpoint_is_dropped_and_axis_stays_sorted():
+    ds = make_gridded(lons=(0.0, 90.0, 180.0, 270.0, 360.0))
+    out = utils.ensure_normalized_longitude(ds)
+    lons = list(out["longitude"].values)
+    assert lons == [-180.0, -90.0, 0.0, 90.0]
+    assert len(lons) == len(set(lons))
+
+
+def test_ensure_normalized_longitude_duplicate_drop_keeps_the_first_occurrence():
+    ds = make_gridded(lons=(0.0, 90.0, 180.0, 270.0, 360.0))
+    ds["precip"][:, :, 0] = 5.0
+    ds["precip"][:, :, 4] = 9.0
+    out = utils.ensure_normalized_longitude(ds)
+    assert float(out["precip"].sel(longitude=0.0).isel(time=0, latitude=0)) == 5.0
+
+
+def test_ensure_normalized_longitude_accepts_dataarray():
+    ds = make_gridded(lons=(0.0, 90.0, 180.0, 270.0))
+    out = utils.ensure_normalized_longitude(ds["precip"])
     assert list(out["longitude"].values) == [-180.0, -90.0, 0.0, 90.0]
 
 
@@ -490,19 +469,6 @@ def test_grid_spacing_median_spacing():
     assert utils.grid_spacing([0.0, 0.25, 0.5, 0.75]) == pytest.approx(0.25)
 
 
-def test_spacing_is_finer_rejects_true_halving():
-    assert utils.spacing_is_finer(0.025, 0.05)
-    assert utils.spacing_is_finer(0.05, 0.1)
-
-
-def test_spacing_is_finer_allows_lateral_and_float_noise():
-    assert not utils.spacing_is_finer(0.05, 0.05)
-    assert not utils.spacing_is_finer(0.05, 0.05000000000000044)
-    assert not utils.spacing_is_finer(0.0499, 0.05)
-    assert not utils.spacing_is_finer(0.0501, 0.05)
-    assert not utils.spacing_is_finer(0.05, 0.0499)
-
-
 def test_pick_time_dim_prefers_time():
     ds = make_gridded()
     assert utils.pick_time_dim(ds) == "time"
@@ -516,16 +482,6 @@ def test_pick_time_dim_override():
 def test_pick_time_dim_missing_override():
     with pytest.raises(UsageError, match="not in dims"):
         utils.pick_time_dim(make_gridded(), "nope")
-
-
-def test_dataset_label_from_source_attr():
-    ds = make_gridded()
-    ds.attrs["weather_skills_source"] = "ecmwf-s2s"
-    assert utils.dataset_label(ds, "fallback") == "ecmwf-s2s"
-
-
-def test_dataset_label_fallback():
-    assert utils.dataset_label(make_gridded(), "input 1") == "input 1"
 
 
 def test_apply_write_encoding_time_and_fill():

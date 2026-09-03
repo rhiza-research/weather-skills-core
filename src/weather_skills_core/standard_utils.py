@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import math
 import os
 import re
 from calendar import day_name, monthrange
@@ -61,8 +60,14 @@ def normalize_step_coord(ds, dim: str = "step"):
 _LATLON_DECIMALS = 5
 
 
-def _latlon_coord_names(ds) -> list[str]:
-    """Coord names that are geographic latitude or longitude."""
+def normalize_latlon_coords(ds):
+    """Round lat/lon coords to 5 decimals and store them as float32.
+
+    Snaps float64 noise (Kenya ``5.9749991`` vs CHIRPS ``5.975``) so grids
+    that are the same at ~1 m join. A real half-cell offset (0.025°) is kept.
+    """
+    import numpy as np
+
     names: list[str] = []
     seen: set[str] = set()
     for preferred in ("lat", "lon"):
@@ -73,23 +78,12 @@ def _latlon_coord_names(ds) -> list[str]:
     for name in ds.coords:
         if name in seen:
             continue
-        std = ds[name].attrs.get("standard_name")
-        if std in ("latitude", "longitude"):
+        if ds[name].attrs.get("standard_name") in ("latitude", "longitude"):
             names.append(name)
             seen.add(name)
-    return names
-
-
-def normalize_latlon_coords(ds):
-    """Round lat/lon coords to 5 decimals and store them as float32.
-
-    Snaps float64 noise (Kenya ``5.9749991`` vs CHIRPS ``5.975``) so grids
-    that are the same at ~1 m join. A real half-cell offset (0.025°) is kept.
-    """
-    import numpy as np
 
     updates = {}
-    for name in _latlon_coord_names(ds):
+    for name in names:
         values = np.asarray(ds[name].values)
         if not np.issubdtype(values.dtype, np.floating):
             continue
@@ -166,26 +160,14 @@ def np_to_date(value) -> date:
 
 def parse_date(value: str) -> date:
     """Parse an absolute ``YYYY-MM-DD`` date string."""
-    if not _ABS_DATE_RE.match(value):
-        raise UsageError(f"invalid date value {value!r}: expected an absolute date YYYY-MM-DD")
     try:
+        if not _ABS_DATE_RE.match(value):
+            raise ValueError
         return date.fromisoformat(value)
     except ValueError:
         raise UsageError(
             f"invalid date value {value!r}: expected an absolute date YYYY-MM-DD"
         ) from None
-
-
-def parse_range(start_value: str, end_value: str) -> tuple[date, date]:
-    """Parse ``--start``/``--end`` as absolute dates and require ``start <= end``."""
-    start = parse_date(start_value)
-    end = parse_date(end_value)
-    if start > end:
-        raise UsageError(
-            f"resolved --start {start.isoformat()} is after resolved "
-            f"--end {end.isoformat()}; the range is reversed."
-        )
-    return start, end
 
 
 def parse_bbox(bbox: str) -> tuple:
@@ -256,12 +238,13 @@ def polygon_from_geojson(path, *, flag: str = "--mask-geojson"):
         raise UsageError(f"{flag} {path} has no usable geometry ({exc}).") from None
 
 
-def normalize_longitude(obj, lon_dim: str = "longitude"):
-    """Map a 0..360 longitude axis to [-180, 180) and sort ascending.
+def ensure_normalized_longitude(obj, lon_dim: str | None = None):
+    """Wrap 0..360 longitude to [-180, 180) when needed; otherwise leave ``obj``.
 
-    Accepts a Dataset or DataArray. Keeps coord attrs; drops duplicate labels
-    produced by wrapping 0 and 360. If ``lon_dim`` is not a dimension (station
-    longitudes), values are wrapped in place and not sorted.
+    No-op when ``lon_dim`` is missing, empty, or already ≤ 180. Accepts a
+    Dataset or DataArray. Wrapping sorts the axis ascending and drops
+    duplicate labels produced by wrapping 0 and 360. Station longitudes
+    (not a dimension) are wrapped in place and not sorted.
     """
     import numpy as np
     import xarray as xr
@@ -269,6 +252,17 @@ def normalize_longitude(obj, lon_dim: str = "longitude"):
     is_da = isinstance(obj, xr.DataArray)
     da_name = obj.name if is_da else None
     ds = obj.to_dataset(name=da_name or "_") if is_da else obj
+    if lon_dim is None:
+        try:
+            _, lon_dim = detect_spatial_dims(ds)
+        except UsageError:
+            return obj
+    if lon_dim not in obj.coords and lon_dim not in getattr(obj, "variables", ()):
+        return obj
+    lon_vals = np.asarray(obj[lon_dim].values)
+    if not lon_vals.size or float(np.nanmax(lon_vals)) <= 180.0:
+        return obj
+
     attrs = dict(ds[lon_dim].attrs)
     lon = ((ds[lon_dim] + 180) % 360) - 180
     lon.attrs = attrs
@@ -288,36 +282,11 @@ def normalize_longitude(obj, lon_dim: str = "longitude"):
     return ds
 
 
-def ensure_normalized_longitude(obj, lon_dim: str | None = None):
-    """Wrap 0..360 longitude to [-180, 180) when needed; otherwise leave ``obj``.
-
-    No-op when ``lon_dim`` is missing, empty, or already ≤ 180. Accepts a
-    Dataset or DataArray.
-    """
-    import numpy as np
-    import xarray as xr
-
-    ds = obj.to_dataset(name=obj.name or "_") if isinstance(obj, xr.DataArray) else obj
-    if lon_dim is None:
-        try:
-            _, lon_dim = detect_spatial_dims(ds)
-        except UsageError:
-            return obj
-    if lon_dim not in obj.coords and lon_dim not in getattr(obj, "variables", ()):
-        return obj
-    lon_vals = np.asarray(obj[lon_dim].values)
-    if not lon_vals.size or float(np.nanmax(lon_vals)) <= 180.0:
-        return obj
-    return normalize_longitude(obj, lon_dim=lon_dim)
-
-
-def _point_id_dim(ds) -> str | None:
-    """``station_id`` / ``point_id`` dim, or None if this is not tabular point_obs."""
-    return next((n for n in names_for("point_id") if n in ds.dims), None)
-
-
-def _point_lat_lon(ds, point_dim: str) -> tuple[str, str]:
-    """1-D latitude/longitude coord names attached to ``point_dim``."""
+def _point_spatial(ds):
+    """``(point_dim, lat, lon)`` for tabular point_obs, else ``None``."""
+    point_dim = next((n for n in names_for("point_id") if n in ds.dims), None)
+    if point_dim is None:
+        return None
     lat = next(
         (n for n in names_for("lat") if n in ds.coords and tuple(ds[n].dims) == (point_dim,)),
         None,
@@ -331,37 +300,18 @@ def _point_lat_lon(ds, point_dim: str) -> tuple[str, str]:
             f"station clip requires 1-D latitude/longitude coords on {point_dim} "
             f"(coords: {list(ds.coords)})"
         )
-    return lat, lon
+    return point_dim, lat, lon
 
 
-def _lon_in_span(lon, west: float, east: float):
-    """Boolean mask: lon in [west, east], wrapping the antimeridian when west > east."""
-    if west <= east:
-        return (lon >= west) & (lon <= east)
-    return (lon >= west) | (lon <= east)
-
-
-def _bbox_subset_points(ds, bbox: tuple[float, float, float, float], point_dim: str):
-    """Keep stations whose lat/lon coords fall in ``N/W/S/E`` (order on ``point_dim`` is kept)."""
-    import numpy as np
-
-    north, west, south, east = bbox
-    lat_name, lon_name = _point_lat_lon(ds, point_dim)
-    ds = ensure_normalized_longitude(ds, lon_dim=lon_name)
-    lat = np.asarray(ds[lat_name].values)
-    lon = np.asarray(ds[lon_name].values)
-    mask = (lat >= south) & (lat <= north) & _lon_in_span(lon, west, east)
-    if not np.any(mask):
-        bbox_str = f"{north}/{west}/{south}/{east}"
-        kind = "stations"
-        if west > east:
-            raise DataError(
-                f"--bbox {bbox_str} crosses the antimeridian (west {west} > east {east}) "
-                f"but selects no {kind}; check the N/S extent and that west/east "
-                "bracket the intended dateline-crossing span."
-            )
-        raise DataError(f"--bbox {bbox_str} selects no {kind}; check the extent and N/W/S/E order.")
-    return ds.isel({point_dim: np.nonzero(mask)[0]})
+def _empty_bbox(north, west, south, east, kind: str):
+    bbox_str = f"{north}/{west}/{south}/{east}"
+    if west > east:
+        raise DataError(
+            f"--bbox {bbox_str} crosses the antimeridian (west {west} > east {east}) "
+            f"but selects no {kind}; check the N/S extent and that west/east "
+            "bracket the intended dateline-crossing span."
+        )
+    raise DataError(f"--bbox {bbox_str} selects no {kind}; check the extent and N/W/S/E order.")
 
 
 def bbox_subset(ds, bbox, *, lat_dim: str | None = None, lon_dim: str | None = None):
@@ -377,9 +327,19 @@ def bbox_subset(ds, bbox, *, lat_dim: str | None = None, lon_dim: str | None = N
         north, west, south, east = parse_bbox(bbox)
     else:
         north, west, south, east = bbox
-    point_dim = _point_id_dim(ds)
-    if point_dim is not None:
-        return _bbox_subset_points(ds, (north, west, south, east), point_dim)
+
+    point = _point_spatial(ds)
+    if point is not None:
+        point_dim, lat_name, lon_name = point
+        ds = ensure_normalized_longitude(ds, lon_dim=lon_name)
+        lat = np.asarray(ds[lat_name].values)
+        lon = np.asarray(ds[lon_name].values)
+        in_lon = (lon >= west) & (lon <= east) if west <= east else (lon >= west) | (lon <= east)
+        mask = (lat >= south) & (lat <= north) & in_lon
+        if not np.any(mask):
+            _empty_bbox(north, west, south, east, "stations")
+        return ds.isel({point_dim: np.nonzero(mask)[0]})
+
     if lat_dim is None or lon_dim is None:
         lat_dim, lon_dim = detect_spatial_dims(ds)
 
@@ -406,21 +366,14 @@ def bbox_subset(ds, bbox, *, lat_dim: str | None = None, lon_dim: str | None = N
     lat_vals = np.asarray(ds[lat_dim].values)
     if lat_vals.size == 0:
         raise UsageError("lat axis has length 0; cannot subset.")
-    if lat_vals.size == 1:
-        lat_sel = None
-    else:
+    if lat_vals.size > 1:
         diffs = np.diff(lat_vals)
-        if (diffs > 0).all():
-            lat_sel = slice(south, north)
-        elif (diffs < 0).all():
-            lat_sel = slice(north, south)
-        else:
+        if not ((diffs > 0).all() or (diffs < 0).all()):
             raise UsageError(
                 "lat axis is non-monotonic; cannot infer slice orientation. "
                 "Re-sort the input or pre-process before subsetting."
             )
-    if lat_sel is not None:
-        ds = ds.sel({lat_dim: lat_sel})
+        ds = ds.sel({lat_dim: lat_slice(lat_vals, north, south)})
 
     if west <= east:
         # Contiguous longitude span. Slice in the axis's own monotonic order.
@@ -448,16 +401,7 @@ def bbox_subset(ds, bbox, *, lat_dim: str | None = None, lon_dim: str | None = N
         )
 
     if ds.sizes.get(lat_dim, 0) == 0 or ds.sizes.get(lon_dim, 0) == 0:
-        bbox_str = f"{north}/{west}/{south}/{east}"
-        if west > east:
-            raise DataError(
-                f"--bbox {bbox_str} crosses the antimeridian (west {west} > east {east}) "
-                "but selects no grid cells; check the N/S extent and that west/east "
-                "bracket the intended dateline-crossing span."
-            )
-        raise DataError(
-            f"--bbox {bbox_str} selects no grid cells; check the extent and N/W/S/E order."
-        )
+        _empty_bbox(north, west, south, east, "grid cells")
     return ds
 
 
@@ -471,9 +415,9 @@ def clip_by_geometry(
 
     if geometry is None:
         return ds
-    point_dim = _point_id_dim(ds)
-    if point_dim is not None:
-        lat_name, lon_name = _point_lat_lon(ds, point_dim)
+    point = _point_spatial(ds)
+    if point is not None:
+        point_dim, lat_name, lon_name = point
         ds = ensure_normalized_longitude(ds, lon_dim=lon_name)
         mask = shapely.contains_xy(
             geometry,
@@ -511,26 +455,9 @@ def grid_spacing(coord_vals) -> float:
     return float(abs(np.median(np.diff(coord))))
 
 
-# Near-equal spacings (float rounding, irregular CHIRPS cells, a half-cell
-# lateral shift at the same nominal resolution) are not a resolution change.
-_SPACING_REL_TOL = 1e-2
-
-
-def spacing_is_finer(target: float, source: float, *, rel_tol: float = _SPACING_REL_TOL) -> bool:
-    """True if ``target`` spacing is meaningfully smaller than ``source``.
-
-    ``math.isclose`` with ``rel_tol`` (default 1%) treats a lateral shift or
-    float-rounded 0.05° vs 0.0500001° as equal, so coarsen/downscale do not
-    ping-pong when one axis measures slightly finer and the other slightly
-    coarser.
-    """
-    return target < source and not math.isclose(target, source, rel_tol=rel_tol, abs_tol=0.0)
-
-
 def pick_time_dim(obj, override=None) -> str:
     """Resolve a time-like dim: override, then ``time``, ``step``, then CF time."""
     from weather_skills_core.cf import cf_dim
-    from weather_skills_core.errors import UsageError
 
     dims = list(obj.dims)
     if override:
@@ -545,16 +472,6 @@ def pick_time_dim(obj, override=None) -> str:
     if cf and cf in obj.dims:
         return cf
     raise UsageError(f"no time-like dim in {dims}; pass --time-dim")
-
-
-def dataset_label(ds, fallback) -> str:
-    """Short label from ``weather_skills_source``, else ``fallback`` (str or callable)."""
-    from pathlib import Path
-
-    src = ds.attrs.get("weather_skills_source")
-    if isinstance(src, str) and src.strip():
-        return Path(src).stem
-    return fallback() if callable(fallback) else str(fallback)
 
 
 def apply_write_encoding(ds, *, time_units=None, time_calendar=None, fills=None):
@@ -596,21 +513,6 @@ def latitude_weights(lats):
 _WEEKDAYS = {name.lower(): i for i, name in enumerate(day_name)}
 
 
-def _as_datetime(value) -> datetime:
-    if isinstance(value, datetime):
-        return value.replace(tzinfo=None)
-    if isinstance(value, date) and not isinstance(value, datetime):
-        return datetime(value.year, value.month, value.day)  # noqa: DTZ001
-    import numpy as np
-
-    if isinstance(value, np.datetime64):
-        return datetime.fromisoformat(np.datetime_as_string(value, unit="D"))
-    text = str(value)
-    if "T" in text:
-        text = text.split("T", 1)[0]
-    return datetime.fromisoformat(text[:10])
-
-
 def stride_dates(start, end, stride: str = "day"):
     """Inclusive date list from start to end.
 
@@ -619,7 +521,19 @@ def stride_dates(start, end, stride: str = "day"):
     """
     import numpy as np
 
-    start_dt, end_dt = _as_datetime(start), _as_datetime(end)
+    def as_datetime(value) -> datetime:
+        if isinstance(value, datetime):
+            return value.replace(tzinfo=None)
+        if isinstance(value, date) and not isinstance(value, datetime):
+            return datetime(value.year, value.month, value.day)  # noqa: DTZ001
+        if isinstance(value, np.datetime64):
+            return datetime.fromisoformat(np.datetime_as_string(value, unit="D"))
+        text = str(value)
+        if "T" in text:
+            text = text.split("T", 1)[0]
+        return datetime.fromisoformat(text[:10])
+
+    start_dt, end_dt = as_datetime(start), as_datetime(end)
     if end_dt < start_dt:
         raise UsageError(f"stride start {start_dt.date()} is after end {end_dt.date()}")
 
@@ -699,27 +613,18 @@ def roll_and_agg(
         raise UsageError(f"unsupported rolling method {method!r}; use mean|min|max")
     out = fn(skipna=True)
     out = out.isel({dim: slice(window - 1, None)})
-    if align == "center":
-        shift = np.timedelta64((window - 1) // 2, "D")
-    elif align == "right":
-        shift = np.timedelta64(0, "D")
-    elif align == "left":
-        shift = np.timedelta64(window - 1, "D")
-    else:
+    step_by_align = {"center": (window - 1) // 2, "right": 0, "left": window - 1}
+    if align not in step_by_align:
         raise UsageError(f"align must be left/right/center; got {align!r}")
+    step_shift = step_by_align[align]
     # Timedelta axes: shift by steps, not calendar days.
     if np.issubdtype(out[dim].dtype, np.timedelta64):
-        if align == "center":
-            step_shift = (window - 1) // 2
-        elif align == "right":
-            step_shift = 0
-        else:
-            step_shift = window - 1
-        # Infer median step spacing for the shift magnitude.
         steps = np.asarray(ds[dim].values)
         diffs = np.diff(steps.astype("timedelta64[ns]").astype(np.int64))
         median_ns = int(np.median(diffs)) if diffs.size else 0
         shift = np.timedelta64(step_shift * median_ns, "ns")
+    else:
+        shift = np.timedelta64(step_shift, "D")
     out = out.assign_coords({dim: out[dim] - shift})
     if stride is None:
         return out
