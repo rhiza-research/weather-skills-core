@@ -92,11 +92,11 @@ def test_visualization_jpeg(tmp_path):
 def test_visualization_png_official_mark_when_intact(tmp_path):
     path = tmp_path / "marked.png"
     Image.new("RGB", (400, 300), color=(220, 220, 220)).save(path)
-    before = list(Image.open(path).crop((320, 0, 400, 80)).get_flattened_data())
+    before = list(Image.open(path).crop((320, 250, 400, 300)).get_flattened_data())
     chain = [entry()]
     provenance.stamp_figure(path, chain)
     assert provenance.load_figure_history(path) == chain
-    after = list(Image.open(path).crop((320, 0, 400, 80)).get_flattened_data())
+    after = list(Image.open(path).crop((320, 250, 400, 300)).get_flattened_data())
     assert before != after
 
 
@@ -107,9 +107,9 @@ def test_visualization_png_no_mark_when_empty_or_invalid(tmp_path):
     ):
         path = tmp_path / name
         Image.new("RGB", (400, 300), color=(220, 220, 220)).save(path)
-        before = list(Image.open(path).crop((320, 0, 400, 80)).get_flattened_data())
+        before = list(Image.open(path).crop((320, 250, 400, 300)).get_flattened_data())
         provenance.stamp_figure(path, history)
-        after = list(Image.open(path).crop((320, 0, 400, 80)).get_flattened_data())
+        after = list(Image.open(path).crop((320, 250, 400, 300)).get_flattened_data())
         assert before == after
 
 
@@ -141,9 +141,9 @@ def test_visualization_png_palette_keeps_distinct_fills(tmp_path):
 def test_visualization_jpeg_official_mark_when_intact(tmp_path):
     path = tmp_path / "marked.jpg"
     Image.new("RGB", (400, 300), color=(220, 220, 220)).save(path, quality=95)
-    before = list(Image.open(path).crop((320, 0, 400, 80)).get_flattened_data())
+    before = list(Image.open(path).crop((320, 250, 400, 300)).get_flattened_data())
     chain = [entry()]
     provenance.stamp_figure(path, chain)
     assert provenance.load_figure_history(path) == chain
-    after = list(Image.open(path).crop((320, 0, 400, 80)).get_flattened_data())
+    after = list(Image.open(path).crop((320, 250, 400, 300)).get_flattened_data())
     assert before != after
