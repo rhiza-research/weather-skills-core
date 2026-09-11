@@ -4,7 +4,8 @@ Lookup order (no network until a later step):
 
 1. Bundled Natural Earth countries — ISO3 or country name.
 2. Bundled Natural Earth groupings — continent / UN / World Bank labels
-   (``East Africa``, ``Sub-Saharan Africa``, …).
+   (``Eastern Africa``, ``Sub-Saharan Africa``, …). ``East Africa`` is the
+   Eastern Africa grouping clipped at 15°S.
 3. Bundled custom forecast boxes — ``Kenya OND region``, ``Indian Ocean basin``, ….
 4. geoBoundaries admin-1 / admin-2 — ``kenya-nairobi`` or ``KEN-nairobi``.
 5. OSM Nominatim — landmarks only, via :func:`geocode_nominatim`.
@@ -70,6 +71,10 @@ _COUNTRY_ALIASES = {
     "gaza_strip": "palestine",
     "west_bank": "palestine",
 }
+
+# ``East Africa`` is the NE Eastern Africa grouping clipped at this latitude
+# (Greater Horn / ICPAC-style view). ``Eastern Africa`` stays the full UN box.
+_EAST_AFRICA_SOUTH = -15.0
 
 # Forecast / briefing boxes that are not Natural Earth groupings or admin units.
 # ``bbox`` is (N, W, S, E). Aliases are passed through :func:`clean_region_name`.
@@ -346,6 +351,37 @@ def _slim_country(feature: dict) -> dict:
     )
 
 
+def _clip_feature_south(feature: dict, south: float) -> dict:
+    """Keep land at or north of ``south``; bbox south is exactly that latitude."""
+    from shapely.geometry import GeometryCollection, box, mapping, shape
+    from shapely.ops import unary_union
+
+    geom = shape(feature["geometry"])
+    clipped = geom.intersection(box(-180.0, float(south), 180.0, 90.0))
+    if clipped.is_empty:
+        raise DataError(
+            f"{feature['properties'].get('name')!r} has no land north of {south}°."
+        )
+    if clipped.geom_type == "GeometryCollection" or isinstance(clipped, GeometryCollection):
+        parts = [
+            part
+            for part in clipped.geoms
+            if not part.is_empty and part.geom_type in ("Polygon", "MultiPolygon")
+        ]
+        if not parts:
+            raise DataError(
+                f"{feature['properties'].get('name')!r} has no land north of {south}°."
+            )
+        clipped = unary_union(parts)
+    geometry = mapping(clipped)
+    north, west, _south, east = bbox_from_geometry(geometry)
+    props = dict(feature["properties"])
+    props["name"] = "East Africa"
+    props["region_name"] = "east_africa"
+    props["bbox"] = [north, west, float(south), east]
+    return {**feature, "geometry": geometry, "properties": props}
+
+
 def _slim_region(spec: dict) -> dict:
     parts = []
     for feature in spec["members"]:
@@ -381,7 +417,10 @@ def _match_bundled(cleaned: str) -> dict | None:
         return _slim_country(match)
     named = _region_indexes().get(cleaned)
     if named is not None:
-        return _slim_region(named)
+        feature = _slim_region(named)
+        if cleaned == "east_africa":
+            return _clip_feature_south(feature, _EAST_AFRICA_SOUTH)
+        return feature
     custom = _custom_indexes().get(cleaned)
     if custom is not None:
         return _slim_custom(custom)
