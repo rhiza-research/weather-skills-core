@@ -76,12 +76,15 @@ _COUNTRY_ALIASES = {
 # (Greater Horn / ICPAC-style view). ``Eastern Africa`` stays the full UN box.
 _EAST_AFRICA_SOUTH = -15.0
 
+# ``Kenya OND region`` analog box (N, W, S, E): 36.5–42°E, 5°S–5°N.
+_KENYA_OND_BBOX = (5.0, 36.5, -5.0, 42.0)
+
 # Forecast / briefing boxes that are not Natural Earth groupings or admin units.
 # ``bbox`` is (N, W, S, E). Aliases are passed through :func:`clean_region_name`.
 _CUSTOM_REGIONS = {
     "kenya_ond_region": {
         "name": "Kenya OND region",
-        "bbox": (1.0, 36.5, -3.0, 39.0),
+        "bbox": _KENYA_OND_BBOX,
         "iso3": "KEN",
         "country": "Kenya",
         "aliases": (
@@ -351,17 +354,16 @@ def _slim_country(feature: dict) -> dict:
     )
 
 
-def _clip_feature_south(feature: dict, south: float) -> dict:
-    """Keep land at or north of ``south``; bbox south is exactly that latitude."""
+def _clip_geometry_to_rect(geometry, west, south, east, north):
+    """Intersect a GeoJSON geometry with a lon/lat rectangle; return GeoJSON."""
     from shapely.geometry import GeometryCollection, box, mapping, shape
     from shapely.ops import unary_union
 
-    geom = shape(feature["geometry"])
-    clipped = geom.intersection(box(-180.0, float(south), 180.0, 90.0))
+    clipped = shape(geometry).intersection(
+        box(float(west), float(south), float(east), float(north))
+    )
     if clipped.is_empty:
-        raise DataError(
-            f"{feature['properties'].get('name')!r} has no land north of {south}°."
-        )
+        return None
     if clipped.geom_type == "GeometryCollection" or isinstance(clipped, GeometryCollection):
         parts = [
             part
@@ -369,11 +371,18 @@ def _clip_feature_south(feature: dict, south: float) -> dict:
             if not part.is_empty and part.geom_type in ("Polygon", "MultiPolygon")
         ]
         if not parts:
-            raise DataError(
-                f"{feature['properties'].get('name')!r} has no land north of {south}°."
-            )
+            return None
         clipped = unary_union(parts)
-    geometry = mapping(clipped)
+    return mapping(clipped)
+
+
+def _clip_feature_south(feature: dict, south: float) -> dict:
+    """Keep land at or north of ``south``; bbox south is exactly that latitude."""
+    geometry = _clip_geometry_to_rect(feature["geometry"], -180.0, south, 180.0, 90.0)
+    if geometry is None:
+        raise DataError(
+            f"{feature['properties'].get('name')!r} has no land north of {south}°."
+        )
     north, west, _south, east = bbox_from_geometry(geometry)
     props = dict(feature["properties"])
     props["name"] = "East Africa"
