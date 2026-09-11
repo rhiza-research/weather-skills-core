@@ -305,7 +305,7 @@ def _render_circular_stamp(diameter: int):
 def _draw_official_mark(img):
     """Composite a circular ``weather-skills provenance verified`` rubber stamp onto ``img``.
 
-    Placed bottom-right. No-ops (returns a copy) when the image is too small.
+    Placed top-right. No-ops (returns a copy) when the image is too small.
     """
     from PIL import Image
 
@@ -323,7 +323,7 @@ def _draw_official_mark(img):
     base = img.convert("RGBA")
     overlay = Image.new("RGBA", base.size, (0, 0, 0, 0))
     x = w - margin - stamp.width
-    y = h - margin - stamp.height
+    y = margin
     overlay.paste(stamp, (x, y), stamp)
 
     marked = Image.alpha_composite(base, overlay)
@@ -385,7 +385,7 @@ def stamp_figure(path: Path, history: list, *, software: str = DEFAULT_SOFTWARE)
 
     When the chain is intact (non-empty and schema-valid), also draw a circular
     old-school ``weather-skills provenance verified`` rubber stamp on PNG/JPEG
-    pixels (bottom-right). HTML gets metadata only.
+    pixels (top-right). HTML gets metadata only.
     """
     from weather_skills_core.errors import SkillError
 
