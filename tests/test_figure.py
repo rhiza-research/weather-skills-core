@@ -54,3 +54,18 @@ def test_add_shared_colorbar_and_save(tmp_path):
     out = save_figure(fig, tmp_path / "fig.png")
     assert out.exists()
     assert out.stat().st_size > 0
+
+
+def test_save_figure_keeps_canvas_when_not_tight(tmp_path):
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.image as mpimg
+    import matplotlib.pyplot as plt
+
+    fig, ax = plt.subplots(figsize=(7, 5))
+    ax.plot([0, 1], [0, 1])
+    out = save_figure(fig, tmp_path / "sized.png", tight=False)
+    img = mpimg.imread(out)
+    assert img.shape[1] == 7 * 150
+    assert img.shape[0] == 5 * 150
