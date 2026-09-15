@@ -57,6 +57,28 @@ def test_apply_style_sets_rcparams():
     assert mpl.rcParams["figure.titlesize"] == 16
 
 
+def test_add_shared_colorbar_labels_every_discrete_tick():
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import numpy as np
+    from matplotlib.colors import BoundaryNorm, ListedColormap
+
+    bounds = [2, 5, 10, 25, 50, 75, 100, 150, 200, 300]
+    cmap = ListedColormap(["#ccc"] * (len(bounds) - 1))
+    norm = BoundaryNorm(bounds, cmap.N)
+    fig, axes = plt.subplots(1, 2, figsize=(8, 3))
+    mesh = axes[0].pcolormesh(np.arange(4).reshape(2, 2), cmap=cmap, norm=norm)
+    cbar = add_shared_colorbar(
+        fig, mesh, axes, "precip", ticks=bounds, spacing="uniform"
+    )
+    fig.canvas.draw()
+    labels = [t.get_text() for t in cbar.ax.get_xticklabels() if t.get_visible() and t.get_text()]
+    assert labels == ["2", "5", "10", "25", "50", "75", "100", "150", "200", "300"]
+    plt.close(fig)
+
+
 def test_add_shared_colorbar_and_save(tmp_path):
     import matplotlib
 

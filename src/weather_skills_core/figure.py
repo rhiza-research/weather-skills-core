@@ -145,11 +145,22 @@ def apply_style(fontsize=DEFAULT_FONTSIZE):
     )
 
 
+def _format_cbar_tick(value):
+    """Short numeric tick: ``10`` not ``10.0``."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    if abs(number - round(number)) < 1e-9:
+        return str(int(round(number)))
+    return f"{number:g}"
+
+
 def add_shared_colorbar(fig, mappable, axes, label="", *, location=None, **kwargs):
     """Attach a colorbar in a matplotlib-reserved slot (not a figure-fraction box).
 
-    One map gets a right-hand bar (class ticks fit vertically). Several maps
-    share a bottom bar; dense CHIRPS-class ticks show every other bound.
+    One map gets a right-hand bar; several maps share a bottom bar. Discrete
+    ``ticks`` (BoundaryNorm bounds) are all labeled.
     """
     import numpy as np
 
@@ -174,13 +185,10 @@ def add_shared_colorbar(fig, mappable, axes, label="", *, location=None, **kwarg
     )
     if label:
         cbar.set_label(label)
-    n_ticks = len(list(ticks)) if ticks is not None else 0
-    # Dense CHIRPS-class ticks: show every other bound instead of rotating
-    # (rotation collides on narrow maps).
-    if n_ticks >= 8 and location == "bottom":
-        for i, tick in enumerate(cbar.ax.get_xticklabels()):
-            if i % 2:
-                tick.set_visible(False)
+    if ticks is not None:
+        tick_list = list(ticks)
+        cbar.set_ticks(tick_list)
+        cbar.set_ticklabels([_format_cbar_tick(t) for t in tick_list])
     return cbar
 
 
