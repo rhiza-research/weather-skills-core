@@ -15,11 +15,8 @@ HISTORY_ATTR = "weather_skills_history"
 SOURCE_ATTR = "weather_skills_source"
 DEFAULT_SOFTWARE = "forecasting-skills"
 OFFICIAL_MARK_TEXT = "weather-skills provenance verified"
-# Circular rubber-stamp arcs (drawn uppercase for an inked look).
-_MARK_ARC_TOP = "WEATHER-SKILLS"
-_MARK_ARC_BOTTOM = "PROVENANCE VERIFIED"
 # Classic crimson rubber-stamp ink (RGBA) — opaque enough to read on maps.
-_MARK_INK = (158, 18, 36, 245)
+_MARK_INK = (139, 15, 32, 250)
 
 _EXIF_USER_COMMENT = 0x9286  # EXIF UserComment tag
 _HTML_META_RE = re.compile(
@@ -150,114 +147,27 @@ def chain_is_intact(history) -> bool:
     return not violations
 
 
-def _load_mark_font(size: int):
-    """Prefer a bold/readable TrueType font; fall back to PIL's default bitmap font."""
-    from PIL import ImageFont
-
-    candidates = (
-        "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
-        "/System/Library/Fonts/Supplemental/Arial.ttf",
-        "/System/Library/Fonts/Helvetica.ttc",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
-        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
-        "DejaVuSans-Bold.ttf",
-        "DejaVuSans.ttf",
-    )
-    for path in candidates:
-        try:
-            return ImageFont.truetype(path, size=size)
-        except OSError:
-            continue
-    return ImageFont.load_default()
-
-
-def _paste_rotated_char(stamp, char, font, fill, cx, cy, angle_deg, *, scale: int):
-    """Render one character, rotate it, and paste centered at ``(cx, cy)`` on ``stamp``."""
-    from PIL import Image, ImageDraw
-
-    # Oversized tile so rotated glyphs are not clipped.
-    tile_size = 48 * scale
-    tile = Image.new("RGBA", (tile_size, tile_size), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(tile)
-    stroke = max(1, getattr(font, "size", 12) // 16)
-    bbox = draw.textbbox((0, 0), char, font=font)
-    tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
-    draw.text(
-        (tile_size / 2 - bbox[0] - tw / 2, tile_size / 2 - bbox[1] - th / 2),
-        char,
-        font=font,
-        fill=fill,
-        stroke_width=stroke,
-        stroke_fill=(255, 255, 255, 230),
-    )
-    rotated = tile.rotate(-angle_deg, resample=Image.Resampling.BICUBIC, expand=True)
-    stamp.paste(rotated, (int(cx - rotated.width / 2), int(cy - rotated.height / 2)), rotated)
-
-
-def _draw_arc_text(stamp, text, cx, cy, radius, font, fill, *, top: bool, scale: int):
-    """Draw ``text`` along a circular arc (top over the top; bottom under)."""
-    import math
-
-    if not text:
-        return
-    # Angular span ~110° so labels stay readable and don't collide.
-    span = min(2.0, 0.22 * len(text) + 0.7)
-    if top:
-        start = -math.pi / 2 - span / 2
-        step = span / max(len(text) - 1, 1)
-    else:
-        start = math.pi / 2 + span / 2
-        step = -span / max(len(text) - 1, 1)
-
-    for i, char in enumerate(text):
-        if char == " ":
-            continue
-        angle = start + i * step
-        x = cx + radius * math.cos(angle)
-        y = cy + radius * math.sin(angle)
-        tangent_deg = math.degrees(angle) + (90.0 if top else -90.0)
-        _paste_rotated_char(stamp, char, font, fill, x, y, tangent_deg, scale=scale)
-
-
 def _render_circular_stamp(diameter: int):
-    """Build a circular old-school rubber stamp as an RGBA image of size ``diameter``."""
+    """Build a small circular rubber stamp: ring + center star, no text."""
     import math
 
     from PIL import Image, ImageDraw
 
-    # Draw at 3× then downscale so type stays sharp at the smaller display size.
-    scale = 3
-    size = max(diameter, 32) * scale
+    scale = 4
+    size = max(diameter, 24) * scale
     stamp = Image.new("RGBA", (size, size), (0, 0, 0, 0))
     draw = ImageDraw.Draw(stamp)
     cx = cy = size / 2
     ink = _MARK_INK
 
-    # Double ring — classic rubber-stamp silhouette (thin relative to diameter).
     outer_r = size / 2 - scale
     draw.ellipse(
         (cx - outer_r, cy - outer_r, cx + outer_r, cy + outer_r),
         outline=ink,
         width=max(2 * scale, size // 22),
     )
-    inner_r = outer_r * 0.78
-    draw.ellipse(
-        (cx - inner_r, cy - inner_r, cx + inner_r, cy + inner_r),
-        outline=ink,
-        width=max(scale, size // 36),
-    )
 
-    # Slightly larger type relative to diameter so arc text stays legible when small.
-    font = _load_mark_font(max(8 * scale, int(size * 0.125)))
-    _draw_arc_text(stamp, _MARK_ARC_TOP, cx, cy, outer_r * 0.87, font, ink, top=True, scale=scale)
-    _draw_arc_text(
-        stamp, _MARK_ARC_BOTTOM, cx, cy, outer_r * 0.87, font, ink, top=False, scale=scale
-    )
-
-    # Center medallion: a filled star so the stamp reads at a glance.
-    star_r = outer_r * 0.22
+    star_r = outer_r * 0.48
     pts = []
     for i in range(10):
         r = star_r if i % 2 == 0 else star_r * 0.42
@@ -266,7 +176,7 @@ def _render_circular_stamp(diameter: int):
     draw.polygon(pts, fill=ink)
 
     # Slight rotation so it looks hand-inked rather than UI chrome.
-    stamp = stamp.rotate(-12, resample=Image.Resampling.BICUBIC, expand=True)
+    stamp = stamp.rotate(-6, resample=Image.Resampling.BICUBIC, expand=True)
     out_w = max(1, round(stamp.width / scale))
     out_h = max(1, round(stamp.height / scale))
     return stamp.resize((out_w, out_h), resample=Image.Resampling.LANCZOS)
@@ -283,8 +193,8 @@ def _draw_official_mark(img):
     if min(w, h) < 96:
         return img.copy()
 
-    # Small corner mark (~10% of the short side) so it reads as ink, not chrome.
-    diameter = max(36, min(int(min(w, h) * 0.10), 72))
+    # Compact star-only seal; ~6% of the short side.
+    diameter = max(36, min(int(min(w, h) * 0.06), 48))
     stamp = _render_circular_stamp(diameter)
     margin = max(4, int(min(w, h) * 0.015))
     if stamp.width + 2 * margin > w or stamp.height + 2 * margin > h:
@@ -299,9 +209,10 @@ def _draw_official_mark(img):
     marked = Image.alpha_composite(base, overlay)
     if img.mode == "RGBA":
         return marked
-    if img.mode == "RGB":
-        return marked.convert("RGB")
-    return marked.convert(img.mode)
+    # Stay in RGB after compositing. Converting a palette image back to ``P``
+    # requantizes and can merge nearby fills (BoM IOD pink / blue both become
+    # one purple).
+    return marked.convert("RGB")
 
 
 def load_history(zarr_path: Path) -> list:
