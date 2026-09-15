@@ -26,10 +26,13 @@ weather-skills-core = "weather_skills_core.linting.cli:main"
 [project.optional-dependencies]
 # GeoJSON / region: shapely + geopandas (polygon helpers, resolve_region() GeoDataFrame)
 geo = ["shapely>=2.1.2", "geopandas>=1.0"]
+# Figure chrome (rcParams, colorbar, save). Plot skills already depend on matplotlib.
+figure = ["matplotlib>=3.8"]
 
 [dependency-groups]
 dev = [
     "geopandas>=1.0",
+    "matplotlib>=3.8",
     "pre-commit>=4.6",
     "pytest>=9.1",
     "ruff>=0.16",
