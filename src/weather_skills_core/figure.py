@@ -175,18 +175,22 @@ def add_shared_colorbar(fig, mappable, axes, label="", *, location=None, **kwarg
     if location is None:
         location = "right" if len(axes) == 1 else "bottom"
     ticks = kwargs.get("ticks")
+    tick_list = list(ticks) if ticks is not None else None
+    # Discrete class bars need the full axes span so every bound can be labeled.
+    shrink = kwargs.pop("shrink", None)
+    if shrink is None:
+        shrink = 1.0 if tick_list and len(tick_list) >= 6 else 0.8
     cbar = fig.colorbar(
         mappable,
         ax=axes,
         location=location,
-        shrink=0.8,
+        shrink=shrink,
         pad=0.08,
         **kwargs,
     )
     if label:
         cbar.set_label(label)
-    if ticks is not None:
-        tick_list = list(ticks)
+    if tick_list is not None:
         cbar.set_ticks(tick_list)
         cbar.set_ticklabels([_format_cbar_tick(t) for t in tick_list])
     return cbar
