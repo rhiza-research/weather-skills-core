@@ -8,6 +8,8 @@ from weather_skills_core.figure import (
     DEFAULT_FONTSIZE,
     add_shared_colorbar,
     apply_style,
+    format_plot_date,
+    format_plot_date_range,
     parse_figsize,
     resolve_figsize,
     save_figure,
@@ -27,6 +29,23 @@ def test_parse_figsize():
 def test_resolve_figsize():
     assert resolve_figsize(None, (10, 6)) == (10, 6)
     assert resolve_figsize((8.0, 4.0), (10, 6)) == (8.0, 4.0)
+
+
+def test_format_plot_date():
+    import datetime as dt
+
+    import numpy as np
+
+    assert format_plot_date(dt.date(2026, 9, 14)) == "14 Sept '26"
+    assert format_plot_date(np.datetime64("2026-01-01")) == "1 Jan '26"
+    assert format_plot_date(dt.date(2026, 10, 1), year=False) == "1 Oct"
+    assert format_plot_date_range(dt.date(2026, 8, 4), dt.date(2026, 8, 10)) == "4–10 Aug '26"
+    assert format_plot_date_range(dt.date(2026, 8, 28), dt.date(2026, 9, 3)) == (
+        "28 Aug–3 Sept '26"
+    )
+    assert format_plot_date_range(dt.date(2025, 12, 28), dt.date(2026, 1, 3)) == (
+        "28 Dec '25–3 Jan '26"
+    )
 
 
 def test_apply_style_sets_rcparams():
