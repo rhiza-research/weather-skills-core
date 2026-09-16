@@ -30,6 +30,9 @@ from weather_skills_core.units import (
 # Accumulated by ``@weather_skill.argument`` (bottom-up); weather_skill reads it.
 ARGS_ATTR = "__weather_skill_arguments__"
 
+# In-memory only: source Zarr path for plot-spec dump. Stripped before any write.
+INPUT_PATH_ATTR = "weather_skills_input_path"
+
 
 def argv_has_option(argv: list[str], option_strings) -> bool:
     """True when one of ``option_strings`` is present (bare, space, or ``--flag=``)."""
@@ -114,7 +117,9 @@ def prepare_dataset_output(ds, *, first_ds=None):
     ds = normalize_unit_strings(ds)
     ds = stamp_precip_amounts(ds)
     ds = normalize_step_coord(ds)
-    return normalize_latlon_coords(ds)
+    ds = normalize_latlon_coords(ds)
+    ds.attrs.pop(INPUT_PATH_ATTR, None)
+    return ds
 
 
 def write_output(value, out_path, history, first_ds):
@@ -138,6 +143,7 @@ def write_output(value, out_path, history, first_ds):
     value = prepare_dataset_output(value, first_ds=first_ds)
     if first_ds is not None:
         value.attrs = {**first_ds.attrs, **value.attrs}
+    value.attrs.pop(INPUT_PATH_ATTR, None)
     provenance_mod.stamp_zarr(value, history)
     if out_path.exists():
         shutil.rmtree(out_path)
@@ -194,6 +200,7 @@ def open_dataset_params(params, arguments):
             upstream.append(provenance_mod.load_history(path))
         if first_ds is None:
             first_ds = ds
+        ds.attrs[INPUT_PATH_ATTR] = str(path)
         return ds
 
     for arg in arguments:
