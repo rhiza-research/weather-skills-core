@@ -114,7 +114,7 @@ def test_compile_applies_plotly_patch():
 
 def test_export_png_and_sidecar(tmp_path):
     pytest.importorskip("plotly")
-    pytest.importorskip("kaleido")
+    pytest.importorskip("matplotlib")
     from weather_skills_core.plot_compile import compile_figure
     from weather_skills_core.plot_export import write_plot_outputs
 
@@ -192,3 +192,94 @@ def test_compile_line_and_mediogram():
     boxes = [t for t in medio.data if t.type == "box"]
     assert len(boxes) == 8
     assert medio.layout.title.text == "Medio"
+
+
+def test_export_png_timeseries_and_mediogram(tmp_path):
+    pytest.importorskip("plotly")
+    pytest.importorskip("matplotlib")
+    from weather_skills_core.plot_export import export_png
+    from weather_skills_core.plot_recipes import compile_line_figure, compile_mediogram
+
+    lines = compile_line_figure(
+        [([1, 2, 3], [0.0, 1.0, 2.0], "a"), ([1, 2, 3], [2.0, 1.0, 0.0], "b")],
+        title="lines",
+    )
+    line_png = tmp_path / "lines.png"
+    export_png(lines, line_png)
+    assert line_png.is_file() and line_png.stat().st_size > 0
+
+    fc = np.arange(12.0).reshape(3, 4)
+    mc = np.arange(12.0, 24.0).reshape(3, 4)
+    medio = compile_mediogram(fc, mc, ["+0d", "+1d", "+2d", "+3d"], title="Medio")
+    medio_png = tmp_path / "medio.png"
+    export_png(medio, medio_png)
+    assert medio_png.is_file() and medio_png.stat().st_size > 0
+
+
+def test_export_png_heatmap_grid_with_blank(tmp_path):
+    pytest.importorskip("plotly")
+    pytest.importorskip("matplotlib")
+    from weather_skills_core.plot_export import export_png
+    from weather_skills_core.plot_recipes import blank_cell, compile_heatmap_grid, heatmap_cell
+    from weather_skills_core.plot_style import resolve_colorscale
+
+    ds = make_gridded(n_time=1)
+    da = ds["precip"].isel(time=0)
+    scale = resolve_colorscale(da, None)
+    scale["label"] = "precip"
+    fig = compile_heatmap_grid(
+        [[heatmap_cell(da, "latitude", "longitude"), blank_cell("n/a")]],
+        extent=[9.5, 13.5, 0.5, 3.5],
+        col_titles=["t0", "missing"],
+        coloraxes={"coloraxis": scale},
+        overlays=False,
+    )
+    out = tmp_path / "grid.png"
+    export_png(fig, out)
+    assert out.is_file() and out.stat().st_size > 0
+
+
+def test_format_step_dates_and_leads():
+    from weather_skills_core.plot_compile import format_step
+
+    assert format_step(np.datetime64("2026-01-01T00:00:00")) == "1 Jan '26"
+    assert format_step(np.timedelta64(0, "D")) == "+0d"
+    assert format_step(np.timedelta64(3, "D")) == "+3d"
+
+
+def test_panel_title_weekly_range_and_daily_date():
+    import xarray as xr
+
+    from weather_skills_core.plot_compile import panel_title, timeseries_axis
+
+    weekly = np.arange("2026-08-04", "2026-09-01", dtype="datetime64[D]")[::7]
+    da = xr.DataArray(
+        np.zeros((len(weekly), 2, 2)),
+        dims=("time", "latitude", "longitude"),
+        coords={
+            "time": weekly,
+            "latitude": [0.0, 1.0],
+            "longitude": [36.0, 37.0],
+        },
+        name="precip",
+    )
+    da.attrs["aggregation_period"] = "7 day"
+    assert panel_title(da, "time", weekly[0], weekly) == "4–10 Aug '26"
+
+    daily = np.arange("2026-08-04", "2026-08-08", dtype="datetime64[D]")
+    daily_da = xr.DataArray(
+        np.zeros((len(daily), 2, 2)),
+        dims=("time", "latitude", "longitude"),
+        coords={
+            "time": daily,
+            "latitude": [0.0, 1.0],
+            "longitude": [36.0, 37.0],
+        },
+        name="precip",
+    )
+    assert panel_title(daily_da, "time", daily[0], daily) == "4 Aug '26"
+
+    fc = make_forecast()["tp"]
+    xvals, xlabel = timeseries_axis(fc, "step")
+    assert xlabel == "Valid time"
+    assert np.datetime_as_string(xvals[0], unit="D") == "2026-01-01"

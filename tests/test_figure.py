@@ -8,10 +8,13 @@ from weather_skills_core.figure import (
     DEFAULT_FONTSIZE,
     add_shared_colorbar,
     apply_style,
+    axis_label,
     format_plot_date,
     format_plot_date_range,
     parse_figsize,
+    resolve_axis_label,
     resolve_figsize,
+    resolve_time_axis_label,
     save_figure,
 )
 
@@ -29,6 +32,25 @@ def test_parse_figsize():
 def test_resolve_figsize():
     assert resolve_figsize(None, (10, 6)) == (10, 6)
     assert resolve_figsize((8.0, 4.0), (10, 6)) == (8.0, 4.0)
+
+
+def test_axis_label_capitalizes():
+    assert axis_label("lon") == "Longitude"
+    assert axis_label("valid time") == "Valid time"
+    assert axis_label("total precipitation [mm]") == "Total precipitation [mm]"
+    assert axis_label("Latitude") == "Latitude"
+
+
+def test_resolve_axis_label_override_is_verbatim():
+    import numpy as np
+
+    assert resolve_axis_label("lon (E)", "Longitude") == "lon (E)"
+    assert resolve_axis_label(None, "lon") == "Longitude"
+    assert resolve_axis_label("", "Latitude") == "Latitude"
+    times = np.array(["2026-01-01", "2026-01-02"], dtype="datetime64[ns]")
+    assert resolve_time_axis_label(None, "Valid time", times) == ""
+    assert resolve_time_axis_label("Lead time", "Valid time", times) == "Lead time"
+    assert resolve_time_axis_label(None, "step", np.array([1, 2, 3])) == "Step"
 
 
 def test_format_plot_date():
@@ -70,9 +92,7 @@ def test_add_shared_colorbar_labels_every_discrete_tick():
     norm = BoundaryNorm(bounds, cmap.N)
     fig, axes = plt.subplots(1, 2, figsize=(8, 3))
     mesh = axes[0].pcolormesh(np.arange(4).reshape(2, 2), cmap=cmap, norm=norm)
-    cbar = add_shared_colorbar(
-        fig, mesh, axes, "precip", ticks=bounds, spacing="uniform"
-    )
+    cbar = add_shared_colorbar(fig, mesh, axes, "precip", ticks=bounds, spacing="uniform")
     fig.canvas.draw()
     labels = [t.get_text() for t in cbar.ax.get_xticklabels() if t.get_visible() and t.get_text()]
     assert labels == ["2", "5", "10", "25", "50", "75", "100", "150", "200", "300"]

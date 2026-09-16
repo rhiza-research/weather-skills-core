@@ -5,10 +5,10 @@ from __future__ import annotations
 import numpy as np
 
 from weather_skills_core.plot_compile import (
-    _as_plotly_x,
-    _coloraxis,
-    _figsize_from_extent,
-    _geojson_lines,
+    as_plotly_x,
+    coloraxis,
+    figsize_from_extent,
+    geojson_lines,
 )
 from weather_skills_core.plot_style import (
     DEFAULT_DPI,
@@ -158,7 +158,7 @@ def _place_coloraxes(coloraxes, nrows, ncols):
     n_panels = max(nrows * ncols, 1)
     for i, name in enumerate(names):
         scale = coloraxes[name]
-        axis = _coloraxis(scale, scale.get("label") or "", n_panels, None, None)
+        axis = coloraxis(scale, scale.get("label") or "", n_panels, None, None)
         if n_axes > 1 and not (scale.get("colorbar") or {}):
             axis["colorbar"]["orientation"] = "v"
             axis["colorbar"]["x"] = 1.02
@@ -214,7 +214,7 @@ def compile_heatmap_grid(
     )
     geo_x = geo_y = None
     if overlays and extent is not None:
-        geo_x, geo_y = _geojson_lines(extent)
+        geo_x, geo_y = geojson_lines(extent)
     coloraxes = coloraxes or {}
     layout_coloraxes = _place_coloraxes(coloraxes, nrows, ncols)
 
@@ -318,7 +318,7 @@ def compile_heatmap_grid(
 
     sw, sh = (5.0, 4.0)
     if extent is not None:
-        sw, sh = _figsize_from_extent(*extent)
+        sw, sh = figsize_from_extent(*extent)
     width, height, autosize = _layout_size(
         figsize, default_in=(max(sw * ncols, 6.0), max(sh * nrows, 4.0))
     )
@@ -368,7 +368,7 @@ def compile_line_figure(
         color = plotly_color(style.get("color"))
         width_pt = style.get("lw") or style.get("linewidth") or style.get("width") or 2
         yarr = np.asarray(yvals, dtype=float)
-        xplot = _as_plotly_x(xvals)
+        xplot = as_plotly_x(xvals)
         traces_y = [yarr] if yarr.ndim == 1 else [yarr[:, j] for j in range(yarr.shape[1])]
         for j, yy in enumerate(traces_y):
             name = label if j == 0 else None

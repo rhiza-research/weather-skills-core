@@ -7,14 +7,13 @@ import os
 from pathlib import Path
 
 from weather_skills_core.errors import UsageError
+from weather_skills_core.figure import DEFAULT_DPI, DEFAULT_FONTSIZE
 from weather_skills_core.units import (
     parse_aggregation_period,
     variable_units,
 )
 
 SPEC_VERSION = 1
-DEFAULT_FONTSIZE = 16
-DEFAULT_DPI = 150
 DEFAULT_MAX_COLUMNS = 4
 DEFAULT_TEMPLATE = "weather_skills"
 
@@ -160,7 +159,8 @@ def register_template(fontsize: int = DEFAULT_FONTSIZE) -> str:
     return DEFAULT_TEMPLATE
 
 
-def _aggregation_days(da) -> float | None:
+def aggregation_days(da) -> float | None:
+    """Return stamped ``aggregation_period`` in days, or None."""
     period = da.attrs.get("aggregation_period")
     if not (isinstance(period, str) and period.strip()):
         return None
@@ -198,7 +198,7 @@ def named_precip_scale(da) -> tuple[str, list[str], list[float]]:
     """Return ``(name, colors, bounds)`` for the default precip palette."""
     if is_precip_anomaly(da):
         return "chirps_anom", list(PRECIP_ANOMALY_COLORS), list(PRECIP_ANOMALY_BOUNDS)
-    days = _aggregation_days(da)
+    days = aggregation_days(da)
     if days is not None and days < PRECIP_LONG_MIN_DAYS:
         return "chirps_short", list(PRECIP_COLORS), list(PRECIP_SHORT_BOUNDS)
     return "chirps_total", list(PRECIP_COLORS), list(PRECIP_BOUNDS)

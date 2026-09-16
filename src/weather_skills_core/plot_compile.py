@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from importlib.resources import files
 from pathlib import Path
 
@@ -10,12 +11,18 @@ import numpy as np
 
 from weather_skills_core.cf import auto_variable, cf_dim
 from weather_skills_core.errors import UsageError
-from weather_skills_core.figure import format_plot_date, format_plot_date_range
+from weather_skills_core.figure import (
+    axis_label,
+    format_plot_date,
+    format_plot_date_range,
+    resolve_axis_label,
+)
 from weather_skills_core.plot_spec import apply_index, overlay_spec, panel_shape, parse_index
 from weather_skills_core.plot_style import (
     DEFAULT_DPI,
     DEFAULT_FONTSIZE,
     DEFAULT_MAX_COLUMNS,
+    aggregation_days,
     register_template,
     resolve_colorscale,
 )
@@ -34,13 +41,13 @@ from weather_skills_core.units import (
 )
 
 
-def _plain(da):
+def plain(da):
     if getattr(da.pint, "units", None) is not None:
         return da.pint.dequantify()
     return da
 
 
-def _step_dim(da):
+def step_dim(da):
     for cand in ("step", "time", "valid_time"):
         if cand in da.dims:
             return cand
@@ -48,7 +55,7 @@ def _step_dim(da):
     return cf if cf and cf in da.dims else None
 
 
-def _pad_cell_extent(lat_vals, lon_vals):
+def pad_cell_extent(lat_vals, lon_vals):
     lat_vals = np.asarray(lat_vals, dtype=float)
     lon_vals = np.asarray(lon_vals, dtype=float)
     dlat = float(np.nanmean(np.abs(np.diff(lat_vals)))) if lat_vals.size > 1 else 0.5
@@ -64,7 +71,7 @@ def _pad_cell_extent(lat_vals, lon_vals):
     return [lon_min, lon_max, lat_min, lat_max]
 
 
-def _figsize_from_extent(lon_min, lon_max, lat_min, lat_max, base_height=5.0):
+def figsize_from_extent(lon_min, lon_max, lat_min, lat_max, base_height=5.0):
     lat_range = abs(lat_max - lat_min)
     lon_range = abs(lon_max - lon_min)
     if lat_range == 0 or lon_range == 0:
@@ -74,7 +81,7 @@ def _figsize_from_extent(lon_min, lon_max, lat_min, lat_max, base_height=5.0):
     return max(width, 2.0), height
 
 
-def _subset_spatial(da, lat_dim, lon_dim, bbox_nwse, region_polygon, extent_vals):
+def subset_spatial(da, lat_dim, lon_dim, bbox_nwse, region_polygon, extent_vals):
     if bbox_nwse is None and region_polygon is None:
         return da, extent_vals
     import xarray as xr
@@ -106,7 +113,60 @@ def _subset_spatial(da, lat_dim, lon_dim, bbox_nwse, region_polygon, extent_vals
     return da, extent_vals
 
 
-def _parse_extent(spec):
+def slice_bbox_mask(da, lat_dim, lon_dim, bbox, polygon, label):
+    """Slice a lat/lon field to ``bbox`` / polygon; error if the grid is empty."""
+    if bbox is None and polygon is None:
+        return da
+    da, _ = subset_spatial(da, lat_dim, lon_dim, bbox, polygon, None)
+    if polygon is not None:
+        import shapely
+
+        lon_grid, lat_grid = np.meshgrid(da[lon_dim].values, da[lat_dim].values)
+        if not bool(shapely.contains_xy(polygon, lon_grid, lat_grid).any()):
+            print(
+                f"Warning: --mask-geojson polygon does not intersect {label}; "
+                "its panels will be entirely empty.",
+                file=sys.stderr,
+            )
+    if da.sizes.get(lat_dim, 0) == 0 or da.sizes.get(lon_dim, 0) == 0:
+        raise UsageError(
+            f"selection produced an empty grid on {label} "
+            "(no cells remain after --bbox/--mask-geojson); nothing to plot."
+        )
+    return da
+
+
+def extent_from_da(da, lat_dim, lon_dim, bbox=None):
+    """Lon/lat extent from ``bbox`` (NWSE) or half-cell padding around ``da``."""
+    if bbox is not None:
+        r_n, r_w, r_s, r_e = bbox
+        if r_w > r_e:
+            return [float(r_w), float(r_e) + 360.0, float(r_s), float(r_n)]
+        return [float(r_w), float(r_e), float(r_s), float(r_n)]
+    return pad_cell_extent(da[lat_dim].values, da[lon_dim].values)
+
+
+def is_cftime_axis(values):
+    arr = np.asarray(values)
+    return (
+        getattr(arr.dtype, "kind", None) == "O"
+        and arr.size > 0
+        and hasattr(arr.flat[0], "calendar")
+    )
+
+
+def axis_kind(values):
+    kind = getattr(np.asarray(values).dtype, "kind", None)
+    if kind == "M":
+        return "datetime"
+    if kind == "m":
+        return "timedelta"
+    if is_cftime_axis(values):
+        return "datetime"
+    return None
+
+
+def parse_extent(spec):
     if not spec:
         return None
     if isinstance(spec, (list, tuple)) and len(spec) == 4:
@@ -117,7 +177,7 @@ def _parse_extent(spec):
     return parts
 
 
-def _parse_cities(spec):
+def parse_cities(spec):
     if not spec:
         return {}
     if isinstance(spec, dict):
@@ -135,54 +195,97 @@ def _parse_cities(spec):
     return out
 
 
-def _parse_draw_boxes(specs):
+def parse_draw_boxes(specs):
     if not specs:
         return []
     boxes = []
     for spec in specs:
         if isinstance(spec, (list, tuple)) and len(spec) == 4:
-            boxes.append([float(x) for x in spec])
+            boxes.append(tuple(float(x) for x in spec))
         else:
-            boxes.append(list(parse_bbox(spec)))
+            boxes.append(tuple(parse_bbox(spec)))
     return boxes
 
 
-def _format_step(value):
+def format_step(value):
+    """Lead-time or calendar label: ``+3d`` or ``1 Jan '26``."""
     arr = np.asarray(value)
+    if arr.dtype.kind == "M":
+        return format_plot_date(value)
     if arr.dtype.kind == "m":
-        days = arr / np.timedelta64(1, "D")
-        return f"{int(days)}d" if float(days).is_integer() else str(value)
+        days = int(arr.astype("timedelta64[D]").astype("int64").reshape(-1)[0])
+        return f"+{days}d"
+    if hasattr(value, "year") and hasattr(value, "month") and hasattr(value, "day"):
+        return format_plot_date(value)
     return str(value)
 
 
-def _calendar_bin_width(da, all_steps):
-    period = da.attrs.get("aggregation_period")
-    if isinstance(period, str) and period.strip():
+def calendar_bin_width(da, all_steps):
+    """Days in a left-labeled multi-day calendar bin, or None for a single date."""
+    days = aggregation_days(da)
+    if days is not None and days >= 2:
+        return float(days)
+    arr = np.asarray(all_steps)
+    if arr.size < 2:
+        return None
+    if arr.dtype.kind == "M":
         try:
-            return parse_aggregation_period(period)
-        except UsageError:
-            pass
-    step_arr = np.asarray(all_steps)
-    if step_arr.dtype.kind == "M" and step_arr.size > 1:
-        deltas = np.diff(step_arr).astype("timedelta64[D]").astype(float)
-        if deltas.size:
-            return float(np.median(deltas))
+            diffs = np.diff(arr.astype("datetime64[ns]").astype("int64"))
+        except (TypeError, ValueError):
+            return None
+        positive = diffs[diffs > 0]
+        if positive.size == 0:
+            return None
+        median_ns = float(np.median(positive))
+        if median_ns < 2 * 86_400_000_000_000:
+            return None
+        return median_ns / 86_400_000_000_000
+    if is_cftime_axis(arr):
+        ordered = np.sort(arr)
+        deltas = [
+            abs((ordered[i + 1] - ordered[i]).total_seconds()) for i in range(ordered.size - 1)
+        ]
+        if not deltas:
+            return None
+        seconds = float(np.median(deltas))
+        if seconds < 2 * 86_400:
+            return None
+        return seconds / 86_400
     return None
 
 
-def _format_calendar_panel(step_value, width):
-    if width is None:
-        return format_plot_date(step_value)
+def format_calendar_panel(value, bin_width=None):
+    """``14 Sept '26``, or ``4–10 Aug '26`` for multi-day left-edge bins."""
+    import datetime as _dt
+
+    if bin_width is None:
+        return format_plot_date(value)
     try:
-        days = float(width.to("day").magnitude) if hasattr(width, "to") else float(width)
+        if hasattr(bin_width, "to"):
+            days = float(bin_width.to("day").magnitude)
+        elif hasattr(bin_width, "total_seconds"):
+            days = float(bin_width.total_seconds()) / 86_400
+        else:
+            days = float(bin_width)
     except (TypeError, ValueError, AttributeError):
-        return format_plot_date(step_value)
+        return format_plot_date(value)
     if days <= 1.5:
-        return format_plot_date(step_value)
-    start = np.asarray(step_value, dtype="datetime64[D]") - np.timedelta64(
-        int(round(days)) - 1, "D"
-    )
-    return format_plot_date_range(start, step_value)
+        return format_plot_date(value)
+
+    offset_days = int(round(days)) - 1
+    if hasattr(value, "calendar"):
+        try:
+            end = value + _dt.timedelta(days=offset_days)
+        except (TypeError, ValueError):
+            return format_plot_date(value)
+        return format_plot_date_range(value, end)
+
+    try:
+        start = np.asarray(value, dtype="datetime64[D]")
+        end = start + np.timedelta64(offset_days, "D")
+        return format_plot_date_range(start, end)
+    except (TypeError, ValueError):
+        return format_step(value)
 
 
 def panel_title(da, sdim, step_value, all_steps):
@@ -190,7 +293,7 @@ def panel_title(da, sdim, step_value, all_steps):
     step_arr = np.asarray(all_steps)
     value_arr = np.asarray(step_value)
     if step_arr.dtype.kind == "m" and "time" in da.coords and getattr(da["time"], "ndim", 1) == 0:
-        fallback = f"{sdim}={_format_step(step_value)}"
+        fallback = f"{sdim}={format_step(step_value)}"
         try:
             time_val = np.asarray(da["time"].values)
             start = time_val + np.asarray(step_value)
@@ -209,8 +312,8 @@ def panel_title(da, sdim, step_value, all_steps):
         except Exception:  # noqa: BLE001
             return fallback
     if value_arr.dtype.kind == "M" or hasattr(step_value, "calendar"):
-        return _format_calendar_panel(step_value, _calendar_bin_width(da, all_steps))
-    return f"{sdim}={_format_step(step_value)}"
+        return format_calendar_panel(step_value, calendar_bin_width(da, all_steps))
+    return f"{sdim}={format_step(step_value)}"
 
 
 def timeseries_axis(da, sdim):
@@ -229,30 +332,7 @@ def timeseries_axis(da, sdim):
     return (init + steps).astype("datetime64[ns]"), "Valid time"
 
 
-def _axis_label(text):
-    if text is None:
-        return text
-    s = str(text).strip()
-    if not s:
-        return s
-    known = {
-        "lon": "Longitude",
-        "lat": "Latitude",
-        "longitude": "Longitude",
-        "latitude": "Latitude",
-        "valid time": "Valid time",
-        "calendar day": "Calendar day",
-        "time": "Time",
-        "step": "Step",
-        "forecast step": "Forecast step",
-    }
-    key = s.lower()
-    if key in known:
-        return known[key]
-    return s[:1].upper() + s[1:] if s else s
-
-
-def _geojson_lines(_extent):
+def geojson_lines(_extent):
     """Country outlines from bundled Natural Earth."""
     raw = json.loads(files("weather_skills_core.data").joinpath("countries.geojson").read_text())
     xs, ys = [], []
@@ -309,7 +389,7 @@ def _prepare_field(ds, spec_input: dict, geo: dict, style: str):
         bbox_nwse = None
     mask_geojson = geo.get("mask_geojson")
     region_polygon = polygon_from_geojson(mask_geojson) if mask_geojson else None
-    extent = _parse_extent(geo.get("extent"))
+    extent = parse_extent(geo.get("extent"))
 
     if style == "timeseries":
         da = apply_index(da, overrides, list_dims=())
@@ -318,7 +398,7 @@ def _prepare_field(ds, spec_input: dict, geo: dict, style: str):
             raise UsageError(f"timeseries needs 'step' or 'time'; got {list(da.dims)}.")
         reduce_dims = [d for d in da.dims if d != sdim]
         reduced = da.mean(reduce_dims, keep_attrs=True) if reduce_dims else da
-        return {"da": _plain(reduced), "sdim": sdim}
+        return {"da": plain(reduced), "sdim": sdim}
 
     lat_dim = cf_dim(da, "latitude")
     lon_dim = cf_dim(da, "longitude")
@@ -329,11 +409,11 @@ def _prepare_field(ds, spec_input: dict, geo: dict, style: str):
             f"{style} needs lat/lon as dimensions, but {lat_dim!r}/"
             f"{lon_dim!r} are non-dimension coordinates (dims: {list(da.dims)})"
         )
-    native_step_dim = _step_dim(da)
+    native_step_dim = step_dim(da)
     native_steps = list(da[native_step_dim].values) if native_step_dim else None
     list_dims = (native_step_dim,) if native_step_dim else ()
     da = apply_index(da, overrides, list_dims=list_dims)
-    panel_dim = _step_dim(da)
+    panel_dim = step_dim(da)
     for dim in da.dims:
         if dim not in (panel_dim, "number", lat_dim, lon_dim):
             panel_desc = repr(panel_dim) if panel_dim else "step/time"
@@ -343,16 +423,16 @@ def _prepare_field(ds, spec_input: dict, geo: dict, style: str):
                 f"from {dim!r} with --index"
             )
     wrapped_bbox = bbox_nwse is not None and bbox_nwse[1] > bbox_nwse[3]
-    da, extent = _subset_spatial(da, lat_dim, lon_dim, bbox_nwse, region_polygon, extent)
+    da, extent = subset_spatial(da, lat_dim, lon_dim, bbox_nwse, region_polygon, extent)
     if da.sizes[lat_dim] == 0 or da.sizes[lon_dim] == 0:
         raise UsageError("selection produced an empty grid; nothing to plot.")
     if "number" in da.dims:
         da = da.mean("number", keep_attrs=True)
-    da = _plain(da)
+    da = plain(da)
     if not wrapped_bbox:
         da = ensure_normalized_longitude(da, lon_dim)
     if extent is None:
-        extent = _pad_cell_extent(da[lat_dim].values, da[lon_dim].values)
+        extent = pad_cell_extent(da[lat_dim].values, da[lon_dim].values)
     return {
         "da": da,
         "lat_dim": lat_dim,
@@ -364,7 +444,7 @@ def _prepare_field(ds, spec_input: dict, geo: dict, style: str):
     }
 
 
-def _coloraxis(scale, label, n_panels, vmin, vmax):
+def coloraxis(scale, label, n_panels, vmin, vmax):
     cmin = scale.get("cmin") if vmin is None else vmin
     cmax = scale.get("cmax") if vmax is None else vmax
     colorbar = {
@@ -419,14 +499,14 @@ def _compile_timeseries(prepared, spec, fontsize):
     qty = variable_label_for_display(da, include_units=False)
     xlabel = spec.get("xlabel")
     if xlabel is None:
-        xlabel = "" if np.asarray(xvals).dtype.kind in "Mm" else _axis_label(default_xlabel)
+        xlabel = "" if np.asarray(xvals).dtype.kind in "Mm" else axis_label(default_xlabel)
     else:
-        xlabel = _axis_label(xlabel)
-    ylabel = spec.get("ylabel") or variable_label_for_display(da)
+        xlabel = resolve_axis_label(xlabel, default_xlabel)
+    ylabel = resolve_axis_label(spec.get("ylabel"), variable_label_for_display(da))
     fig = go.Figure()
     fig.add_trace(
         go.Scatter(
-            x=_as_plotly_x(xvals),
+            x=as_plotly_x(xvals),
             y=np.asarray(da.values, dtype=float),
             mode="lines+markers",
             name=qty,
@@ -440,14 +520,14 @@ def _compile_timeseries(prepared, spec, fontsize):
         template=register_template(fontsize),
         title=spec.get("title") or f"{qty} (timeseries)",
         xaxis_title=xlabel,
-        yaxis_title=_axis_label(ylabel) if ylabel else ylabel,
+        yaxis_title=ylabel,
         showlegend=showlegend,
         autosize=spec.get("layout", {}).get("autosize", True),
     )
     return fig
 
 
-def _as_plotly_x(values):
+def as_plotly_x(values):
     arr = np.asarray(values)
     if arr.dtype.kind == "M":
         return np.datetime_as_string(arr, unit="s").tolist()
@@ -464,7 +544,7 @@ def _compile_heatmap(prepared, spec, fontsize, *, trace_type="heatmap"):
     lat_dim = prepared["lat_dim"]
     lon_dim = prepared["lon_dim"]
     extent = prepared["extent"]
-    sdim = _step_dim(da)
+    sdim = step_dim(da)
     if sdim is None or da.sizes.get(sdim, 1) == 1:
         if sdim and sdim in da.dims:
             da = da.squeeze(sdim, drop=True)
@@ -517,11 +597,11 @@ def _compile_heatmap(prepared, spec, fontsize, *, trace_type="heatmap"):
     overlays = spec.get("geo", {}).get("overlays", "auto")
     geo_x = geo_y = None
     if overlays not in (None, False, "none", "off"):
-        geo_x, geo_y = _geojson_lines(extent)
-    cities = _parse_cities(spec.get("geo", {}).get("cities"))
-    boxes = _parse_draw_boxes(spec.get("geo", {}).get("draw_boxes"))
-    xlabel = _axis_label(spec.get("xlabel") or "Longitude")
-    ylabel = _axis_label(spec.get("ylabel") or "Latitude")
+        geo_x, geo_y = geojson_lines(extent)
+    cities = parse_cities(spec.get("geo", {}).get("cities"))
+    boxes = parse_draw_boxes(spec.get("geo", {}).get("draw_boxes"))
+    xlabel = resolve_axis_label(spec.get("xlabel"), "Longitude")
+    ylabel = resolve_axis_label(spec.get("ylabel"), "Latitude")
 
     for i, _step in enumerate(steps):
         row, col = divmod(i, ncols)
@@ -597,13 +677,13 @@ def _compile_heatmap(prepared, spec, fontsize, *, trace_type="heatmap"):
         fig.update_xaxes(visible=False, row=row + 1, col=col + 1)
         fig.update_yaxes(visible=False, row=row + 1, col=col + 1)
 
-    sw, sh = _figsize_from_extent(*extent)
+    sw, sh = figsize_from_extent(*extent)
     figsize = spec.get("layout", {}).get("figsize")
     autosize = spec.get("layout", {}).get("autosize", True)
     layout_kw = {
         "template": register_template(fontsize),
         "title": spec.get("title") or None,
-        "coloraxis": _coloraxis(scale, label, n, spec.get("vmin"), spec.get("vmax")),
+        "coloraxis": coloraxis(scale, label, n, spec.get("vmin"), spec.get("vmax")),
         "showlegend": False,
         "autosize": autosize and figsize is None,
     }

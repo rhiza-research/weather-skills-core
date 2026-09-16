@@ -79,6 +79,8 @@ def panel_shape(n, rows=None, columns=None, *, max_columns: int = DEFAULT_MAX_CO
 
 def parse_index(spec):
     """Parse ``--index`` into ``{dim: int | list[int]}`` (e.g. ``step=0,1,2``)."""
+    if isinstance(spec, dict):
+        return spec
     if not spec or not str(spec).strip():
         return {}
     values = {}

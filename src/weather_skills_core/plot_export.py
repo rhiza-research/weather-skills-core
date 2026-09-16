@@ -6,23 +6,19 @@ import json
 import sys
 from pathlib import Path
 
+from weather_skills_core.figure import DEFAULT_DPI, save_figure
+from weather_skills_core.plot_mpl import plotly_to_mpl
 from weather_skills_core.plot_spec import dump_spec, sidecar_path
-from weather_skills_core.plot_style import DEFAULT_DPI
 
 
-def export_png(fig, path, *, width=None, height=None, scale=1) -> Path:
-    """Write a PNG via Kaleido. Width/height come from the figure layout if omitted."""
-    import plotly.io as pio
+def export_png(fig, path, *, width=None, height=None, scale=1, tight=True) -> Path:
+    """Write a PNG via matplotlib Agg. Width/height come from the figure layout if omitted.
 
-    output = Path(path)
-    output.parent.mkdir(parents=True, exist_ok=True)
-    layout = fig.layout
-    width = width or layout.width or int(8 * DEFAULT_DPI)
-    height = height or layout.height or int(5 * DEFAULT_DPI)
-    pio.write_image(
-        fig, str(output), format="png", width=int(width), height=int(height), scale=scale
-    )
-    return output
+    Plotly/Kaleido PNG export needs Chrome; this rasterizes the traces we emit instead.
+    Pass ``tight=False`` to keep an explicit ``--figsize``.
+    """
+    mpl_fig = plotly_to_mpl(fig, width=width, height=height)
+    return save_figure(mpl_fig, path, tight=tight, dpi=DEFAULT_DPI * float(scale or 1))
 
 
 def export_html(fig, path, *, include_plotlyjs="cdn") -> Path:
@@ -86,7 +82,9 @@ def write_plot_outputs(
     if suffix in {".html", ".htm"}:
         export_html(fig, output)
     else:
-        export_png(fig, output)
+        layout = getattr(fig, "layout", None)
+        autosize = True if layout is None else layout.autosize is not False
+        export_png(fig, output, tight=autosize)
         if html_path:
             export_html(fig, html_path)
     if plotly_json_path:
