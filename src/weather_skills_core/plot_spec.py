@@ -297,3 +297,21 @@ def sidecar_path(output: Path) -> Path:
     """``out.png`` → ``out.plot.json``."""
     output = Path(output)
     return output.with_name(output.stem + ".plot.json")
+
+
+def spec_inputs_from_datasets(datasets) -> list[dict]:
+    """Build ``inputs`` entries from decorator-opened Datasets (stamped paths)."""
+    from weather_skills_core.decorator import INPUT_PATH_ATTR
+
+    if isinstance(datasets, dict):
+        items = list(datasets.items())
+    else:
+        items = [(chr(ord("a") + i), ds) for i, ds in enumerate(datasets)]
+    inputs = []
+    for key, ds in items:
+        item = {"id": str(key)}
+        path = getattr(ds, "attrs", {}).get(INPUT_PATH_ATTR)
+        if path:
+            item["path"] = str(path)
+        inputs.append(item)
+    return inputs

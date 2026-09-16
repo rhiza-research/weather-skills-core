@@ -28,7 +28,7 @@ weather-skills-core = "weather_skills_core.linting.cli:main"
 geo = ["shapely>=2.1.2", "geopandas>=1.0"]
 # Figure chrome (rcParams, colorbar, save). Plot skills already depend on matplotlib.
 figure = ["matplotlib>=3.8"]
-# Plotly compiler (heatmap/timeseries). Kaleido is the PNG exporter.
+# Plotly compiler (heatmap/timeseries/recipes). Kaleido is the PNG exporter.
 plot = ["plotly>=6", "kaleido>=1", "shapely>=2.1.2"]
 
 [dependency-groups]

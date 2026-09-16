@@ -368,7 +368,7 @@ def _coloraxis(scale, label, n_panels, vmin, vmax):
     cmin = scale.get("cmin") if vmin is None else vmin
     cmax = scale.get("cmax") if vmax is None else vmax
     colorbar = {
-        "title": {"text": label or ""},
+        "title": {"text": label or scale.get("label") or ""},
         "orientation": "v" if n_panels <= 1 else "h",
         "y": 0.5 if n_panels <= 1 else -0.12,
         "x": 1.02 if n_panels <= 1 else 0.5,
@@ -378,6 +378,13 @@ def _coloraxis(scale, label, n_panels, vmin, vmax):
     if bounds:
         colorbar["tickvals"] = bounds
         colorbar["tickmode"] = "array"
+    if scale.get("ticktext"):
+        colorbar["ticktext"] = list(scale["ticktext"])
+        colorbar["tickmode"] = "array"
+        if not bounds and scale.get("tickvals"):
+            colorbar["tickvals"] = list(scale["tickvals"])
+    if scale.get("colorbar"):
+        colorbar.update(scale["colorbar"])
     axis = {"colorscale": scale["colorscale"], "colorbar": colorbar, "showscale": True}
     if cmin is not None:
         axis["cmin"] = cmin
@@ -449,7 +456,7 @@ def _as_plotly_x(values):
     return arr.tolist()
 
 
-def _compile_heatmap(prepared, spec, fontsize):
+def _compile_heatmap(prepared, spec, fontsize, *, trace_type="heatmap"):
     import plotly.graph_objects as go
     from plotly.subplots import make_subplots
 
@@ -523,17 +530,25 @@ def _compile_heatmap(prepared, spec, fontsize):
         slab = da if sdim is None else da.isel({sdim: i})
         slab = slab.transpose(lat_dim, lon_dim)
         z = np.asarray(slab.values, dtype=float)
-        fig.add_trace(
-            go.Heatmap(
+        if trace_type == "contour":
+            trace = go.Contour(
+                x=lon,
+                y=lat,
+                z=z,
+                coloraxis="coloraxis",
+                contours={"coloring": "fill", "showlines": True},
+                line={"color": "black", "width": 0.4},
+                hoverongaps=False,
+            )
+        else:
+            trace = go.Heatmap(
                 x=lon,
                 y=lat,
                 z=z,
                 coloraxis="coloraxis",
                 hoverongaps=False,
-            ),
-            row=row,
-            col=col,
-        )
+            )
+        fig.add_trace(trace, row=row, col=col)
         if geo_x:
             fig.add_trace(
                 go.Scatter(
@@ -652,7 +667,7 @@ def compile_figure(spec: dict, datasets: dict):
         scale = None
         nrows = ncols = n = 1
     elif style in ("heatmap", "contour"):
-        fig, scale, (nrows, ncols), n = _compile_heatmap(prepared, spec, fontsize)
+        fig, scale, (nrows, ncols), n = _compile_heatmap(prepared, spec, fontsize, trace_type=style)
     else:
         raise UsageError(f"plotly compiler does not yet support style {style!r}")
 

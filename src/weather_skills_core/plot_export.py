@@ -33,6 +33,25 @@ def export_html(fig, path, *, include_plotlyjs="cdn") -> Path:
     return output
 
 
+def export_plotly_json(fig, path, *, include_data=False) -> Path:
+    """Write Plotly figure JSON. Default is layout-only (heatmap ``z`` is huge)."""
+    output = Path(path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    if include_data:
+        output.write_text(fig.to_json(), encoding="utf-8")
+        return output
+    payload = fig.to_dict()
+    layout_only = {
+        "layout": payload.get("layout") or {},
+        "data": [
+            {k: v for k, v in trace.items() if k not in {"z", "y", "x"} or k == "type"}
+            for trace in (payload.get("data") or [])
+        ],
+    }
+    output.write_text(json.dumps(layout_only, indent=2, default=str) + "\n", encoding="utf-8")
+    return output
+
+
 def attach_upstream_history(spec: dict, datasets: dict) -> dict:
     """Copy the first input Zarr's history onto the spec (plot step is stamped on PNG)."""
     out = dict(spec)
@@ -45,7 +64,7 @@ def attach_upstream_history(spec: dict, datasets: dict) -> dict:
                 raw = json.loads(raw)
             except json.JSONDecodeError:
                 continue
-        out["upstream_history"] = raw
+        out["weather_skills_history"] = raw
         break
     return out
 
@@ -58,6 +77,8 @@ def write_plot_outputs(
     datasets=None,
     dump_spec_path=None,
     html_path=None,
+    plotly_json_path=None,
+    include_plotly_data=False,
 ) -> Path:
     """Write ``--output`` (png or html) plus the resolved ``*.plot.json`` sidecar."""
     output = Path(output)
@@ -68,6 +89,8 @@ def write_plot_outputs(
         export_png(fig, output)
         if html_path:
             export_html(fig, html_path)
+    if plotly_json_path:
+        export_plotly_json(fig, plotly_json_path, include_data=include_plotly_data)
 
     spec_out = dict(resolved_spec)
     if datasets:

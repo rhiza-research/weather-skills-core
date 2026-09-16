@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 
+import numpy as np
 import pytest
 from conftest import make_forecast, make_gridded
 
@@ -127,3 +128,67 @@ def test_export_png_and_sidecar(tmp_path):
     data = json.loads(sidecar.read_text())
     assert data["title"] == "Map"
     assert data["style"]["colormap"]
+
+
+def test_compile_contour_uses_contour_traces():
+    pytest.importorskip("plotly")
+    from weather_skills_core.plot_compile import compile_figure
+
+    ds = make_gridded(n_time=1)
+    spec = spec_from_flags(variable="precip", style="contour")
+    fig, resolved = compile_figure(spec, {"a": ds})
+    assert resolved["traces"][0]["type"] == "contour"
+    assert any(t.type == "contour" for t in fig.data)
+
+
+def test_export_plotly_json_layout_only(tmp_path):
+    pytest.importorskip("plotly")
+    from weather_skills_core.plot_compile import compile_figure
+    from weather_skills_core.plot_export import export_plotly_json
+
+    ds = make_gridded(n_time=1)
+    spec = spec_from_flags(variable="precip", style="heatmap")
+    fig, _resolved = compile_figure(spec, {"a": ds})
+    path = tmp_path / "fig.plotly.json"
+    export_plotly_json(fig, path, include_data=False)
+    payload = json.loads(path.read_text())
+    assert "layout" in payload
+    assert all("z" not in (t or {}) for t in payload.get("data") or [])
+
+
+def test_compile_heatmap_grid_blank_and_heatmap():
+    pytest.importorskip("plotly")
+    from weather_skills_core.plot_recipes import blank_cell, compile_heatmap_grid, heatmap_cell
+    from weather_skills_core.plot_style import resolve_colorscale
+
+    ds = make_gridded(n_time=1)
+    da = ds["precip"].isel(time=0)
+    scale = resolve_colorscale(da, None)
+    scale["label"] = "precip"
+    fig = compile_heatmap_grid(
+        [[heatmap_cell(da, "latitude", "longitude"), blank_cell("n/a")]],
+        extent=[9.5, 13.5, 0.5, 3.5],
+        col_titles=["t0", "missing"],
+        coloraxes={"coloraxis": scale},
+        overlays=False,
+    )
+    assert any(t.type == "heatmap" for t in fig.data)
+
+
+def test_compile_line_and_mediogram():
+    pytest.importorskip("plotly")
+    from weather_skills_core.plot_recipes import compile_line_figure, compile_mediogram
+
+    fig = compile_line_figure(
+        [([1, 2, 3], [0.0, 1.0, 2.0], "a"), ([1, 2, 3], [2.0, 1.0, 0.0], "b")],
+        title="lines",
+        xlabel="t",
+        ylabels=["mm", "mm"],
+    )
+    assert len(fig.data) == 2
+    fc = np.arange(12.0).reshape(3, 4)
+    mc = np.arange(12.0, 24.0).reshape(3, 4)
+    medio = compile_mediogram(fc, mc, ["+0d", "+1d", "+2d", "+3d"], title="Medio")
+    boxes = [t for t in medio.data if t.type == "box"]
+    assert len(boxes) == 8
+    assert medio.layout.title.text == "Medio"
