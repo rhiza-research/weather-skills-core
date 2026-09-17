@@ -332,3 +332,115 @@ def spec_inputs_from_datasets(datasets) -> list[dict]:
             item["path"] = str(path)
         inputs.append(item)
     return inputs
+
+
+SPEC_ARGUMENT_HELP = (
+    "Plot spec JSON (path or inline). Dump from a default run (sidecar *.plot.json), "
+    "edit, and pass back. CLI flags overlay the spec. Inputs listed in the spec are "
+    "opened for provenance; dataset flags are optional when the spec has paths."
+)
+DUMP_SPEC_ARGUMENT_HELP = (
+    "Where to write the resolved plot spec. Default: <output-stem>.plot.json. "
+    "Use '-' for stdout, 'none' to skip."
+)
+
+
+def parse_plot_spec(value):
+    """Argparse converter for a plot spec path or inline JSON object."""
+    import argparse
+
+    try:
+        return load_spec(value)
+    except UsageError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from None
+
+
+def dump_spec_dest(value):
+    """Normalize ``--dump-spec``: ``None`` (default sidecar), ``False`` (skip), or a path."""
+    if value is None or value is False:
+        return value
+    if str(value).lower() in {"none", "off", "false"}:
+        return False
+    return value
+
+
+def opened_datasets_from_spec(spec: PlotSpec | None) -> list:
+    """Datasets the decorator opened from ``spec.zarr_paths()``."""
+    if spec is None:
+        return []
+    if spec.datasets:
+        return list(spec.datasets)
+    if spec.ds is not None:
+        return [spec.ds]
+    return []
+
+
+def named_datasets_from_spec(spec: PlotSpec | None) -> dict:
+    """``{input id: Dataset}`` in spec ``inputs`` order."""
+    opened = opened_datasets_from_spec(spec)
+    if not opened:
+        return {}
+    inputs = [i for i in ((spec.data.get("inputs") if spec else None) or []) if isinstance(i, dict)]
+    named = {}
+    for i, ds in enumerate(opened):
+        key = inputs[i].get("id") if i < len(inputs) else None
+        named[str(key or chr(ord("a") + i))] = ds
+    return named
+
+
+def datasets_from_cli_or_spec(
+    cli,
+    spec,
+    *,
+    min_count=1,
+    exactly=None,
+    flag="-i/--input",
+):
+    """CLI dataset list wins when given; otherwise datasets opened from ``--spec``."""
+    if cli is None:
+        datasets = []
+    elif isinstance(cli, (list, tuple)):
+        datasets = [item for item in cli if item is not None]
+    else:
+        datasets = [cli]
+    if not datasets:
+        datasets = opened_datasets_from_spec(spec)
+    n = len(datasets)
+    if exactly is not None:
+        if n != exactly:
+            raise UsageError(
+                f"pass {flag} {exactly} time(s), or --spec with {exactly} input path(s); got {n}"
+            )
+        return datasets
+    if n < min_count:
+        raise UsageError(f"pass {flag}, or --spec with input paths")
+    return datasets
+
+
+def spec_role_datasets(named: dict, prefix: str) -> list:
+    """Datasets whose spec id is ``prefix`` or ``prefix`` + an integer (``forecast1``)."""
+    items = []
+    for key, ds in named.items():
+        raw = str(key)
+        if raw == prefix:
+            items.append((0, ds))
+        elif raw.startswith(prefix):
+            suffix = raw[len(prefix) :]
+            if suffix.isdigit():
+                items.append((int(suffix), ds))
+    items.sort(key=lambda item: item[0])
+    return [ds for _i, ds in items]
+
+
+def spec_input_labels(spec_data: dict | None) -> list | None:
+    """Per-input ``label`` values, or ``None`` when the spec has none."""
+    labels = []
+    found = False
+    for item in (spec_data or {}).get("inputs") or []:
+        if not isinstance(item, dict):
+            continue
+        label = item.get("label")
+        labels.append(label)
+        if label:
+            found = True
+    return labels if found else None

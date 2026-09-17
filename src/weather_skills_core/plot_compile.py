@@ -14,13 +14,20 @@ from weather_skills_core.errors import UsageError
 from weather_skills_core.figure import (
     add_shared_colorbar,
     apply_date_ticks,
-    apply_style,
     axis_label,
-    colorbar_size_kwargs,
     colorbar_spec,
     format_plot_date,
     format_plot_date_range,
     resolve_axis_label,
+)
+from weather_skills_core.plot_mpl import (
+    apply_style_then_rc,
+    colorbar_mpl_kwargs,
+    contour_kwargs,
+    fill_kwargs,
+    finish_figure,
+    line_kwargs,
+    mesh_kwargs,
 )
 from weather_skills_core.plot_spec import apply_index, overlay_spec, panel_shape, parse_index
 from weather_skills_core.plot_style import (
@@ -506,58 +513,21 @@ def draw_geo_lines(ax, geo_x, geo_y, *, lw=0.6):
 
 
 def _apply_patch(fig, axes, patch: dict | None, *, map_extent=None):
-    """Apply spec ``patch`` (title, annotations, shapes, font, colorbar size)."""
+    """Apply spec ``patch`` title. Annotations and shapes go through ``finish_figure``."""
+    del axes, map_extent
     if not patch:
         return fig
     layout = patch.get("layout") or {}
     title = _title_text(layout.get("title") or patch.get("title"))
     if title:
         fig.suptitle(title)
-    font = layout.get("font") or {}
-    if font.get("size"):
-        apply_style(int(font["size"]))
-    anns = list(patch.get("annotations") or layout.get("annotations") or [])
-    shapes = list(patch.get("shapes") or layout.get("shapes") or [])
-    ax0 = np.ravel(axes)[0]
-    for ann in anns:
-        if not isinstance(ann, dict) or not ann.get("text"):
-            continue
-        x = float(ann.get("x") if ann.get("x") is not None else 0.5)
-        y = float(ann.get("y") if ann.get("y") is not None else 0.5)
-        xref = str(ann.get("xref") or "")
-        transform = ax0.transAxes if "domain" in xref or xref == "paper" else None
-        ax0.text(
-            x,
-            y,
-            str(ann["text"]),
-            transform=transform or ax0.transData,
-            zorder=7,
-        )
-    from matplotlib.patches import Rectangle
-
-    for shape in shapes:
-        if not isinstance(shape, dict) or shape.get("type") not in (None, "rect"):
-            continue
-        x0, x1 = float(shape.get("x0", 0)), float(shape.get("x1", 0))
-        y0, y1 = float(shape.get("y0", 0)), float(shape.get("y1", 0))
-        ax0.add_patch(
-            Rectangle(
-                (min(x0, x1), min(y0, y1)),
-                abs(x1 - x0),
-                abs(y1 - y0),
-                fill=False,
-                edgecolor="black",
-                linewidth=1.5,
-                zorder=6,
-            )
-        )
     return fig
 
 
 def _compile_timeseries(prepared, spec, fontsize, *, template="weather_skills"):
     import matplotlib.pyplot as plt
 
-    apply_style(fontsize, template=template, chart="line")
+    apply_style_then_rc(spec, chart="line", fontsize=fontsize, template=template)
     da = prepared["da"]
     sdim = prepared["sdim"]
     align = prepared.get("align") or spec.get("align")
@@ -590,32 +560,50 @@ def _compile_timeseries(prepared, spec, fontsize, *, template="weather_skills"):
     xplot = as_plot_x(xvals)
     yarr = np.asarray(da.values, dtype=float)
     band = parse_band(prepared.get("band") or spec.get("band"))
-    color = "C0"
+    trace0 = (spec.get("traces") or [{}])[0]
+    lk = line_kwargs(spec.get("line") or trace0.get("line") or {}, loc="line")
+    color = lk.get("color") or lk.get("c") or "C0"
+    fill_kw = {"color": color, "alpha": 0.25, "linewidth": 0, "zorder": 1, **fill_kwargs(spec)}
     if yarr.ndim == 2 and band is not None:
         low = np.nanpercentile(yarr, band[0], axis=1)
         high = np.nanpercentile(yarr, band[1], axis=1)
         mean = np.nanmean(yarr, axis=1)
-        ax.fill_between(xplot, low, high, color=color, alpha=0.25, linewidth=0, zorder=1)
-        ax.plot(xplot, mean, color=color, linewidth=2, label=qty, zorder=3)
+        ax.fill_between(xplot, low, high, **fill_kw)
+        ax.plot(xplot, mean, **{"color": color, "linewidth": 2, "label": qty, "zorder": 3, **lk})
     elif yarr.ndim == 2:
         for j in range(yarr.shape[1]):
             ax.plot(
                 xplot,
                 yarr[:, j],
-                color=color,
-                linewidth=1.0,
-                alpha=0.35,
-                label=qty if j == 0 else "_nolegend_",
+                **{
+                    "color": color,
+                    "linewidth": 1.0,
+                    "alpha": 0.35,
+                    "label": qty if j == 0 else "_nolegend_",
+                    **lk,
+                },
             )
     else:
-        ax.plot(xplot, yarr, marker="o", markersize=8, linewidth=2, color=color, label=qty)
+        ax.plot(
+            xplot,
+            yarr,
+            **{
+                "marker": "o",
+                "markersize": 8,
+                "linewidth": 2,
+                "color": color,
+                "label": qty,
+                **lk,
+            },
+        )
     if np.asarray(xvals).dtype.kind == "M":
         apply_date_ticks(ax)
     ax.set_xlabel(xlabel)
     ax.set_ylabel(ylabel)
     legend = spec.get("legend")
     if legend not in (None, "none", "off"):
-        ax.legend()
+        loc = legend if isinstance(legend, str) else None
+        ax.legend(**({"loc": loc} if loc and loc not in ("on", "true", "yes") else {}))
     fig.suptitle(spec.get("title") or f"{qty} (timeseries)")
     fig._ws_tight = (
         spec.get("layout", {}).get("autosize", True)
@@ -627,7 +615,7 @@ def _compile_timeseries(prepared, spec, fontsize, *, template="weather_skills"):
 def _compile_heatmap(prepared, spec, fontsize, *, trace_type="heatmap", template="weather_skills"):
     import matplotlib.pyplot as plt
 
-    apply_style(fontsize, template=template, chart="map")
+    apply_style_then_rc(spec, chart="map", fontsize=fontsize, template=template)
     da = prepared["da"]
     lat_dim = prepared["lat_dim"]
     lon_dim = prepared["lon_dim"]
@@ -703,12 +691,24 @@ def _compile_heatmap(prepared, spec, fontsize, *, trace_type="heatmap", template
         slab = da if sdim is None else da.isel({sdim: i})
         slab = slab.transpose(lat_dim, lon_dim)
         z = np.asarray(slab.values, dtype=float)
+        trace0 = (spec.get("traces") or [{}])[0]
         if trace_type == "contour":
-            filled = ax.contourf(lon, lat, z, cmap=cmap, norm=norm, levels=12)
-            ax.contour(lon, lat, z, levels=filled.levels, colors="black", linewidths=0.4)
+            ck = contour_kwargs(spec, trace0)
+            levels = ck.pop("levels", 12)
+            line_lw = ck.pop("linewidths", None)
+            line_ls = ck.pop("linestyles", None)
+            line_colors = ck.pop("colors", None)
+            filled = ax.contourf(lon, lat, z, cmap=cmap, norm=norm, levels=levels, **ck)
+            contour_lines = (spec.get("contour") or trace0.get("contour") or {}).get("lines")
+            if contour_lines is not False:
+                line_kw = {"colors": line_colors or "black", "linewidths": line_lw or 0.4}
+                if line_ls is not None:
+                    line_kw["linestyles"] = line_ls
+                ax.contour(lon, lat, z, levels=filled.levels, **line_kw)
             mappable = filled
         else:
-            mappable = ax.pcolormesh(lon, lat, z, cmap=cmap, norm=norm, shading="nearest")
+            mk = mesh_kwargs(spec, trace0)
+            mappable = ax.pcolormesh(lon, lat, z, cmap=cmap, norm=norm, shading="nearest", **mk)
         draw_geo_lines(ax, geo_x, geo_y)
         if cities:
             ax.scatter(
@@ -748,14 +748,16 @@ def _compile_heatmap(prepared, spec, fontsize, *, trace_type="heatmap", template
 
     visible = [ax for ax in axes.ravel() if ax.get_visible()]
     ticks = scale.get("bounds")
+    cbar_kw = colorbar_mpl_kwargs(spec)
+    location = cbar_kw.pop("location", "right" if n <= 1 else "bottom")
     add_shared_colorbar(
         fig,
         mappable,
         visible,
         label=label,
-        location="right" if n <= 1 else "bottom",
+        location=location,
         ticks=ticks,
-        **colorbar_size_kwargs(spec),
+        **cbar_kw,
     )
     if spec.get("title"):
         fig.suptitle(spec["title"])
@@ -809,10 +811,7 @@ def compile_figure(spec: dict, datasets: dict):
         raise UsageError(f"plot compiler does not yet support style {style!r}")
 
     _apply_patch(fig, axes, spec.get("patch"), map_extent=prepared.get("extent"))
-    if spec.get("annotations") and axes is not None:
-        _apply_patch(fig, axes, {"annotations": spec["annotations"]})
-    if spec.get("shapes") and style == "timeseries":
-        _apply_patch(fig, axes, {"shapes": spec["shapes"]})
+    finish_figure(fig, spec, axes)
 
     resolved = overlay_spec(spec, {})
     resolved["traces"] = traces

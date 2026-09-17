@@ -67,6 +67,45 @@ def test_plot_spec_holder_zarr_paths():
     assert spec.zarr_paths()[0].as_posix().endswith("a.zarr")
 
 
+def test_parse_plot_spec_and_dump_dest(tmp_path):
+    from weather_skills_core.plot_spec import dump_spec_dest, parse_plot_spec
+
+    path = tmp_path / "fig.plot.json"
+    path.write_text('{"version": 1, "inputs": [{"id": "a", "path": "/tmp/a.zarr"}]}\n')
+    loaded = parse_plot_spec(str(path))
+    assert loaded.zarr_paths()[0].name == "a.zarr"
+    assert dump_spec_dest(None) is None
+    assert dump_spec_dest("none") is False
+    assert dump_spec_dest("-") == "-"
+
+
+def test_named_datasets_from_spec_and_cli_fallback():
+    from weather_skills_core import UsageError
+    from weather_skills_core.plot_spec import (
+        datasets_from_cli_or_spec,
+        named_datasets_from_spec,
+        spec_role_datasets,
+    )
+
+    spec = PlotSpec(
+        {
+            "inputs": [
+                {"id": "obs", "path": "/tmp/obs.zarr"},
+                {"id": "forecast1", "path": "/tmp/fc.zarr"},
+                {"id": "verify1", "path": "/tmp/v.zarr"},
+            ]
+        }
+    )
+    spec.datasets = ["OBS", "FC", "V"]
+    named = named_datasets_from_spec(spec)
+    assert named == {"obs": "OBS", "forecast1": "FC", "verify1": "V"}
+    assert spec_role_datasets(named, "forecast") == ["FC"]
+    assert datasets_from_cli_or_spec(["A", "B"], spec, exactly=2) == ["A", "B"]
+    assert datasets_from_cli_or_spec(None, spec, min_count=2) == ["OBS", "FC", "V"]
+    with pytest.raises(UsageError, match="--spec"):
+        datasets_from_cli_or_spec(None, None, min_count=1)
+
+
 def test_precip_default_colorscale_is_chirps():
     da = make_gridded()["precip"]
     da.attrs["units"] = "mm"
@@ -423,3 +462,110 @@ def test_shared_colorscale_one_norm_across_panels():
     meshes = _quadmeshes(fig)
     norms = {id(m.norm) for m in meshes}
     assert len(norms) == 1
+
+
+def test_pick_rejects_unknown_and_non_json():
+    from weather_skills_core import UsageError
+    from weather_skills_core.plot_mpl import LINE_KEYS, pick
+
+    assert pick({"linewidth": 2.5}, LINE_KEYS, loc="line")["linewidth"] == 2.5
+    with pytest.raises(UsageError, match="unknown key"):
+        pick({"linewidth": 2, "bogus": 1}, LINE_KEYS, loc="line")
+    with pytest.raises(UsageError, match="must be JSON"):
+        pick({"linewidth": object()}, LINE_KEYS, loc="line")
+
+
+def test_apply_rc_sets_and_rejects_backend():
+    pytest.importorskip("matplotlib")
+    import matplotlib as mpl
+
+    from weather_skills_core import UsageError
+    from weather_skills_core.plot_mpl import apply_rc
+
+    apply_rc({"axes.grid": False, "lines.linewidth": 3.0})
+    assert mpl.rcParams["lines.linewidth"] == 3.0
+    with pytest.raises(UsageError, match="backend"):
+        apply_rc({"backend": "TkAgg"})
+    with pytest.raises(UsageError, match="unknown matplotlib rcParam"):
+        apply_rc({"not.a.real.param": 1})
+
+
+def test_compile_mpl_axes_annotate_mesh_and_log():
+    pytest.importorskip("matplotlib")
+    from matplotlib.patches import FancyArrowPatch
+
+    from weather_skills_core.plot_compile import compile_figure
+
+    ds = make_gridded(n_time=1)
+    spec = spec_from_flags(variable="precip", style="heatmap")
+    spec["mesh"] = {"alpha": 0.4}
+    spec["axes"] = {
+        "spines": {"top": False, "right": False},
+        "grid": {"visible": True, "alpha": 0.3},
+    }
+    spec["annotations"] = [
+        {
+            "text": "peak",
+            "xy": [10.0, 2.0],
+            "xytext": [11.0, 3.0],
+            "arrowprops": {"arrowstyle": "->", "color": "black"},
+        }
+    ]
+    spec["shapes"] = [{"type": "hline", "y": 2.0, "linestyle": "--", "color": "red"}]
+    fig, _resolved = compile_figure(spec, {"a": ds})
+    ax = next(a for a in fig.axes if a.get_label() != "<colorbar>")
+    assert ax.spines["top"].get_visible() is False
+    assert ax.collections[0].get_alpha() == 0.4
+    assert any(isinstance(p, FancyArrowPatch) for p in ax.patches) or ax.texts
+    texts = [t.get_text() for t in ax.texts]
+    assert "peak" in texts
+
+    ts = spec_from_flags(
+        variable="precip",
+        style="timeseries",
+        reduce=["latitude", "longitude"],
+    )
+    ts["axes"] = {"yscale": "log", "legend": {"loc": "lower right"}}
+    ts["line"] = {"linewidth": 4, "linestyle": "--"}
+    fig_ts, _ = compile_figure(ts, {"a": ds})
+    assert fig_ts.axes[0].get_yscale() == "log"
+    assert fig_ts.axes[0].lines[0].get_linewidth() == 4
+
+
+def test_compile_contour_levels_from_spec():
+    pytest.importorskip("matplotlib")
+    from matplotlib.contour import QuadContourSet
+
+    from weather_skills_core.plot_compile import compile_figure
+
+    ds = make_gridded(n_time=1)
+    spec = spec_from_flags(variable="precip", style="contour")
+    spec["contour"] = {"levels": 5, "linewidths": 1.2, "lines": True}
+    fig, _ = compile_figure(spec, {"a": ds})
+    filled = next(c for ax in fig.axes for c in ax.collections if isinstance(c, QuadContourSet))
+    assert len(filled.levels) >= 2
+
+
+def test_compile_line_twin_and_mediogram_colors():
+    pytest.importorskip("matplotlib")
+    from weather_skills_core.plot_recipes import compile_line_figure, compile_mediogram
+
+    fig = compile_line_figure(
+        [([1, 2, 3], [0.0, 1.0, 2.0], "a"), ([1, 2, 3], [20.0, 10.0, 0.0], "b")],
+        styles=[{}, {"twin": "y", "color": "#d62728", "line": {"linewidth": 3}}],
+    )
+    assert len(fig.axes) == 2
+    assert fig.axes[1].lines[0].get_linewidth() == 3
+
+    fc = np.arange(12.0).reshape(3, 4)
+    mc = np.arange(12.0, 24.0).reshape(3, 4)
+    medio = compile_mediogram(
+        fc,
+        mc,
+        ["+0d", "+1d", "+2d", "+3d"],
+        spec={"mediogram": {"forecast": {"facecolor": "#ff00ff"}, "width": 0.2}},
+    )
+    box = medio.axes[0].patches[0]
+    facecolor = box.get_facecolor()
+    assert facecolor[0] > 0.9 and facecolor[2] > 0.9
+    assert facecolor[1] < 0.2

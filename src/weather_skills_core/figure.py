@@ -336,12 +336,15 @@ def add_shared_colorbar(fig, mappable, axes, label="", *, location=None, **kwarg
     shrink = kwargs.pop("shrink", None)
     if shrink is None:
         shrink = 1.0 if tick_list and len(tick_list) >= 6 else 0.8
+    pad = kwargs.pop("pad", 0.08)
+    if "location" in kwargs:
+        location = kwargs.pop("location")
     cbar = fig.colorbar(
         mappable,
         ax=axes,
         location=location,
         shrink=shrink,
-        pad=0.08,
+        pad=pad,
         **kwargs,
     )
     if label:

@@ -4,12 +4,24 @@ from __future__ import annotations
 
 import numpy as np
 
-from weather_skills_core.figure import add_shared_colorbar, apply_date_ticks, apply_style
+from weather_skills_core.figure import add_shared_colorbar, apply_date_ticks
 from weather_skills_core.plot_compile import (
     as_plot_x,
     draw_geo_lines,
     figsize_from_extent,
     geojson_lines,
+)
+from weather_skills_core.plot_mpl import (
+    LEGEND_KEYS,
+    apply_style_then_rc,
+    bar_kwargs,
+    box_kwargs,
+    colorbar_mpl_kwargs,
+    finish_figure,
+    line_kwargs,
+    mesh_kwargs,
+    pick,
+    scatter_kwargs,
 )
 from weather_skills_core.plot_style import (
     DEFAULT_FONTSIZE,
@@ -141,6 +153,7 @@ def compile_heatmap_grid(
     xlabel="Longitude",
     cell_notes=None,
     template="weather_skills",
+    spec=None,
 ):
     """Compile a 2-D grid of heatmap/scatter/blank cells.
 
@@ -152,7 +165,7 @@ def compile_heatmap_grid(
     """
     import matplotlib.pyplot as plt
 
-    apply_style(fontsize, template=template, chart="map")
+    apply_style_then_rc(spec or {}, chart="map", fontsize=fontsize, template=template)
     nrows = len(cells)
     ncols = max((len(row) for row in cells), default=1)
     geo_x = geo_y = None
@@ -202,28 +215,31 @@ def compile_heatmap_grid(
                     color="#888888",
                 )
             elif kind == "scatter":
+                sk = scatter_kwargs((spec or {}).get("scatter") or cell.get("scatter") or {})
                 mappable = ax.scatter(
                     cell["x"],
                     cell["y"],
-                    c=cell.get("c"),
-                    cmap=cmap,
-                    norm=norm,
-                    s=64,
-                    edgecolors="#333",
-                    linewidths=0.4,
-                    zorder=4,
+                    **{
+                        "c": cell.get("c"),
+                        "cmap": cmap,
+                        "norm": norm,
+                        "s": 64,
+                        "edgecolors": "#333",
+                        "linewidths": 0.4,
+                        "zorder": 4,
+                        **sk,
+                    },
                 )
                 if scale_id not in mappables:
                     mappables[scale_id] = mappable
                 draw_geo_lines(ax, geo_x, geo_y, lw=0.5)
             else:
+                mk = mesh_kwargs(spec or {}, cell)
                 mappable = ax.pcolormesh(
                     np.asarray(cell["x"], dtype=float),
                     np.asarray(cell["y"], dtype=float),
                     np.asarray(cell["z"], dtype=float),
-                    cmap=cmap,
-                    norm=norm,
-                    shading="nearest",
+                    **{"cmap": cmap, "norm": norm, "shading": "nearest", **mk},
                 )
                 if scale_id not in mappables:
                     mappables[scale_id] = mappable
@@ -245,9 +261,13 @@ def compile_heatmap_grid(
 
     visible = [ax for ax in axes.ravel() if ax.get_visible()]
     n_scales = len(mappables)
+    extra_cbar = colorbar_mpl_kwargs(spec or {})
     for scale_id, mappable in mappables.items():
         scale = scales.get(scale_id) or {}
-        location = "right" if n_scales > 1 or len(visible) <= 1 else "bottom"
+        cbar_kw = dict(extra_cbar)
+        location = cbar_kw.pop(
+            "location", "right" if n_scales > 1 or len(visible) <= 1 else "bottom"
+        )
         cbar = add_shared_colorbar(
             fig,
             mappable,
@@ -255,12 +275,15 @@ def compile_heatmap_grid(
             label=scale.get("label") or "",
             location=location,
             ticks=scale.get("tickvals") or scale.get("bounds"),
+            **cbar_kw,
         )
         if cbar is not None and scale.get("ticktext"):
             cbar.set_ticklabels(list(scale["ticktext"]))
     if title:
         fig.suptitle(title)
     fig._ws_tight = tight
+    if spec:
+        finish_figure(fig, spec, axes)
     return fig
 
 
@@ -276,11 +299,12 @@ def compile_line_figure(
     kinds=None,
     styles=None,
     template="weather_skills",
+    spec=None,
 ):
     """``series`` is a list of ``(x, y, label)``. ``y`` may be 1-D or 2-D (along)."""
     import matplotlib.pyplot as plt
 
-    apply_style(fontsize, template=template, chart="line")
+    apply_style_then_rc(spec or {}, chart="line", fontsize=fontsize, template=template)
     n = len(series)
     kinds = kinds or ["line"] * n
     styles = styles or [{} for _ in series]
@@ -305,6 +329,9 @@ def compile_line_figure(
         zip(series, kinds, styles, strict=True)
     ):
         ax = axes[i if subplots else 0, 0]
+        plot_ax = ax
+        if style.get("twin") in (True, "y", "twinx"):
+            plot_ax = ax.twinx()
         color = mpl_color(style.get("color")) or f"C{i % 10}"
         width_pt = style.get("lw") or style.get("linewidth") or style.get("width") or 2
         yarr = np.asarray(yvals, dtype=float)
@@ -313,12 +340,14 @@ def compile_line_figure(
         markers = style.get("marker")
         use_marker = markers not in (None, "None", "none", "null")
         alpha = float(style.get("alpha") or 1)
+        lk = line_kwargs(style.get("line") or {}, loc=f"styles[{i}].line")
+        bk = bar_kwargs(style.get("bar") or {}, loc=f"styles[{i}].bar")
         if yarr.ndim == 2 and band:
             lo_q, hi_q = band
             low = np.nanpercentile(yarr, lo_q, axis=1)
             high = np.nanpercentile(yarr, hi_q, axis=1)
             mean = np.nanmean(yarr, axis=1)
-            ax.fill_between(
+            plot_ax.fill_between(
                 xplot,
                 low,
                 high,
@@ -328,16 +357,19 @@ def compile_line_figure(
                 zorder=float(style.get("zorder") or 1),
                 label="_nolegend_",
             )
-            ax.plot(
+            plot_ax.plot(
                 xplot,
                 mean,
-                color=color,
-                linewidth=width_pt,
-                marker="o" if use_marker else None,
-                markersize=float(style.get("markersize") or 6),
-                alpha=alpha,
-                label=label,
-                zorder=float(style.get("zorder") or 2) + 1,
+                **{
+                    "color": color,
+                    "linewidth": width_pt,
+                    "marker": "o" if use_marker else None,
+                    "markersize": float(style.get("markersize") or 6),
+                    "alpha": alpha,
+                    "label": label,
+                    "zorder": float(style.get("zorder") or 2) + 1,
+                    **lk,
+                },
             )
         else:
             traces_y = [yarr] if yarr.ndim == 1 else [yarr[:, j] for j in range(yarr.shape[1])]
@@ -345,28 +377,31 @@ def compile_line_figure(
             for j, yy in enumerate(traces_y):
                 name = label if j == 0 else "_nolegend_"
                 if kind == "bar":
-                    ax.bar(
+                    plot_ax.bar(
                         np.arange(len(yy)) if np.asarray(xplot).dtype.kind == "O" else xplot,
                         yy,
-                        color=color,
-                        label=name,
-                        alpha=alpha,
+                        **{"color": color, "label": name, "alpha": alpha, **bk},
                     )
                 else:
-                    ax.plot(
+                    plot_ax.plot(
                         xplot,
                         yy,
-                        color=color,
-                        linewidth=width_pt if yarr.ndim == 1 else min(float(width_pt), 1.2),
-                        marker="o" if use_marker else None,
-                        markersize=float(style.get("markersize") or 6),
-                        alpha=member_alpha if yarr.ndim == 2 else alpha,
-                        label=(
-                            name
-                            if (j == 0 and not subplots)
-                            else (name if j == 0 else "_nolegend_")
-                        ),
-                        zorder=float(style.get("zorder") or 2),
+                        **{
+                            "color": color,
+                            "linewidth": (
+                                width_pt if yarr.ndim == 1 else min(float(width_pt), 1.2)
+                            ),
+                            "marker": "o" if use_marker else None,
+                            "markersize": float(style.get("markersize") or 6),
+                            "alpha": member_alpha if yarr.ndim == 2 else alpha,
+                            "label": (
+                                name
+                                if (j == 0 and not subplots)
+                                else (name if j == 0 else "_nolegend_")
+                            ),
+                            "zorder": float(style.get("zorder") or 2),
+                            **lk,
+                        },
                     )
         if np.asarray(xvals).dtype.kind == "M":
             apply_date_ticks(ax)
@@ -382,6 +417,8 @@ def compile_line_figure(
     if title:
         fig.suptitle(title)
     fig._ws_tight = tight
+    if spec:
+        finish_figure(fig, spec, axes)
     return fig
 
 
@@ -396,11 +433,13 @@ def compile_mediogram(
     fontsize=DEFAULT_FONTSIZE,
     figsize=None,
     template="weather_skills",
+    spec=None,
 ):
     """ECMWF-style two-layer boxes: forecast (cyan) vs m-climate (red)."""
     import matplotlib.pyplot as plt
 
-    apply_style(fontsize, template=template, chart="line")
+    apply_style_then_rc(spec or {}, chart="line", fontsize=fontsize, template=template)
+    opts = (spec or {}).get("mediogram") or {}
     n_steps = fc.shape[1]
     if figsize is not None:
         fig_w, fig_h = float(figsize[0]), float(figsize[1])
@@ -409,7 +448,7 @@ def compile_mediogram(
         fig_w, fig_h = 10.0, 5.0
         tight = True
     fig, ax = plt.subplots(figsize=(fig_w, fig_h), layout="constrained")
-    width = 0.35
+    width = float(opts.get("width", 0.35))
     positions = np.arange(n_steps)
     bp_fc = ax.boxplot(
         [np.asarray(fc[:, i], dtype=float) for i in range(n_steps)],
@@ -425,21 +464,64 @@ def compile_mediogram(
         patch_artist=True,
         manage_ticks=False,
     )
+    fc_style = {"facecolor": "cyan", "edgecolor": "black", **box_kwargs(opts.get("forecast") or {})}
+    mc_style = {"facecolor": "red", "edgecolor": "black", **box_kwargs(opts.get("mclimate") or {})}
     for patch in bp_fc["boxes"]:
-        patch.set_facecolor("cyan")
-        patch.set_edgecolor("black")
+        patch.set_facecolor(fc_style.get("facecolor", "cyan"))
+        patch.set_edgecolor(fc_style.get("edgecolor", "black"))
+        if fc_style.get("linewidth") is not None:
+            patch.set_linewidth(fc_style["linewidth"])
+        if fc_style.get("alpha") is not None:
+            patch.set_alpha(fc_style["alpha"])
+        if fc_style.get("linestyle") is not None:
+            patch.set_linestyle(fc_style["linestyle"])
+        if fc_style.get("hatch") is not None:
+            patch.set_hatch(fc_style["hatch"])
+        if fc_style.get("zorder") is not None:
+            patch.set_zorder(fc_style["zorder"])
     for patch in bp_mc["boxes"]:
-        patch.set_facecolor("red")
-        patch.set_edgecolor("black")
+        patch.set_facecolor(mc_style.get("facecolor", "red"))
+        patch.set_edgecolor(mc_style.get("edgecolor", "black"))
+        if mc_style.get("linewidth") is not None:
+            patch.set_linewidth(mc_style["linewidth"])
+        if mc_style.get("alpha") is not None:
+            patch.set_alpha(mc_style["alpha"])
+        if mc_style.get("linestyle") is not None:
+            patch.set_linestyle(mc_style["linestyle"])
+        if mc_style.get("hatch") is not None:
+            patch.set_hatch(mc_style["hatch"])
+        if mc_style.get("zorder") is not None:
+            patch.set_zorder(mc_style["zorder"])
     bp_fc["boxes"][0].set_label("forecast")
     bp_mc["boxes"][0].set_label("m-climate")
-    ax.plot(positions, np.mean(fc, axis=0), color="black", linewidth=1.5, label="forecast mean")
+    mean_kw = {
+        "color": "black",
+        "linewidth": 1.5,
+        "label": "forecast mean",
+        **line_kwargs(opts.get("mean") or {}, loc="mediogram.mean"),
+    }
+    ax.plot(positions, np.mean(fc, axis=0), **mean_kw)
     ax.set_xticks(positions)
     ax.set_xticklabels(list(tick_labels), rotation=30, ha="right")
     ax.set_xlabel(xlabel)
     ax.set_ylabel(ylabel)
-    ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.18), ncol=3)
+    legend = opts.get("legend")
+    if legend in (False, "off", "none"):
+        pass
+    elif isinstance(legend, dict):
+        ax.legend(
+            **{
+                "loc": "upper center",
+                "bbox_to_anchor": (0.5, -0.18),
+                "ncol": 3,
+                **pick(legend, LEGEND_KEYS, loc="mediogram.legend"),
+            }
+        )
+    else:
+        ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.18), ncol=3)
     if title:
         fig.suptitle(title)
     fig._ws_tight = tight
+    if spec:
+        finish_figure(fig, spec, ax)
     return fig
