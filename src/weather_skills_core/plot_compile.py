@@ -27,7 +27,10 @@ from weather_skills_core.plot_style import (
     DEFAULT_FONTSIZE,
     DEFAULT_MAX_COLUMNS,
     aggregation_days,
+    along_dim,
     mpl_cmap_norm,
+    normalize_template,
+    parse_band,
     resolve_colorscale,
 )
 from weather_skills_core.standard_utils import (
@@ -400,9 +403,39 @@ def _prepare_field(ds, spec_input: dict, geo: dict, style: str):
         sdim = "step" if "step" in da.dims else cf_dim(da, "time")
         if sdim is None:
             raise UsageError(f"timeseries needs 'step' or 'time'; got {list(da.dims)}.")
-        reduce_dims = [d for d in da.dims if d != sdim]
-        reduced = da.mean(reduce_dims, keep_attrs=True) if reduce_dims else da
-        return {"da": plain(reduced), "sdim": sdim}
+        along = along_dim(da, spec_input.get("along"))
+        reduce_req = spec_input.get("reduce") or []
+        if isinstance(reduce_req, str):
+            reduce_req = [reduce_req]
+        applicable = [d for d in reduce_req if d in da.dims]
+        if applicable:
+            da = da.mean(applicable, keep_attrs=True)
+        extras = [d for d in da.dims if d != sdim]
+        if along == sdim:
+            raise UsageError(
+                f"along {spec_input.get('along')!r} is the time axis "
+                f"({sdim!r}); pass a non-time dim such as number."
+            )
+        if along:
+            extras = [d for d in extras if d != along]
+        if extras:
+            if reduce_req or along:
+                hint = extras[0]
+                raise UsageError(
+                    f"variable still has non-time dims {extras} after reduce. "
+                    f"Pass reduce for each leftover dim, or along {hint}."
+                )
+            da = da.mean(extras, keep_attrs=True)
+            along = None
+        if along:
+            da = da.transpose(sdim, along)
+        return {
+            "da": plain(da),
+            "sdim": sdim,
+            "along": along,
+            "align": spec_input.get("align"),
+            "band": spec_input.get("band"),
+        }
 
     lat_dim = cf_dim(da, "latitude")
     lon_dim = cf_dim(da, "longitude")
@@ -521,26 +554,61 @@ def _apply_patch(fig, axes, patch: dict | None, *, map_extent=None):
     return fig
 
 
-def _compile_timeseries(prepared, spec, fontsize):
+def _compile_timeseries(prepared, spec, fontsize, *, template="weather_skills"):
     import matplotlib.pyplot as plt
 
-    apply_style(fontsize)
+    apply_style(fontsize, template=template, chart="line")
     da = prepared["da"]
     sdim = prepared["sdim"]
+    align = prepared.get("align") or spec.get("align")
     xvals, default_xlabel = timeseries_axis(da, sdim)
+    if align in ("dayofyear", "day_of_year", "day-of-year"):
+        try:
+            xvals = da[sdim].dt.dayofyear.values
+        except (TypeError, AttributeError) as exc:
+            raise UsageError("align=dayofyear needs a calendar-date time axis.") from exc
+        default_xlabel = "calendar day"
     qty = variable_label_for_display(da, include_units=False)
     xlabel = spec.get("xlabel")
     if xlabel is None:
-        xlabel = "" if np.asarray(xvals).dtype.kind in "Mm" else axis_label(default_xlabel)
+        xlabel = (
+            ""
+            if np.asarray(xvals).dtype.kind in "Mm"
+            and align
+            not in (
+                "dayofyear",
+                "day_of_year",
+                "day-of-year",
+            )
+            else axis_label(default_xlabel)
+        )
     else:
         xlabel = resolve_axis_label(xlabel, default_xlabel)
     ylabel = resolve_axis_label(spec.get("ylabel"), variable_label_for_display(da))
     figsize = spec.get("layout", {}).get("figsize") or (10.0, 5.0)
     fig, ax = plt.subplots(figsize=tuple(figsize), layout="constrained")
     xplot = as_plot_x(xvals)
-    ax.plot(
-        xplot, np.asarray(da.values, dtype=float), marker="o", markersize=8, linewidth=2, label=qty
-    )
+    yarr = np.asarray(da.values, dtype=float)
+    band = parse_band(prepared.get("band") or spec.get("band"))
+    color = "C0"
+    if yarr.ndim == 2 and band is not None:
+        low = np.nanpercentile(yarr, band[0], axis=1)
+        high = np.nanpercentile(yarr, band[1], axis=1)
+        mean = np.nanmean(yarr, axis=1)
+        ax.fill_between(xplot, low, high, color=color, alpha=0.25, linewidth=0, zorder=1)
+        ax.plot(xplot, mean, color=color, linewidth=2, label=qty, zorder=3)
+    elif yarr.ndim == 2:
+        for j in range(yarr.shape[1]):
+            ax.plot(
+                xplot,
+                yarr[:, j],
+                color=color,
+                linewidth=1.0,
+                alpha=0.35,
+                label=qty if j == 0 else "_nolegend_",
+            )
+    else:
+        ax.plot(xplot, yarr, marker="o", markersize=8, linewidth=2, color=color, label=qty)
     if np.asarray(xvals).dtype.kind == "M":
         apply_date_ticks(ax)
     ax.set_xlabel(xlabel)
@@ -556,10 +624,10 @@ def _compile_timeseries(prepared, spec, fontsize):
     return fig
 
 
-def _compile_heatmap(prepared, spec, fontsize, *, trace_type="heatmap"):
+def _compile_heatmap(prepared, spec, fontsize, *, trace_type="heatmap", template="weather_skills"):
     import matplotlib.pyplot as plt
 
-    apply_style(fontsize)
+    apply_style(fontsize, template=template, chart="map")
     da = prepared["da"]
     lat_dim = prepared["lat_dim"]
     lon_dim = prepared["lon_dim"]
@@ -710,6 +778,13 @@ def compile_figure(spec: dict, datasets: dict):
     spec_input = next((i for i in inputs if i.get("id") == input_id), None)
     if spec_input is None:
         spec_input = inputs[0] if inputs else {"id": input_id}
+    spec_input = dict(spec_input)
+    for key in ("along", "reduce", "align", "band"):
+        if spec_input.get(key) is None:
+            if trace0.get(key) is not None:
+                spec_input[key] = trace0[key]
+            elif spec.get(key) is not None:
+                spec_input[key] = spec[key]
     ds = datasets.get(input_id) or datasets.get("a")
     if ds is None and len(datasets) == 1:
         ds = next(iter(datasets.values()))
@@ -718,16 +793,17 @@ def compile_figure(spec: dict, datasets: dict):
     if "path" not in spec_input:
         spec_input = {**spec_input, "id": spec_input.get("id", input_id)}
     fontsize = int((spec.get("style") or {}).get("fontsize") or DEFAULT_FONTSIZE)
+    template = normalize_template((spec.get("style") or {}).get("template"))
     prepared = _prepare_field(ds, spec_input, spec.get("geo") or {}, style)
     axes = None
     if style == "timeseries":
-        fig = _compile_timeseries(prepared, spec, fontsize)
+        fig = _compile_timeseries(prepared, spec, fontsize, template=template)
         scale = None
         nrows = ncols = n = 1
         axes = fig.axes
     elif style in ("heatmap", "contour"):
         fig, scale, (nrows, ncols), n, axes = _compile_heatmap(
-            prepared, spec, fontsize, trace_type=style
+            prepared, spec, fontsize, trace_type=style, template=template
         )
     else:
         raise UsageError(f"plot compiler does not yet support style {style!r}")
@@ -743,10 +819,12 @@ def compile_figure(spec: dict, datasets: dict):
     resolved.setdefault("inputs", inputs or [spec_input])
     resolved["style"] = {
         **(resolved.get("style") or {}),
-        "template": "weather_skills",
+        "template": template,
         "fontsize": fontsize,
         "colormap": (scale or {}).get("name") or (resolved.get("style") or {}).get("colormap"),
     }
+    layout = resolved.setdefault("layout", {})
+    layout.setdefault("shared_colorscale", True)
     if style in ("heatmap", "contour"):
         resolved["layout"] = {
             **(resolved.get("layout") or {}),

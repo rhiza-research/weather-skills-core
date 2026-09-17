@@ -180,10 +180,26 @@ def resolve_figsize(requested, default):
     return tuple(requested) if requested is not None else tuple(default)
 
 
-def apply_style(fontsize=DEFAULT_FONTSIZE):
-    """Set rcParams from a single ``--fontsize``. Ticks use matplotlib's usual ratio."""
+def apply_style(fontsize=DEFAULT_FONTSIZE, *, template="weather_skills", chart="line"):
+    """Seaborn chrome plus a single ``--fontsize``.
+
+    ``template`` is ``weather_skills`` (seaborn ``deep``) or ``colorblind``.
+    ``chart`` is ``line`` (whitegrid) or ``map`` (ticks, no background grid).
+    """
     import matplotlib as mpl
 
+    from weather_skills_core.plot_style import seaborn_palette_name, seaborn_style_name
+
+    palette = seaborn_palette_name(template)
+    style = seaborn_style_name(chart)
+    try:
+        import seaborn as sns
+    except ImportError:
+        sns = None
+    if sns is not None:
+        sns.set_theme(style=style, palette=palette, context="notebook")
+        if chart == "map":
+            mpl.rcParams["axes.grid"] = False
     fs = int(fontsize)
     tick = max(8, int(round(fs * 0.85)))
     legend = max(8, int(round(fs * 0.9)))

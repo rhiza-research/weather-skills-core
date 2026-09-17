@@ -140,6 +140,7 @@ def compile_heatmap_grid(
     overlays=True,
     xlabel="Longitude",
     cell_notes=None,
+    template="weather_skills",
 ):
     """Compile a 2-D grid of heatmap/scatter/blank cells.
 
@@ -151,8 +152,7 @@ def compile_heatmap_grid(
     """
     import matplotlib.pyplot as plt
 
-    apply_style(fontsize)
-    scales = scales or {}
+    apply_style(fontsize, template=template, chart="map")
     nrows = len(cells)
     ncols = max((len(row) for row in cells), default=1)
     geo_x = geo_y = None
@@ -275,11 +275,12 @@ def compile_line_figure(
     subplots=False,
     kinds=None,
     styles=None,
+    template="weather_skills",
 ):
     """``series`` is a list of ``(x, y, label)``. ``y`` may be 1-D or 2-D (along)."""
     import matplotlib.pyplot as plt
 
-    apply_style(fontsize)
+    apply_style(fontsize, template=template, chart="line")
     n = len(series)
     kinds = kinds or ["line"] * n
     styles = styles or [{} for _ in series]
@@ -304,36 +305,69 @@ def compile_line_figure(
         zip(series, kinds, styles, strict=True)
     ):
         ax = axes[i if subplots else 0, 0]
-        color = mpl_color(style.get("color"))
+        color = mpl_color(style.get("color")) or f"C{i % 10}"
         width_pt = style.get("lw") or style.get("linewidth") or style.get("width") or 2
         yarr = np.asarray(yvals, dtype=float)
         xplot = as_plot_x(xvals)
-        traces_y = [yarr] if yarr.ndim == 1 else [yarr[:, j] for j in range(yarr.shape[1])]
+        band = style.get("band")
         markers = style.get("marker")
         use_marker = markers not in (None, "None", "none", "null")
         alpha = float(style.get("alpha") or 1)
-        for j, yy in enumerate(traces_y):
-            name = label if j == 0 else "_nolegend_"
-            if kind == "bar":
-                ax.bar(
-                    np.arange(len(yy)) if np.asarray(xplot).dtype.kind == "O" else xplot,
-                    yy,
-                    color=color,
-                    label=name,
-                    alpha=alpha,
-                )
-            else:
-                ax.plot(
-                    xplot,
-                    yy,
-                    color=color,
-                    linewidth=width_pt,
-                    marker="o" if use_marker else None,
-                    markersize=float(style.get("markersize") or 6),
-                    alpha=alpha,
-                    label=name if (j == 0 and not subplots) else (name if j == 0 else "_nolegend_"),
-                    zorder=float(style.get("zorder") or 2),
-                )
+        if yarr.ndim == 2 and band:
+            lo_q, hi_q = band
+            low = np.nanpercentile(yarr, lo_q, axis=1)
+            high = np.nanpercentile(yarr, hi_q, axis=1)
+            mean = np.nanmean(yarr, axis=1)
+            ax.fill_between(
+                xplot,
+                low,
+                high,
+                color=color,
+                alpha=float(style.get("band_alpha") or 0.25),
+                linewidth=0,
+                zorder=float(style.get("zorder") or 1),
+                label="_nolegend_",
+            )
+            ax.plot(
+                xplot,
+                mean,
+                color=color,
+                linewidth=width_pt,
+                marker="o" if use_marker else None,
+                markersize=float(style.get("markersize") or 6),
+                alpha=alpha,
+                label=label,
+                zorder=float(style.get("zorder") or 2) + 1,
+            )
+        else:
+            traces_y = [yarr] if yarr.ndim == 1 else [yarr[:, j] for j in range(yarr.shape[1])]
+            member_alpha = alpha if yarr.ndim == 1 else float(style.get("alpha") or 0.35)
+            for j, yy in enumerate(traces_y):
+                name = label if j == 0 else "_nolegend_"
+                if kind == "bar":
+                    ax.bar(
+                        np.arange(len(yy)) if np.asarray(xplot).dtype.kind == "O" else xplot,
+                        yy,
+                        color=color,
+                        label=name,
+                        alpha=alpha,
+                    )
+                else:
+                    ax.plot(
+                        xplot,
+                        yy,
+                        color=color,
+                        linewidth=width_pt if yarr.ndim == 1 else min(float(width_pt), 1.2),
+                        marker="o" if use_marker else None,
+                        markersize=float(style.get("markersize") or 6),
+                        alpha=member_alpha if yarr.ndim == 2 else alpha,
+                        label=(
+                            name
+                            if (j == 0 and not subplots)
+                            else (name if j == 0 else "_nolegend_")
+                        ),
+                        zorder=float(style.get("zorder") or 2),
+                    )
         if np.asarray(xvals).dtype.kind == "M":
             apply_date_ticks(ax)
         if subplots:
@@ -361,11 +395,12 @@ def compile_mediogram(
     ylabel="",
     fontsize=DEFAULT_FONTSIZE,
     figsize=None,
+    template="weather_skills",
 ):
     """ECMWF-style two-layer boxes: forecast (cyan) vs m-climate (red)."""
     import matplotlib.pyplot as plt
 
-    apply_style(fontsize)
+    apply_style(fontsize, template=template, chart="line")
     n_steps = fc.shape[1]
     if figsize is not None:
         fig_w, fig_h = float(figsize[0]), float(figsize[1])

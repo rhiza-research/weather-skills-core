@@ -226,6 +226,11 @@ def spec_from_flags(
     vmin=None,
     vmax=None,
     patch=None,
+    along=None,
+    reduce=None,
+    align=None,
+    band=None,
+    template=None,
 ) -> dict:
     """Build a (possibly partial) spec from CLI flags."""
     inputs = []
@@ -257,6 +262,16 @@ def spec_from_flags(
         "annotations": [],
         "shapes": [],
     }
+    if along:
+        spec["traces"][0]["along"] = along
+    if reduce:
+        spec["traces"][0]["reduce"] = list(reduce) if not isinstance(reduce, str) else [reduce]
+    if align:
+        spec["align"] = align
+    if band is not None:
+        spec["band"] = band
+    if template:
+        spec["style"]["template"] = template
     if colormap:
         spec["style"]["colormap"] = colormap
     if fontsize is not None:

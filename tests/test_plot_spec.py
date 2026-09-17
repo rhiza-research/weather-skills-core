@@ -74,6 +74,51 @@ def test_precip_default_colorscale_is_chirps():
     scale = resolve_colorscale(da, None)
     assert scale["name"] == "chirps_total"
     assert scale["bounds"][0] == 2
+    assert scale["colors"][0] == "#ffffff"
+    assert scale["colors"][1] == "#c8ffbe"
+    assert scale["colors"][-1] == "#ffe6e6"
+    aliased = resolve_colorscale(da, "ppt_total")
+    assert aliased["colors"] == scale["colors"]
+    assert aliased["bounds"] == scale["bounds"]
+
+
+def test_precip_anomaly_and_poa_and_spi_colorscales():
+    da = make_gridded(fill=-20.0)["precip"]
+    da.attrs["units"] = "mm"
+    da.attrs["standard_name"] = "lwe_thickness_of_precipitation_amount"
+    anom = resolve_colorscale(da, None)
+    assert anom["name"] == "chirps_anom"
+    assert anom["colors"][0] == "#c00000"
+    assert anom["colors"][3] == "#ffe878"
+    assert resolve_colorscale(da, "ppt_anomaly")["colors"] == anom["colors"]
+
+    poa = make_gridded(fill=80.0)["precip"]
+    poa.attrs.update(
+        units="percent",
+        standard_name="lwe_thickness_of_precipitation_amount",
+        long_name="percent of normal rainfall",
+    )
+    poa_scale = resolve_colorscale(poa, None)
+    assert poa_scale["name"] == "ppt_poa"
+    assert poa_scale["bounds"][0] == 30
+    assert poa_scale["colors"][0] == "#e1beb4"
+
+    spi = make_gridded(fill=-1.0, name="spi")["spi"]
+    spi.attrs["long_name"] = "Standardized Precipitation Index"
+    spi_scale = resolve_colorscale(spi, None)
+    assert spi_scale["name"] == "spi"
+    assert spi_scale["bounds"][0] == -2.5
+    assert spi_scale["colors"][0] == "#730000"
+
+
+def test_rank_colorscale_bounds_depend_on_n_seasons():
+    from weather_skills_core.plot_style import rank_colorscale
+
+    scale = rank_colorscale(40)
+    assert scale["name"] == "ppt_rank"
+    assert scale["bounds"][0] == -0.5
+    assert scale["bounds"][-2] == 39.5
+    assert len(scale["colors"]) == len(scale["bounds"]) - 1
 
 
 def _quadmeshes(fig):
@@ -299,3 +344,82 @@ def test_panel_title_weekly_range_and_daily_date():
     xvals, xlabel = timeseries_axis(fc, "step")
     assert xlabel == "Valid time"
     assert np.datetime_as_string(xvals[0], unit="D") == "2026-01-01"
+
+
+def test_parse_band_and_along_dim():
+    from weather_skills_core.plot_style import along_dim, parse_band, resolve_colorscale
+
+    assert parse_band("10,90") == (10.0, 90.0)
+    assert parse_band(True) == (10.0, 90.0)
+    da = make_forecast()["tp"]
+    assert along_dim(da, "member") == "number"
+    temp = make_gridded(name="t2m", units="K")["t2m"]
+    temp.attrs["standard_name"] = "air_temperature"
+    scale = resolve_colorscale(temp, None)
+    assert scale["name"] == "rocket"
+
+
+def test_compile_timeseries_along_and_band():
+    pytest.importorskip("matplotlib")
+    pytest.importorskip("seaborn")
+    from matplotlib.collections import PolyCollection
+
+    from weather_skills_core.plot_compile import compile_figure
+
+    ds = make_forecast(n_number=5)
+    spec = spec_from_flags(
+        variable="tp",
+        style="timeseries",
+        along="number",
+        reduce=["latitude", "longitude"],
+        band="10,90",
+    )
+    fig, resolved = compile_figure(spec, {"a": ds})
+    assert resolved["layout"]["shared_colorscale"] is True
+    fills = [c for ax in fig.axes for c in ax.collections if isinstance(c, PolyCollection)]
+    assert fills
+    assert fig.axes[0].lines
+
+
+def test_compile_timeseries_align_dayofyear():
+    pytest.importorskip("matplotlib")
+    from weather_skills_core.plot_compile import compile_figure
+
+    ds = make_gridded(n_time=4)
+    spec = spec_from_flags(
+        variable="precip",
+        style="timeseries",
+        align="dayofyear",
+        reduce=["latitude", "longitude"],
+    )
+    fig, resolved = compile_figure(spec, {"a": ds})
+    assert resolved.get("align") == "dayofyear" or spec.get("align") == "dayofyear"
+    xdata = fig.axes[0].lines[0].get_xdata()
+    assert float(xdata[0]) >= 1
+
+
+def test_colorblind_template_sets_style():
+    pytest.importorskip("matplotlib")
+    pytest.importorskip("seaborn")
+    from weather_skills_core.plot_compile import compile_figure
+    from weather_skills_core.plot_style import normalize_template
+
+    assert normalize_template("colorblind") == "colorblind"
+    ds = make_gridded(n_time=1)
+    spec = spec_from_flags(variable="precip", style="heatmap", template="colorblind")
+    fig, resolved = compile_figure(spec, {"a": ds})
+    assert resolved["style"]["template"] == "colorblind"
+    assert _quadmeshes(fig)
+
+
+def test_shared_colorscale_one_norm_across_panels():
+    pytest.importorskip("matplotlib")
+    from weather_skills_core.plot_compile import compile_figure
+
+    ds = make_gridded(n_time=3)
+    spec = spec_from_flags(variable="precip", style="heatmap")
+    fig, resolved = compile_figure(spec, {"a": ds})
+    assert resolved["layout"]["shared_colorscale"] is True
+    meshes = _quadmeshes(fig)
+    norms = {id(m.norm) for m in meshes}
+    assert len(norms) == 1

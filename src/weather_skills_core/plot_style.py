@@ -16,49 +16,135 @@ from weather_skills_core.units import (
 SPEC_VERSION = 1
 DEFAULT_MAX_COLUMNS = 4
 DEFAULT_TEMPLATE = "weather_skills"
+TEMPLATES = ("weather_skills", "colorblind")
+SEABORN_SEQUENTIAL = "rocket"
 
-# CHIRPS-GEFS / Early Warning eXplorer rainfall-total classes (mm).
-# Under (<2) is white; over (>2500) is pale pink.
-PRECIP_COLORS = [
-    "#ffffff",
-    "#c7ffbb",
-    "#75f676",
-    "#1bb61d",
-    "#b8edfb",
-    "#50a5f8",
-    "#1e6eec",
-    "#dcdcff",
-    "#a08bff",
-    "#7060de",
-    "#fff8ad",
-    "#ff9d00",
-    "#ff1400",
-    "#a30005",
-    "#e58d8b",
-    "#ffe5e4",
-]
+
+def _rgb(*rows: tuple[int, int, int]) -> list[str]:
+    """``(r, g, b)`` 0–255 → ``#rrggbb``. Source values are CHC IDL palettes."""
+    return [f"#{r:02x}{g:02x}{b:02x}" for r, g, b in rows]
+
+
+# CHC ``ppt_total_cmap.pro`` (Will Turner, 6 Feb 2018). Under (<2 mm) folds the
+# IDL null/negative and 0–2 whites; over (>2500 mm) is pale pink.
+PRECIP_COLORS = _rgb(
+    (255, 255, 255),
+    (200, 255, 190),
+    (120, 245, 115),
+    (30, 180, 30),
+    (180, 240, 250),
+    (80, 165, 245),
+    (30, 110, 235),
+    (220, 220, 255),
+    (160, 140, 255),
+    (112, 96, 220),
+    (255, 250, 170),
+    (255, 160, 0),
+    (255, 20, 0),
+    (165, 0, 0),
+    (230, 140, 140),
+    (255, 230, 230),
+)
 PRECIP_BOUNDS = [2, 5, 10, 25, 50, 75, 100, 150, 200, 300, 500, 750, 1000, 1500, 2500]
 PRECIP_SHORT_BOUNDS = [0.5, 1, 2, 3, 5, 8, 10, 15, 20, 30, 50, 75, 100, 150, 200]
 PRECIP_LONG_MIN_DAYS = 5
 
-PRECIP_ANOMALY_COLORS = [
-    "#c00006",
-    "#ff3300",
-    "#ff9d00",
-    "#ffe772",
-    "#7a5044",
-    "#b68c80",
-    "#f2dcd1",
-    "#ffffff",
-    "#c7ffbb",
-    "#75f676",
-    "#1bb61c",
-    "#9bd1f5",
-    "#2583f5",
-    "#dcdcff",
-    "#8070ee",
-]
+# CHC ``ppt_anomaly_cmap.pro`` (Will Turner, 8 Feb 2018).
+PRECIP_ANOMALY_COLORS = _rgb(
+    (192, 0, 0),
+    (255, 50, 0),
+    (255, 160, 0),
+    (255, 232, 120),
+    (120, 80, 70),
+    (180, 140, 130),
+    (240, 220, 210),
+    (255, 255, 255),
+    (200, 255, 190),
+    (120, 245, 115),
+    (30, 180, 30),
+    (150, 210, 250),
+    (40, 130, 240),
+    (220, 220, 255),
+    (128, 112, 235),
+)
 PRECIP_ANOMALY_BOUNDS = [-500, -300, -200, -100, -50, -25, -10, 10, 25, 50, 100, 200, 300, 500]
+
+# CHC ``ppt_poa_cmap.pro`` (percent of normal). Missing gray is NaN, not a class.
+PRECIP_POA_COLORS = _rgb(
+    (225, 190, 180),
+    (192, 0, 0),
+    (255, 50, 0),
+    (255, 160, 0),
+    (255, 232, 120),
+    (255, 255, 255),
+    (200, 255, 190),
+    (120, 245, 115),
+    (30, 180, 30),
+    (150, 210, 250),
+    (40, 130, 240),
+)
+PRECIP_POA_BOUNDS = [30, 45, 60, 75, 90, 110, 125, 150, 200, 300]
+
+# CHC ``ppt_spp_cmap.pro`` (seasonal rainfall performance probability classes).
+PRECIP_SPP_COLORS = _rgb(
+    (220, 220, 220),
+    (255, 255, 255),
+    (255, 232, 120),
+    (255, 160, 0),
+    (255, 50, 0),
+    (192, 0, 0),
+    (200, 255, 190),
+    (150, 245, 140),
+    (55, 210, 60),
+    (15, 160, 15),
+    (180, 240, 250),
+    (120, 185, 250),
+    (40, 130, 240),
+    (20, 100, 210),
+)
+PRECIP_SPP_BOUNDS = [0.5, 1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5, 8.5, 9.5, 10.5, 11.5, 12.5]
+
+# CHC ``spi_cmap.pro``. Missing gray is NaN; outer bounds are ±2.5.
+SPI_COLORS = _rgb(
+    (115, 0, 0),
+    (231, 0, 0),
+    (255, 170, 0),
+    (255, 211, 123),
+    (255, 255, 0),
+    (255, 255, 255),
+    (189, 235, 255),
+    (115, 178, 255),
+    (0, 113, 255),
+    (0, 77, 173),
+    (173, 0, 231),
+)
+SPI_BOUNDS = [-2.5, -2.0, -1.5, -1.2, -0.7, -0.5, 0.5, 0.7, 1.2, 1.5, 2.0, 2.5]
+
+# CHC ``rank_cmap.pro`` (missing gray omitted; bounds depend on ``n_seasons``).
+RANK_COLORS = _rgb(
+    (115, 0, 0),
+    (231, 0, 0),
+    (255, 170, 0),
+    (255, 255, 255),
+    (189, 235, 255),
+    (0, 113, 255),
+    (0, 0, 85),
+)
+
+DISCRETE_PRECIP_NAMES = frozenset(
+    {
+        "chirps_total",
+        "chirps_short",
+        "chirps_anom",
+        "ppt_total",
+        "ppt_short",
+        "ppt_anomaly",
+        "ppt_anom",
+        "ppt_poa",
+        "ppt_spp",
+        "spi",
+    }
+)
 
 _STYLE_ENV = "WEATHER_SKILLS_PLOT_STYLE"
 _USER_STYLE_CANDIDATES = (
@@ -67,18 +153,90 @@ _USER_STYLE_CANDIDATES = (
 )
 
 
+def seaborn_palette_name(template: str | None) -> str:
+    """Seaborn qualitative palette for ``template``."""
+    name = (template or DEFAULT_TEMPLATE).strip().lower().replace("-", "_")
+    if name in ("colorblind", "seaborn_colorblind", "colourblind"):
+        return "colorblind"
+    return "deep"
+
+
+def seaborn_style_name(chart: str | None) -> str:
+    """Seaborn axes style: whitegrid for 1-D, ticks for maps."""
+    if (chart or "line") == "map":
+        return "ticks"
+    return "whitegrid"
+
+
+def normalize_template(template: str | None) -> str:
+    """``weather_skills`` or ``colorblind``."""
+    if seaborn_palette_name(template) == "colorblind":
+        return "colorblind"
+    return DEFAULT_TEMPLATE
+
+
+def along_dim(da, along: str | None) -> str | None:
+    """Resolve ``along`` to a dim on ``da``, including ontology aliases (member/number)."""
+    from weather_skills_core.standard_dataset import ALIASES, names_for
+
+    if not along:
+        return None
+    if along in da.dims:
+        return along
+    preferred = ALIASES.get(along, along)
+    return next((name for name in names_for(preferred) if name in da.dims), None)
+
+
+def parse_band(value) -> tuple[float, float] | None:
+    """Parse ``--band`` / spec ``band`` as two percentiles, default ``10,90``."""
+    if value is None or value is False or value == "":
+        return None
+    if value is True:
+        return (10.0, 90.0)
+    if isinstance(value, dict):
+        q = value.get("q") or value.get("percentiles")
+        if q is None:
+            lo = value.get("low", 10)
+            hi = value.get("high", 90)
+            value = (lo, hi)
+        else:
+            value = q
+    if isinstance(value, (list, tuple)):
+        if len(value) != 2:
+            raise UsageError("--band must be two percentiles, e.g. 10,90")
+        lo, hi = float(value[0]), float(value[1])
+    else:
+        raw = str(value).strip().lower().replace("q", "")
+        parts = [p.strip() for p in raw.split(",") if p.strip()]
+        if len(parts) != 2:
+            raise UsageError("--band must be two percentiles, e.g. 10,90")
+        lo, hi = float(parts[0]), float(parts[1])
+    if not 0 <= lo < hi <= 100:
+        raise UsageError(f"--band percentiles must satisfy 0 ≤ low < high ≤ 100; got {lo},{hi}")
+    return (lo, hi)
+
+
 def default_style() -> dict:
-    """Built-in style: template name, font, facet cap, colormap aliases."""
+    """Built-in style: seaborn template, font, facet cap, colormap aliases."""
     return {
         "template": DEFAULT_TEMPLATE,
+        "palette": "deep",
         "fontsize": DEFAULT_FONTSIZE,
         "max_columns": DEFAULT_MAX_COLUMNS,
         "dpi": DEFAULT_DPI,
         "colormap": None,
         "colormaps": {
             "chirps_total": {"colors": PRECIP_COLORS, "bounds": PRECIP_BOUNDS},
+            "ppt_total": {"colors": PRECIP_COLORS, "bounds": PRECIP_BOUNDS},
             "chirps_short": {"colors": PRECIP_COLORS, "bounds": PRECIP_SHORT_BOUNDS},
+            "ppt_short": {"colors": PRECIP_COLORS, "bounds": PRECIP_SHORT_BOUNDS},
             "chirps_anom": {"colors": PRECIP_ANOMALY_COLORS, "bounds": PRECIP_ANOMALY_BOUNDS},
+            "ppt_anomaly": {"colors": PRECIP_ANOMALY_COLORS, "bounds": PRECIP_ANOMALY_BOUNDS},
+            "ppt_anom": {"colors": PRECIP_ANOMALY_COLORS, "bounds": PRECIP_ANOMALY_BOUNDS},
+            "ppt_poa": {"colors": PRECIP_POA_COLORS, "bounds": PRECIP_POA_BOUNDS},
+            "ppt_spp": {"colors": PRECIP_SPP_COLORS, "bounds": PRECIP_SPP_BOUNDS},
+            "spi": {"colors": SPI_COLORS, "bounds": SPI_BOUNDS},
+            "rocket": {"cmap": "rocket"},
             "viridis": {"cmap": "viridis"},
         },
     }
@@ -169,8 +327,16 @@ def mpl_cmap_norm(scale: dict):
         return cmap, Normalize(vmin=cmin, vmax=cmax)
     import matplotlib.pyplot as plt
 
-    name = str((scale or {}).get("cmap") or (scale or {}).get("name") or "viridis").lower()
-    cmap = plt.get_cmap(name)
+    name = str((scale or {}).get("cmap") or (scale or {}).get("name") or SEABORN_SEQUENTIAL).lower()
+    if name in ("rocket", "mako", "flare", "crest"):
+        try:
+            import seaborn as sns
+
+            cmap = sns.color_palette(name, as_cmap=True)
+        except ImportError:
+            cmap = plt.get_cmap("viridis")
+    else:
+        cmap = plt.get_cmap(name)
     return cmap, Normalize(vmin=cmin, vmax=cmax)
 
 
@@ -209,14 +375,63 @@ def is_precip_anomaly(da) -> bool:
     return bool(finite.size) and bool(np.nanmin(finite) < 0)
 
 
+def is_precip_poa(da) -> bool:
+    """Percent-of-normal precip (CHC ``ppt_poa``)."""
+    name = f"{da.name or ''} {da.attrs.get('long_name') or ''}".lower()
+    tokens = name.replace("_", " ").replace("-", " ").split()
+    if "percent of" in name or "pct of" in name or "poa" in tokens:
+        return True
+    units = (variable_units(da) or "").strip().lower()
+    return units in {"%", "percent"}
+
+
+def is_spi(da) -> bool:
+    name = f"{da.name or ''} {da.attrs.get('long_name') or ''}".lower()
+    tokens = name.replace("_", " ").replace("-", " ").split()
+    return "spi" in tokens or "standardized precipitation" in name
+
+
 def named_precip_scale(da) -> tuple[str, list[str], list[float]]:
     """Return ``(name, colors, bounds)`` for the default precip palette."""
+    if is_spi(da):
+        return "spi", list(SPI_COLORS), list(SPI_BOUNDS)
+    if is_precip_poa(da):
+        return "ppt_poa", list(PRECIP_POA_COLORS), list(PRECIP_POA_BOUNDS)
     if is_precip_anomaly(da):
         return "chirps_anom", list(PRECIP_ANOMALY_COLORS), list(PRECIP_ANOMALY_BOUNDS)
     days = aggregation_days(da)
     if days is not None and days < PRECIP_LONG_MIN_DAYS:
         return "chirps_short", list(PRECIP_COLORS), list(PRECIP_SHORT_BOUNDS)
     return "chirps_total", list(PRECIP_COLORS), list(PRECIP_BOUNDS)
+
+
+def rank_colorscale(n_seasons: int) -> dict:
+    """CHC ``rank_cmap.pro`` classes for a climatology of ``n_seasons`` years."""
+    n = int(n_seasons)
+    if n < 4:
+        raise UsageError("--colormap ppt_rank needs n_seasons ≥ 4")
+    bounds = [-0.5, 1.5, 2.5, 3.5, n - 2.5, n - 1.5, n - 0.5, n + 0.5]
+    return {
+        "name": "ppt_rank",
+        "colors": list(RANK_COLORS),
+        "bounds": bounds,
+        "cmin": bounds[0],
+        "cmax": bounds[-1],
+    }
+
+
+def _discrete_scale(name: str, registry: dict, *, stretch: bool) -> dict:
+    colors = list(registry["colors"])
+    bounds = list(registry["bounds"])
+    if stretch:
+        return {"name": name, "colors": colors, "bounds": None}
+    return {
+        "name": name,
+        "colors": colors,
+        "bounds": bounds,
+        "cmin": bounds[0],
+        "cmax": bounds[-1],
+    }
 
 
 def parse_colormap_spec(spec: str | None) -> dict:
@@ -238,30 +453,13 @@ def resolve_colorscale(da, colormap: str | None, *, stretch: bool = False) -> di
     if parsed.get("colors"):
         return {"name": parsed["name"], "colors": parsed["colors"], "bounds": None}
     named = parsed.get("name")
-    if named in ("chirps_total", "chirps_short", "chirps_anom"):
-        registry = default_style()["colormaps"][named]
-        colors = list(registry["colors"])
-        bounds = list(registry["bounds"])
-        if stretch:
-            return {"name": named, "colors": colors, "bounds": None}
-        return {
-            "name": named,
-            "colors": colors,
-            "bounds": bounds,
-            "cmin": bounds[0],
-            "cmax": bounds[-1],
-        }
+    registry = default_style()["colormaps"]
+    entry = registry.get(named) if named else None
+    if entry and entry.get("colors") and entry.get("bounds"):
+        return _discrete_scale(named, entry, stretch=stretch)
     if named:
         return {"name": named, "cmap": named.lower(), "bounds": None}
-    if da is not None and is_precip(da):
+    if da is not None and (is_precip(da) or is_spi(da) or is_precip_poa(da)):
         name, colors, bounds = named_precip_scale(da)
-        if stretch:
-            return {"name": name, "colors": colors, "bounds": None}
-        return {
-            "name": name,
-            "colors": colors,
-            "bounds": bounds,
-            "cmin": bounds[0],
-            "cmax": bounds[-1],
-        }
-    return {"name": "viridis", "cmap": "viridis", "bounds": None}
+        return _discrete_scale(name, {"colors": colors, "bounds": bounds}, stretch=stretch)
+    return {"name": SEABORN_SEQUENTIAL, "cmap": SEABORN_SEQUENTIAL, "bounds": None}

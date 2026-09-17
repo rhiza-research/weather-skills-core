@@ -29,12 +29,13 @@ geo = ["shapely>=2.1.2", "geopandas>=1.0"]
 # Figure chrome (rcParams, colorbar, save). Plot skills already depend on matplotlib.
 figure = ["matplotlib>=3.8"]
 # Matplotlib compiler (heatmap/timeseries/recipes). PNG via the Agg backend.
-plot = ["matplotlib>=3.8", "shapely>=2.1.2"]
+plot = ["matplotlib>=3.8", "seaborn>=0.13", "shapely>=2.1.2"]
 
 [dependency-groups]
 dev = [
     "geopandas>=1.0",
     "matplotlib>=3.8",
+    "seaborn>=0.13",
     "pre-commit>=4.6",
     "pytest>=9.1",
     "ruff>=0.16",
