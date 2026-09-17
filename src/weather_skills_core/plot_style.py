@@ -1,4 +1,4 @@
-"""Plotly template, named colormaps, and user style-file overlays."""
+"""Named colormaps, matplotlib cmap/norm, and user style-file overlays."""
 
 from __future__ import annotations
 
@@ -79,7 +79,7 @@ def default_style() -> dict:
             "chirps_total": {"colors": PRECIP_COLORS, "bounds": PRECIP_BOUNDS},
             "chirps_short": {"colors": PRECIP_COLORS, "bounds": PRECIP_SHORT_BOUNDS},
             "chirps_anom": {"colors": PRECIP_ANOMALY_COLORS, "bounds": PRECIP_ANOMALY_BOUNDS},
-            "viridis": {"colorscale": "Viridis"},
+            "viridis": {"cmap": "viridis"},
         },
     }
 
@@ -124,39 +124,54 @@ def load_user_style(path=None) -> dict:
     return style
 
 
-def weather_skills_template(fontsize: int = DEFAULT_FONTSIZE):
-    """Plotly template used as the default figure chrome."""
-    import plotly.graph_objects as go
+def mpl_color(color):
+    """Map grayscale numbers / names to a matplotlib color."""
+    if color is None:
+        return None
+    if isinstance(color, (int, float)):
+        v = float(max(0.0, min(1.0, color)))
+        return (v, v, v)
+    raw = str(color).strip()
+    try:
+        v = float(raw)
+    except ValueError:
+        return raw
+    if 0.0 <= v <= 1.0:
+        return (v, v, v)
+    return raw
 
-    fs = int(fontsize)
-    return go.layout.Template(
-        layout=go.Layout(
-            font={"size": fs, "color": "#222222", "family": "Helvetica, Arial, sans-serif"},
-            title={"font": {"size": fs}},
-            paper_bgcolor="white",
-            plot_bgcolor="white",
-            coloraxis={
-                "colorbar": {
-                    "outlinewidth": 0,
-                    "ticks": "outside",
-                    "tickfont": {"size": max(8, int(round(fs * 0.85)))},
-                    "title": {"font": {"size": fs}},
-                }
-            },
-            xaxis={"showgrid": False, "zeroline": False, "automargin": True},
-            yaxis={"showgrid": False, "zeroline": False, "automargin": True},
-            margin={"l": 64, "r": 48, "t": 72, "b": 72},
-            hovermode="closest",
+
+def mpl_cmap_norm(scale: dict):
+    """Return ``(cmap, norm)`` for a scale dict from ``resolve_colorscale``."""
+    from matplotlib.colors import BoundaryNorm, LinearSegmentedColormap, ListedColormap, Normalize
+
+    colors = scale.get("colors") if scale else None
+    bounds = scale.get("bounds") if scale else None
+    cmin = scale.get("cmin") if scale else None
+    cmax = scale.get("cmax") if scale else None
+    if bounds and colors and len(colors) == len(bounds) - 1:
+        cmap = ListedColormap(list(colors)).with_extremes(bad=(0.0, 0.0, 0.0, 0.0))
+        return cmap, BoundaryNorm([float(b) for b in bounds], cmap.N)
+    if bounds and colors and len(colors) >= len(bounds) + 1:
+        under, over = colors[0], colors[-1]
+        interior = colors[1 : 1 + (len(bounds) - 1)]
+        cmap = ListedColormap(list(interior)).with_extremes(
+            under=under, over=over, bad=(0.0, 0.0, 0.0, 0.0)
         )
-    )
+        return cmap, BoundaryNorm([float(b) for b in bounds], cmap.N)
+    if colors:
+        cmap = LinearSegmentedColormap.from_list(scale.get("name") or "custom", list(colors))
+        cmap = cmap.with_extremes(bad=(0.0, 0.0, 0.0, 0.0))
+        if cmin is None:
+            cmin = 0.0
+        if cmax is None or cmax == cmin:
+            cmax = cmin + 1.0
+        return cmap, Normalize(vmin=cmin, vmax=cmax)
+    import matplotlib.pyplot as plt
 
-
-def register_template(fontsize: int = DEFAULT_FONTSIZE) -> str:
-    """Register ``weather_skills`` on Plotly's template map; return the name."""
-    import plotly.io as pio
-
-    pio.templates[DEFAULT_TEMPLATE] = weather_skills_template(fontsize)
-    return DEFAULT_TEMPLATE
+    name = str((scale or {}).get("cmap") or (scale or {}).get("name") or "viridis").lower()
+    cmap = plt.get_cmap(name)
+    return cmap, Normalize(vmin=cmin, vmax=cmax)
 
 
 def aggregation_days(da) -> float | None:
@@ -217,58 +232,36 @@ def parse_colormap_spec(spec: str | None) -> dict:
     return {"name": raw}
 
 
-def discrete_colorscale(colors: list[str], bounds: list[float] | None = None) -> list:
-    """Plotly colorscale: interior colors as flat classes; ends are under/over."""
-    if bounds is not None and len(colors) >= len(bounds) + 1:
-        interior = colors[1 : 1 + (len(bounds) - 1)]
-    else:
-        interior = colors
-    n = max(len(interior), 1)
-    scale = []
-    for i, color in enumerate(interior):
-        t0 = i / n
-        t1 = (i + 1) / n
-        scale.append([t0, color])
-        scale.append([min(t1, 1.0), color])
-    if scale and scale[-1][0] < 1.0:
-        scale.append([1.0, interior[-1]])
-    return scale
-
-
 def resolve_colorscale(da, colormap: str | None, *, stretch: bool = False) -> dict:
-    """Pick a Plotly colorscale dict: name, colorscale, optional bounds/ticks."""
+    """Pick a colormap dict: name, colors and/or cmap, optional bounds."""
     parsed = parse_colormap_spec(colormap)
     if parsed.get("colors"):
-        return {
-            "name": parsed["name"],
-            "colorscale": discrete_colorscale(parsed["colors"]),
-            "bounds": None,
-        }
+        return {"name": parsed["name"], "colors": parsed["colors"], "bounds": None}
     named = parsed.get("name")
     if named in ("chirps_total", "chirps_short", "chirps_anom"):
         registry = default_style()["colormaps"][named]
         colors = list(registry["colors"])
         bounds = list(registry["bounds"])
         if stretch:
-            return {"name": named, "colorscale": discrete_colorscale(colors), "bounds": None}
+            return {"name": named, "colors": colors, "bounds": None}
         return {
             "name": named,
-            "colorscale": discrete_colorscale(colors, bounds),
+            "colors": colors,
             "bounds": bounds,
             "cmin": bounds[0],
             "cmax": bounds[-1],
         }
     if named:
-        return {"name": named, "colorscale": named, "bounds": None}
+        return {"name": named, "cmap": named.lower(), "bounds": None}
     if da is not None and is_precip(da):
         name, colors, bounds = named_precip_scale(da)
         if stretch:
-            return {"name": name, "colorscale": discrete_colorscale(colors), "bounds": None}
+            return {"name": name, "colors": colors, "bounds": None}
         return {
             "name": name,
-            "colorscale": discrete_colorscale(colors, bounds),
+            "colors": colors,
             "bounds": bounds,
             "cmin": bounds[0],
             "cmax": bounds[-1],
         }
-    return {"name": "viridis", "colorscale": "Viridis", "bounds": None}
+    return {"name": "viridis", "cmap": "viridis", "bounds": None}

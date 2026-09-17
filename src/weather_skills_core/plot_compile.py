@@ -1,4 +1,4 @@
-"""Compile a weather-skills plot spec + Datasets into a Plotly figure."""
+"""Compile a weather-skills plot spec + Datasets into a matplotlib figure."""
 
 from __future__ import annotations
 
@@ -12,18 +12,22 @@ import numpy as np
 from weather_skills_core.cf import auto_variable, cf_dim
 from weather_skills_core.errors import UsageError
 from weather_skills_core.figure import (
+    add_shared_colorbar,
+    apply_date_ticks,
+    apply_style,
     axis_label,
+    colorbar_size_kwargs,
+    colorbar_spec,
     format_plot_date,
     format_plot_date_range,
     resolve_axis_label,
 )
 from weather_skills_core.plot_spec import apply_index, overlay_spec, panel_shape, parse_index
 from weather_skills_core.plot_style import (
-    DEFAULT_DPI,
     DEFAULT_FONTSIZE,
     DEFAULT_MAX_COLUMNS,
     aggregation_days,
-    register_template,
+    mpl_cmap_norm,
     resolve_colorscale,
 )
 from weather_skills_core.standard_utils import (
@@ -444,55 +448,83 @@ def _prepare_field(ds, spec_input: dict, geo: dict, style: str):
     }
 
 
-def coloraxis(scale, label, n_panels, vmin, vmax):
-    cmin = scale.get("cmin") if vmin is None else vmin
-    cmax = scale.get("cmax") if vmax is None else vmax
-    colorbar = {
-        "title": {"text": label or scale.get("label") or ""},
-        "orientation": "v" if n_panels <= 1 else "h",
-        "y": 0.5 if n_panels <= 1 else -0.12,
-        "x": 1.02 if n_panels <= 1 else 0.5,
-        "len": 0.8 if n_panels <= 1 else 0.7,
-    }
-    bounds = scale.get("bounds")
-    if bounds:
-        colorbar["tickvals"] = bounds
-        colorbar["tickmode"] = "array"
-    if scale.get("ticktext"):
-        colorbar["ticktext"] = list(scale["ticktext"])
-        colorbar["tickmode"] = "array"
-        if not bounds and scale.get("tickvals"):
-            colorbar["tickvals"] = list(scale["tickvals"])
-    if scale.get("colorbar"):
-        colorbar.update(scale["colorbar"])
-    axis = {"colorscale": scale["colorscale"], "colorbar": colorbar, "showscale": True}
-    if cmin is not None:
-        axis["cmin"] = cmin
-    if cmax is not None:
-        axis["cmax"] = cmax
-    return axis
+def _title_text(value) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, dict):
+        return str(value.get("text") or "")
+    return str(value)
 
 
-def _apply_plotly_patch(fig, patch: dict | None):
+def as_plot_x(values):
+    """Matplotlib x values: datetime64 stays; timedeltas become days."""
+    arr = np.asarray(values)
+    if arr.dtype.kind == "m":
+        return arr / np.timedelta64(1, "D")
+    return arr
+
+
+def draw_geo_lines(ax, geo_x, geo_y, *, lw=0.6):
+    if not geo_x:
+        return
+    x = [np.nan if v is None else v for v in geo_x]
+    y = [np.nan if v is None else v for v in geo_y]
+    ax.plot(x, y, color="#444444", linewidth=lw, zorder=3)
+
+
+def _apply_patch(fig, axes, patch: dict | None, *, map_extent=None):
+    """Apply spec ``patch`` (title, annotations, shapes, font, colorbar size)."""
     if not patch:
         return fig
-    layout = patch.get("layout")
-    if layout:
-        fig.update_layout(**layout)
-    annotations = patch.get("annotations")
-    if annotations:
-        existing = list(fig.layout.annotations or ())
-        fig.update_layout(annotations=list(existing) + list(annotations))
-    shapes = patch.get("shapes")
-    if shapes:
-        existing = list(fig.layout.shapes or ())
-        fig.update_layout(shapes=list(existing) + list(shapes))
+    layout = patch.get("layout") or {}
+    title = _title_text(layout.get("title") or patch.get("title"))
+    if title:
+        fig.suptitle(title)
+    font = layout.get("font") or {}
+    if font.get("size"):
+        apply_style(int(font["size"]))
+    anns = list(patch.get("annotations") or layout.get("annotations") or [])
+    shapes = list(patch.get("shapes") or layout.get("shapes") or [])
+    ax0 = np.ravel(axes)[0]
+    for ann in anns:
+        if not isinstance(ann, dict) or not ann.get("text"):
+            continue
+        x = float(ann.get("x") if ann.get("x") is not None else 0.5)
+        y = float(ann.get("y") if ann.get("y") is not None else 0.5)
+        xref = str(ann.get("xref") or "")
+        transform = ax0.transAxes if "domain" in xref or xref == "paper" else None
+        ax0.text(
+            x,
+            y,
+            str(ann["text"]),
+            transform=transform or ax0.transData,
+            zorder=7,
+        )
+    from matplotlib.patches import Rectangle
+
+    for shape in shapes:
+        if not isinstance(shape, dict) or shape.get("type") not in (None, "rect"):
+            continue
+        x0, x1 = float(shape.get("x0", 0)), float(shape.get("x1", 0))
+        y0, y1 = float(shape.get("y0", 0)), float(shape.get("y1", 0))
+        ax0.add_patch(
+            Rectangle(
+                (min(x0, x1), min(y0, y1)),
+                abs(x1 - x0),
+                abs(y1 - y0),
+                fill=False,
+                edgecolor="black",
+                linewidth=1.5,
+                zorder=6,
+            )
+        )
     return fig
 
 
 def _compile_timeseries(prepared, spec, fontsize):
-    import plotly.graph_objects as go
+    import matplotlib.pyplot as plt
 
+    apply_style(fontsize)
     da = prepared["da"]
     sdim = prepared["sdim"]
     xvals, default_xlabel = timeseries_axis(da, sdim)
@@ -503,43 +535,31 @@ def _compile_timeseries(prepared, spec, fontsize):
     else:
         xlabel = resolve_axis_label(xlabel, default_xlabel)
     ylabel = resolve_axis_label(spec.get("ylabel"), variable_label_for_display(da))
-    fig = go.Figure()
-    fig.add_trace(
-        go.Scatter(
-            x=as_plotly_x(xvals),
-            y=np.asarray(da.values, dtype=float),
-            mode="lines+markers",
-            name=qty,
-            marker={"size": 8},
-            line={"width": 2},
-        )
+    figsize = spec.get("layout", {}).get("figsize") or (10.0, 5.0)
+    fig, ax = plt.subplots(figsize=tuple(figsize), layout="constrained")
+    xplot = as_plot_x(xvals)
+    ax.plot(
+        xplot, np.asarray(da.values, dtype=float), marker="o", markersize=8, linewidth=2, label=qty
     )
+    if np.asarray(xvals).dtype.kind == "M":
+        apply_date_ticks(ax)
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel(ylabel)
     legend = spec.get("legend")
-    showlegend = legend not in (None, "none", "off")
-    fig.update_layout(
-        template=register_template(fontsize),
-        title=spec.get("title") or f"{qty} (timeseries)",
-        xaxis_title=xlabel,
-        yaxis_title=ylabel,
-        showlegend=showlegend,
-        autosize=spec.get("layout", {}).get("autosize", True),
+    if legend not in (None, "none", "off"):
+        ax.legend()
+    fig.suptitle(spec.get("title") or f"{qty} (timeseries)")
+    fig._ws_tight = (
+        spec.get("layout", {}).get("autosize", True)
+        and spec.get("layout", {}).get("figsize") is None
     )
     return fig
 
 
-def as_plotly_x(values):
-    arr = np.asarray(values)
-    if arr.dtype.kind == "M":
-        return np.datetime_as_string(arr, unit="s").tolist()
-    if arr.dtype.kind == "m":
-        return (arr / np.timedelta64(1, "D")).astype(float).tolist()
-    return arr.tolist()
-
-
 def _compile_heatmap(prepared, spec, fontsize, *, trace_type="heatmap"):
-    import plotly.graph_objects as go
-    from plotly.subplots import make_subplots
+    import matplotlib.pyplot as plt
 
+    apply_style(fontsize)
     da = prepared["da"]
     lat_dim = prepared["lat_dim"]
     lon_dim = prepared["lon_dim"]
@@ -582,16 +602,12 @@ def _compile_heatmap(prepared, spec, fontsize, *, trace_type="heatmap"):
         (spec.get("style") or {}).get("colormap"),
         stretch=spec.get("vmin") is not None or spec.get("vmax") is not None,
     )
+    if spec.get("vmin") is not None:
+        scale["cmin"] = spec["vmin"]
+    if spec.get("vmax") is not None:
+        scale["cmax"] = spec["vmax"]
     label = spec.get("cbar_label") or variable_label_for_display(da)
-    fig = make_subplots(
-        rows=nrows,
-        cols=ncols,
-        shared_xaxes=True,
-        shared_yaxes=True,
-        horizontal_spacing=0.04,
-        vertical_spacing=0.12 if nrows > 1 else 0.08,
-        subplot_titles=titles + [""] * (nrows * ncols - n),
-    )
+    cmap, norm = mpl_cmap_norm(scale)
     lon = np.asarray(da[lon_dim].values, dtype=float)
     lat = np.asarray(da[lat_dim].values, dtype=float)
     overlays = spec.get("geo", {}).get("overlays", "auto")
@@ -603,126 +619,87 @@ def _compile_heatmap(prepared, spec, fontsize, *, trace_type="heatmap"):
     xlabel = resolve_axis_label(spec.get("xlabel"), "Longitude")
     ylabel = resolve_axis_label(spec.get("ylabel"), "Latitude")
 
+    sw, sh = figsize_from_extent(*extent)
+    user_figsize = spec.get("layout", {}).get("figsize")
+    if user_figsize is not None:
+        fig_w, fig_h = float(user_figsize[0]), float(user_figsize[1])
+    else:
+        fig_w, fig_h = sw * ncols, sh * nrows
+    fig, axes = plt.subplots(
+        nrows, ncols, figsize=(fig_w, fig_h), squeeze=False, layout="constrained"
+    )
+    mappable = None
     for i, _step in enumerate(steps):
         row, col = divmod(i, ncols)
-        row += 1
-        col += 1
+        ax = axes[row, col]
         slab = da if sdim is None else da.isel({sdim: i})
         slab = slab.transpose(lat_dim, lon_dim)
         z = np.asarray(slab.values, dtype=float)
         if trace_type == "contour":
-            trace = go.Contour(
-                x=lon,
-                y=lat,
-                z=z,
-                coloraxis="coloraxis",
-                contours={"coloring": "fill", "showlines": True},
-                line={"color": "black", "width": 0.4},
-                hoverongaps=False,
-            )
+            filled = ax.contourf(lon, lat, z, cmap=cmap, norm=norm, levels=12)
+            ax.contour(lon, lat, z, levels=filled.levels, colors="black", linewidths=0.4)
+            mappable = filled
         else:
-            trace = go.Heatmap(
-                x=lon,
-                y=lat,
-                z=z,
-                coloraxis="coloraxis",
-                hoverongaps=False,
-            )
-        fig.add_trace(trace, row=row, col=col)
-        if geo_x:
-            fig.add_trace(
-                go.Scatter(
-                    x=geo_x,
-                    y=geo_y,
-                    mode="lines",
-                    line={"color": "#444444", "width": 0.6},
-                    hoverinfo="skip",
-                    showlegend=False,
-                ),
-                row=row,
-                col=col,
-            )
+            mappable = ax.pcolormesh(lon, lat, z, cmap=cmap, norm=norm, shading="nearest")
+        draw_geo_lines(ax, geo_x, geo_y)
         if cities:
-            fig.add_trace(
-                go.Scatter(
-                    x=[lon_ for _, lon_ in cities.values()],
-                    y=[lat_ for lat_, _ in cities.values()],
-                    mode="markers+text",
-                    marker={"color": "black", "size": 8},
-                    text=list(cities.keys()),
-                    textposition="top left",
-                    hoverinfo="text",
-                    showlegend=False,
-                ),
-                row=row,
-                col=col,
+            ax.scatter(
+                [lon_ for _, lon_ in cities.values()],
+                [lat_ for lat_, _ in cities.values()],
+                c="black",
+                s=64,
+                zorder=5,
             )
-        fig.update_xaxes(range=[extent[0], extent[1]], row=row, col=col)
-        xref = "x" if i == 0 else f"x{i + 1}"
-        fig.update_yaxes(
-            range=[extent[2], extent[3]],
-            scaleanchor=xref,
-            scaleratio=1,
-            constrain="domain",
-            row=row,
-            col=col,
-        )
-        show_x = row == nrows
-        show_y = col == 1
-        fig.update_xaxes(title_text=xlabel if show_x else "", row=row, col=col)
-        fig.update_yaxes(title_text=ylabel if show_y else "", row=row, col=col)
+            for name, (clat, clon) in cities.items():
+                ax.annotate(
+                    name, (clon, clat), textcoords="offset points", xytext=(-4, 4), ha="right"
+                )
+        ax.set_xlim(extent[0], extent[1])
+        ax.set_ylim(extent[2], extent[3])
+        ax.set_aspect("equal", adjustable="box")
+        if titles[i]:
+            ax.set_title(titles[i])
+        if row == nrows - 1:
+            ax.set_xlabel(xlabel)
+        if col == 0:
+            ax.set_ylabel(ylabel)
+        for box in boxes:
+            n_, w, s_, e = box
+            from matplotlib.patches import Rectangle
+
+            ax.add_patch(
+                Rectangle(
+                    (w, s_), e - w, n_ - s_, fill=False, edgecolor="black", linewidth=1.5, zorder=6
+                )
+            )
 
     for j in range(n, nrows * ncols):
         row, col = divmod(j, ncols)
-        fig.update_xaxes(visible=False, row=row + 1, col=col + 1)
-        fig.update_yaxes(visible=False, row=row + 1, col=col + 1)
+        axes[row, col].set_visible(False)
+        axes[row, col].set_axis_off()
 
-    sw, sh = figsize_from_extent(*extent)
-    figsize = spec.get("layout", {}).get("figsize")
-    autosize = spec.get("layout", {}).get("autosize", True)
-    layout_kw = {
-        "template": register_template(fontsize),
-        "title": spec.get("title") or None,
-        "coloraxis": coloraxis(scale, label, n, spec.get("vmin"), spec.get("vmax")),
-        "showlegend": False,
-        "autosize": autosize and figsize is None,
-    }
-    if figsize is not None:
-        dpi = spec.get("style", {}).get("dpi") or DEFAULT_DPI
-        layout_kw["width"] = int(float(figsize[0]) * dpi)
-        layout_kw["height"] = int(float(figsize[1]) * dpi)
-        layout_kw["autosize"] = False
-    else:
-        dpi = spec.get("style", {}).get("dpi") or DEFAULT_DPI
-        layout_kw["width"] = int(sw * ncols * dpi)
-        layout_kw["height"] = int(sh * nrows * dpi)
-    fig.update_layout(**layout_kw)
-
-    shapes = []
-    for box in boxes:
-        n_, w, s_, e = box
-        shapes.append(
-            {
-                "type": "rect",
-                "xref": "x",
-                "yref": "y",
-                "x0": w,
-                "x1": e,
-                "y0": s_,
-                "y1": n_,
-                "line": {"color": "black", "width": 1.5},
-                "fillcolor": "rgba(0,0,0,0)",
-            }
-        )
-    if shapes:
-        fig.update_layout(shapes=shapes)
-    return fig, scale, (nrows, ncols), n
+    visible = [ax for ax in axes.ravel() if ax.get_visible()]
+    ticks = scale.get("bounds")
+    add_shared_colorbar(
+        fig,
+        mappable,
+        visible,
+        label=label,
+        location="right" if n <= 1 else "bottom",
+        ticks=ticks,
+        **colorbar_size_kwargs(spec),
+    )
+    if spec.get("title"):
+        fig.suptitle(spec["title"])
+    fig._ws_tight = spec.get("layout", {}).get("autosize", True) and user_figsize is None
+    return fig, scale, (nrows, ncols), n, axes
 
 
 def compile_figure(spec: dict, datasets: dict):
     """Compile ``spec`` against ``datasets`` ``{id: Dataset}``.
 
     Returns ``(fig, resolved_spec)``. ``resolved_spec`` has defaults filled in.
+    ``fig`` is a matplotlib Figure.
     """
     spec = overlay_spec({"version": 1, "layout": {}, "style": {}, "geo": {}}, spec)
     traces = spec.get("traces") or [{"type": "heatmap", "input": "a"}]
@@ -742,22 +719,24 @@ def compile_figure(spec: dict, datasets: dict):
         spec_input = {**spec_input, "id": spec_input.get("id", input_id)}
     fontsize = int((spec.get("style") or {}).get("fontsize") or DEFAULT_FONTSIZE)
     prepared = _prepare_field(ds, spec_input, spec.get("geo") or {}, style)
+    axes = None
     if style == "timeseries":
         fig = _compile_timeseries(prepared, spec, fontsize)
         scale = None
         nrows = ncols = n = 1
+        axes = fig.axes
     elif style in ("heatmap", "contour"):
-        fig, scale, (nrows, ncols), n = _compile_heatmap(prepared, spec, fontsize, trace_type=style)
-    else:
-        raise UsageError(f"plotly compiler does not yet support style {style!r}")
-
-    if spec.get("annotations"):
-        fig.update_layout(
-            annotations=list(fig.layout.annotations or ()) + list(spec["annotations"])
+        fig, scale, (nrows, ncols), n, axes = _compile_heatmap(
+            prepared, spec, fontsize, trace_type=style
         )
+    else:
+        raise UsageError(f"plot compiler does not yet support style {style!r}")
+
+    _apply_patch(fig, axes, spec.get("patch"), map_extent=prepared.get("extent"))
+    if spec.get("annotations") and axes is not None:
+        _apply_patch(fig, axes, {"annotations": spec["annotations"]})
     if spec.get("shapes") and style == "timeseries":
-        fig.update_layout(shapes=list(fig.layout.shapes or ()) + list(spec["shapes"]))
-    fig = _apply_plotly_patch(fig, spec.get("plotly"))
+        _apply_patch(fig, axes, {"shapes": spec["shapes"]})
 
     resolved = overlay_spec(spec, {})
     resolved["traces"] = traces
@@ -787,4 +766,7 @@ def compile_figure(spec: dict, datasets: dict):
             resolved["inputs"] = [
                 {**spec_input, "variable": spec_input.get("variable") or prepared.get("variable")}
             ]
+        cbar = colorbar_spec(spec)
+        if cbar:
+            resolved["layout"]["colorbar"] = cbar
     return fig, resolved

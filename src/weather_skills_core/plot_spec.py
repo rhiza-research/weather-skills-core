@@ -1,4 +1,4 @@
-"""Weather-skills plot spec: dumpable JSON that compiles to a Plotly figure."""
+"""Weather-skills plot spec: dumpable JSON that compiles to a matplotlib figure."""
 
 from __future__ import annotations
 
@@ -225,7 +225,7 @@ def spec_from_flags(
     columns=None,
     vmin=None,
     vmax=None,
-    plotly_patch=None,
+    patch=None,
 ) -> dict:
     """Build a (possibly partial) spec from CLI flags."""
     inputs = []
@@ -290,8 +290,8 @@ def spec_from_flags(
         spec["geo"]["mask_geojson"] = str(mask_geojson)
     if draw_boxes:
         spec["geo"]["draw_boxes"] = list(draw_boxes)
-    if plotly_patch:
-        spec["plotly"] = plotly_patch
+    if patch:
+        spec["patch"] = patch
     return spec
 
 

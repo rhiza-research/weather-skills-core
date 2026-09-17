@@ -1,4 +1,4 @@
-"""Tests for the Plotly plot spec / compiler."""
+"""Tests for the matplotlib plot spec / compiler."""
 
 from __future__ import annotations
 
@@ -55,9 +55,11 @@ def test_spec_roundtrip_json(tmp_path):
     loaded = load_spec(path)
     assert loaded.data["title"] == "Precip"
     assert loaded.zarr_paths()[0].name == "in.zarr"
-    merged = overlay_spec(loaded.data, {"title": "Edited", "plotly": {"layout": {"width": 800}}})
+    merged = overlay_spec(
+        loaded.data, {"title": "Edited", "patch": {"layout": {"title": "Edited"}}}
+    )
     assert merged["title"] == "Edited"
-    assert merged["plotly"]["layout"]["width"] == 800
+    assert merged["patch"]["layout"]["title"] == "Edited"
 
 
 def test_plot_spec_holder_zarr_paths():
@@ -74,8 +76,19 @@ def test_precip_default_colorscale_is_chirps():
     assert scale["bounds"][0] == 2
 
 
+def _quadmeshes(fig):
+    from matplotlib.collections import QuadMesh
+
+    return [
+        c
+        for ax in fig.axes
+        for c in ax.collections
+        if isinstance(c, QuadMesh) and ax.get_label() != "<colorbar>"
+    ]
+
+
 def test_compile_heatmap_facets_time():
-    plotly = pytest.importorskip("plotly")
+    pytest.importorskip("matplotlib")
     from weather_skills_core.plot_compile import compile_figure
 
     ds = make_gridded(n_time=5)
@@ -84,36 +97,55 @@ def test_compile_heatmap_facets_time():
     assert resolved["layout"]["facet"]["columns"] == 4
     assert resolved["layout"]["facet"]["rows"] == 2
     assert resolved["layout"]["facet"]["n_panels"] == 5
-    heatmaps = [t for t in fig.data if t.type == "heatmap"]
-    assert len(heatmaps) == 5
-    assert plotly.__name__
+    assert len(_quadmeshes(fig)) == 5
 
 
 def test_compile_timeseries_forecast_valid_time():
-    pytest.importorskip("plotly")
+    pytest.importorskip("matplotlib")
     from weather_skills_core.plot_compile import compile_figure
 
     ds = make_forecast()
     spec = spec_from_flags(variable="tp", style="timeseries")
     fig, resolved = compile_figure(spec, {"a": ds})
     assert resolved["traces"][0]["type"] == "timeseries"
-    assert fig.data[0].type == "scatter"
-    assert fig.layout.title.text.endswith("(timeseries)")
+    assert fig.axes[0].lines
+    assert fig._suptitle.get_text().endswith("(timeseries)")
 
 
-def test_compile_applies_plotly_patch():
-    pytest.importorskip("plotly")
+def test_compile_applies_patch():
+    pytest.importorskip("matplotlib")
     from weather_skills_core.plot_compile import compile_figure
 
     ds = make_gridded(n_time=1)
     spec = spec_from_flags(variable="precip", style="heatmap")
-    spec["plotly"] = {"layout": {"title": {"text": "Patched"}}}
+    spec["patch"] = {"layout": {"title": {"text": "Patched"}}}
     fig, _resolved = compile_figure(spec, {"a": ds})
-    assert fig.layout.title.text == "Patched"
+    assert fig._suptitle.get_text() == "Patched"
+
+
+def _colorbar_box(fig):
+    fig.canvas.draw()
+    ax = next(a for a in fig.axes if a.get_label() == "<colorbar>")
+    return ax.get_position()
+
+
+def test_compile_applies_colorbar_size_patch():
+    pytest.importorskip("matplotlib")
+    from weather_skills_core.plot_compile import compile_figure
+
+    ds = make_gridded(n_time=2)
+    spec = spec_from_flags(variable="precip", style="heatmap", columns=2)
+    fig_default, _ = compile_figure(spec, {"a": ds})
+    default = _colorbar_box(fig_default)
+    spec["patch"] = {"layout": {"coloraxis": {"colorbar": {"len": 0.45, "thickness": 12}}}}
+    fig_patched, resolved = compile_figure(spec, {"a": ds})
+    patched = _colorbar_box(fig_patched)
+    assert resolved["layout"]["colorbar"]["len"] == 0.45
+    assert patched.width < default.width
+    assert patched.height < default.height * 0.6
 
 
 def test_export_png_and_sidecar(tmp_path):
-    pytest.importorskip("plotly")
     pytest.importorskip("matplotlib")
     from weather_skills_core.plot_compile import compile_figure
     from weather_skills_core.plot_export import write_plot_outputs
@@ -130,34 +162,21 @@ def test_export_png_and_sidecar(tmp_path):
     assert data["style"]["colormap"]
 
 
-def test_compile_contour_uses_contour_traces():
-    pytest.importorskip("plotly")
+def test_compile_contour_uses_contour_collections():
+    pytest.importorskip("matplotlib")
+    from matplotlib.contour import QuadContourSet
+
     from weather_skills_core.plot_compile import compile_figure
 
     ds = make_gridded(n_time=1)
     spec = spec_from_flags(variable="precip", style="contour")
     fig, resolved = compile_figure(spec, {"a": ds})
     assert resolved["traces"][0]["type"] == "contour"
-    assert any(t.type == "contour" for t in fig.data)
-
-
-def test_export_plotly_json_layout_only(tmp_path):
-    pytest.importorskip("plotly")
-    from weather_skills_core.plot_compile import compile_figure
-    from weather_skills_core.plot_export import export_plotly_json
-
-    ds = make_gridded(n_time=1)
-    spec = spec_from_flags(variable="precip", style="heatmap")
-    fig, _resolved = compile_figure(spec, {"a": ds})
-    path = tmp_path / "fig.plotly.json"
-    export_plotly_json(fig, path, include_data=False)
-    payload = json.loads(path.read_text())
-    assert "layout" in payload
-    assert all("z" not in (t or {}) for t in payload.get("data") or [])
+    assert any(isinstance(c, QuadContourSet) for ax in fig.axes for c in ax.collections)
 
 
 def test_compile_heatmap_grid_blank_and_heatmap():
-    pytest.importorskip("plotly")
+    pytest.importorskip("matplotlib")
     from weather_skills_core.plot_recipes import blank_cell, compile_heatmap_grid, heatmap_cell
     from weather_skills_core.plot_style import resolve_colorscale
 
@@ -169,14 +188,14 @@ def test_compile_heatmap_grid_blank_and_heatmap():
         [[heatmap_cell(da, "latitude", "longitude"), blank_cell("n/a")]],
         extent=[9.5, 13.5, 0.5, 3.5],
         col_titles=["t0", "missing"],
-        coloraxes={"coloraxis": scale},
+        scales={"field": scale},
         overlays=False,
     )
-    assert any(t.type == "heatmap" for t in fig.data)
+    assert _quadmeshes(fig)
 
 
 def test_compile_line_and_mediogram():
-    pytest.importorskip("plotly")
+    pytest.importorskip("matplotlib")
     from weather_skills_core.plot_recipes import compile_line_figure, compile_mediogram
 
     fig = compile_line_figure(
@@ -185,17 +204,15 @@ def test_compile_line_and_mediogram():
         xlabel="t",
         ylabels=["mm", "mm"],
     )
-    assert len(fig.data) == 2
+    assert len(fig.axes[0].lines) == 2
     fc = np.arange(12.0).reshape(3, 4)
     mc = np.arange(12.0, 24.0).reshape(3, 4)
     medio = compile_mediogram(fc, mc, ["+0d", "+1d", "+2d", "+3d"], title="Medio")
-    boxes = [t for t in medio.data if t.type == "box"]
-    assert len(boxes) == 8
-    assert medio.layout.title.text == "Medio"
+    assert len(medio.axes[0].lines) >= 1
+    assert medio._suptitle.get_text() == "Medio"
 
 
 def test_export_png_timeseries_and_mediogram(tmp_path):
-    pytest.importorskip("plotly")
     pytest.importorskip("matplotlib")
     from weather_skills_core.plot_export import export_png
     from weather_skills_core.plot_recipes import compile_line_figure, compile_mediogram
@@ -217,7 +234,6 @@ def test_export_png_timeseries_and_mediogram(tmp_path):
 
 
 def test_export_png_heatmap_grid_with_blank(tmp_path):
-    pytest.importorskip("plotly")
     pytest.importorskip("matplotlib")
     from weather_skills_core.plot_export import export_png
     from weather_skills_core.plot_recipes import blank_cell, compile_heatmap_grid, heatmap_cell
@@ -231,7 +247,7 @@ def test_export_png_heatmap_grid_with_blank(tmp_path):
         [[heatmap_cell(da, "latitude", "longitude"), blank_cell("n/a")]],
         extent=[9.5, 13.5, 0.5, 3.5],
         col_titles=["t0", "missing"],
-        coloraxes={"coloraxis": scale},
+        scales={"field": scale},
         overlays=False,
     )
     out = tmp_path / "grid.png"

@@ -211,6 +211,91 @@ def _format_cbar_tick(value):
     return f"{number:g}"
 
 
+def colorbar_spec(obj: dict | None) -> dict | None:
+    """Return a colorbar-size dict from spec ``layout`` or ``patch``.
+
+    Accepts ``layout.colorbar``, ``layout.coloraxis.colorbar``, or a top-level
+    ``colorbar``. ``len`` / ``shrink`` is the long-side fraction (0–1);
+    ``thickness`` is the short side in pixels (>1) or figure fraction (≤1).
+    """
+    if not isinstance(obj, dict):
+        return None
+    if isinstance(obj.get("colorbar"), dict):
+        return dict(obj["colorbar"])
+    layout = obj.get("layout")
+    if isinstance(layout, dict):
+        if isinstance(layout.get("colorbar"), dict):
+            return dict(layout["colorbar"])
+        coloraxis = layout.get("coloraxis")
+        if isinstance(coloraxis, dict) and isinstance(coloraxis.get("colorbar"), dict):
+            return dict(coloraxis["colorbar"])
+    return colorbar_spec(obj.get("patch"))
+
+
+def colorbar_size_kwargs(spec=None, *, colorbar=None) -> dict:
+    """Matplotlib ``colorbar()`` kwargs from ``len``/``shrink`` and ``thickness``."""
+    cbar = colorbar if colorbar is not None else colorbar_spec(spec)
+    if not cbar:
+        return {}
+    kw = {}
+    length = cbar.get("len") if cbar.get("len") is not None else cbar.get("shrink")
+    if length is not None:
+        kw["shrink"] = float(length)
+    thickness = cbar.get("thickness")
+    if thickness is not None:
+        thick = float(thickness)
+        if thick > 1:
+            kw["aspect"] = max(4.0, 20.0 * (30.0 / thick))
+        elif thick > 0:
+            kw["fraction"] = thick
+    return kw
+
+
+def apply_colorbar_size(fig, spec=None, *, colorbar=None):
+    """Resize existing colorbar axes from ``len``/``shrink`` and ``thickness``."""
+    cbar = colorbar if colorbar is not None else colorbar_spec(spec)
+    if not cbar:
+        return
+    ax = next((a for a in fig.axes if a.get_label() == "<colorbar>"), None)
+    if ax is None:
+        return
+    length = cbar.get("len") if cbar.get("len") is not None else cbar.get("shrink")
+    thickness = cbar.get("thickness")
+    if length is None and thickness is None:
+        return
+    fig.canvas.draw()
+    pos = ax.get_position()
+    horizontal = pos.width >= pos.height
+    fig_w, fig_h = fig.get_size_inches()
+    dpi = float(fig.dpi or DEFAULT_DPI)
+    x0, y0, width, height = pos.x0, pos.y0, pos.width, pos.height
+    if length is not None:
+        frac = float(length)
+        if 0 < frac <= 1:
+            if horizontal:
+                new_w = width * frac
+                x0 = x0 + (width - new_w) / 2
+                width = new_w
+            else:
+                new_h = height * frac
+                y0 = y0 + (height - new_h) / 2
+                height = new_h
+    if thickness is not None:
+        thick = float(thickness)
+        if thick > 1:
+            if horizontal:
+                height = thick / (dpi * fig_h)
+            else:
+                width = thick / (dpi * fig_w)
+        elif thick > 0:
+            if horizontal:
+                height = thick
+            else:
+                width = thick
+    ax.set_in_layout(False)
+    ax.set_position([x0, y0, width, height])
+
+
 def add_shared_colorbar(fig, mappable, axes, label="", *, location=None, **kwargs):
     """Attach a colorbar in a matplotlib-reserved slot (not a figure-fraction box).
 
