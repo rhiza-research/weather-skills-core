@@ -15,6 +15,22 @@ from weather_skills_core.plot_style import (
 )
 
 _INDEX_INT_RE = re.compile(r"[+-]?[0-9]+")
+_NON_ZARR_SUFFIXES = {".geojson", ".json", ".shp", ".gpkg", ".kml"}
+
+
+def _zarr_spec_path(raw):
+    """Return a Zarr ``Path`` from a spec field, or ``None`` for ids / GeoJSON."""
+    if raw is None:
+        return None
+    text = str(raw).strip()
+    if not text:
+        return None
+    if "/" not in text and "\\" not in text and not text.endswith(".zarr"):
+        return None
+    path = Path(text)
+    if path.suffix.lower() in _NON_ZARR_SUFFIXES:
+        return None
+    return path
 
 
 class PlotSpec:
@@ -30,10 +46,33 @@ class PlotSpec:
 
     def zarr_paths(self):
         paths = []
+        seen = set()
+
+        def add(raw):
+            path = _zarr_spec_path(raw)
+            if path is None:
+                return
+            key = str(path)
+            if key in seen:
+                return
+            seen.add(key)
+            paths.append(path)
+
         for item in self.data.get("inputs") or []:
-            raw = item.get("path") if isinstance(item, dict) else None
-            if raw:
-                paths.append(Path(raw))
+            if isinstance(item, dict):
+                add(item.get("path"))
+        for item in self.data.get("layers") or []:
+            if not isinstance(item, dict):
+                continue
+            kind = str(item.get("kind") or "").lower()
+            if kind in {"outline", "mask"}:
+                continue
+            add(item.get("path"))
+        for trace in self.data.get("traces") or []:
+            if isinstance(trace, dict):
+                add(trace.get("x"))
+                add(trace.get("y"))
+                add(trace.get("path"))
         return paths
 
     def to_dict(self) -> dict:

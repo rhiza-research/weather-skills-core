@@ -331,6 +331,10 @@ _ANNOTATION_META = frozenset(
     {"text", "s", "x", "y", "xy", "xref", "axes", "panel", "transform", "showarrow"}
 )
 
+# Object-form axes.xlabel / axes.ylabel: text plus position knobs.
+AXIS_LABEL_META = frozenset({"text", "loc", "pad", "coords"})
+AXIS_LABEL_KEYS = AXIS_LABEL_META | TEXT_KEYS
+
 # Dumped on every resolved spec so agents can see the axis knobs.
 AXES_TEMPLATE = {
     "xscale": None,
@@ -537,6 +541,45 @@ def _apply_tick_values(ax, which: str, raw, loc: str) -> None:
         label_setter(labels, minor=minor)
 
 
+def _apply_axis_label(ax, which: str, raw, loc: str) -> None:
+    """Apply ``axes.xlabel`` / ``axes.ylabel`` as a string or ``{text, loc, pad, coords, …}``.
+
+    Omit ``text`` to keep the already-drawn label and only change position or
+    font (the windrose ``Frequency (%)`` case). ``coords`` is ``[x, y]`` in
+    axes fraction.
+    """
+    axis = ax.xaxis if which == "x" else ax.yaxis
+    setter = ax.set_xlabel if which == "x" else ax.set_ylabel
+    if isinstance(raw, str):
+        setter(raw)
+        return
+    if not isinstance(raw, dict):
+        raise UsageError(f"{loc} must be a string or object")
+    opts = pick(raw, AXIS_LABEL_KEYS, loc=loc)
+    text = opts.pop("text", None)
+    pad = opts.pop("pad", None)
+    label_loc = opts.pop("loc", None)
+    coords = opts.pop("coords", None)
+    text_kw = {k: v for k, v in opts.items() if k in TEXT_KEYS}
+    if text is not None or pad is not None or label_loc is not None or text_kw:
+        kw = dict(text_kw)
+        if pad is not None:
+            kw["labelpad"] = pad
+        if label_loc is not None:
+            kw["loc"] = str(label_loc)
+        if text is None:
+            text = axis.get_label().get_text()
+        setter(text, **kw)
+    if coords is not None:
+        if not isinstance(coords, (list, tuple)) or len(coords) != 2:
+            raise UsageError(f"{loc}.coords must be [x, y] in axes fraction")
+        try:
+            x, y = float(coords[0]), float(coords[1])
+        except (TypeError, ValueError) as exc:
+            raise UsageError(f"{loc}.coords must be [x, y] in axes fraction") from exc
+        axis.set_label_coords(x, y)
+
+
 def apply_axes(ax, opts: dict | None, *, skip_legend: bool = False) -> None:
     """Apply ``spec.axes`` to one matplotlib Axes."""
     if not opts:
@@ -548,9 +591,9 @@ def apply_axes(ax, opts: dict | None, *, skip_legend: bool = False) -> None:
     if opts.get("yscale"):
         ax.set_yscale(str(opts["yscale"]))
     if opts.get("xlabel") is not None:
-        ax.set_xlabel(opts["xlabel"])
+        _apply_axis_label(ax, "x", opts["xlabel"], "axes.xlabel")
     if opts.get("ylabel") is not None:
-        ax.set_ylabel(opts["ylabel"])
+        _apply_axis_label(ax, "y", opts["ylabel"], "axes.ylabel")
     if opts.get("title") is not None:
         ax.set_title(opts["title"])
     if opts.get("xlim") is not None:

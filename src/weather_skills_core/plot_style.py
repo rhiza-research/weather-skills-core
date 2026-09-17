@@ -25,10 +25,12 @@ def _rgb(*rows: tuple[int, int, int]) -> list[str]:
     return [f"#{r:02x}{g:02x}{b:02x}" for r, g, b in rows]
 
 
-# CHC ``ppt_total_cmap.pro`` (Will Turner, 6 Feb 2018). Under (<2 mm) folds the
-# IDL null/negative and 0–2 whites; over (>2500 mm) is pale pink.
+# CHC ``ppt_total_cmap.pro`` (Will Turner, 6 Feb 2018). 17 colors / 16 interior
+# breaks: null/negative white, 0–2 mm white, then the published classes;
+# over (>2500 mm) is pale pink. Data-dependent IDL min/max ends are under/over.
 PRECIP_COLORS = _rgb(
-    (255, 255, 255),
+    (255, 255, 255),  # null / negative
+    (255, 255, 255),  # 0–2 mm
     (200, 255, 190),
     (120, 245, 115),
     (30, 180, 30),
@@ -45,7 +47,7 @@ PRECIP_COLORS = _rgb(
     (230, 140, 140),
     (255, 230, 230),
 )
-PRECIP_BOUNDS = [2, 5, 10, 25, 50, 75, 100, 150, 200, 300, 500, 750, 1000, 1500, 2500]
+PRECIP_BOUNDS = [0, 2, 5, 10, 25, 50, 75, 100, 150, 200, 300, 500, 750, 1000, 1500, 2500]
 PRECIP_SHORT_BOUNDS = [0.5, 1, 2, 3, 5, 8, 10, 15, 20, 30, 50, 75, 100, 150, 200]
 PRECIP_LONG_MIN_DAYS = 5
 
@@ -307,13 +309,16 @@ def mpl_cmap_norm(scale: dict):
     bounds = scale.get("bounds") if scale else None
     cmin = scale.get("cmin") if scale else None
     cmax = scale.get("cmax") if scale else None
+    cmap_name = str((scale or {}).get("name") or "discrete")
     if bounds and colors and len(colors) == len(bounds) - 1:
-        cmap = ListedColormap(list(colors)).with_extremes(bad=(0.0, 0.0, 0.0, 0.0))
+        cmap = ListedColormap(list(colors), name=cmap_name).with_extremes(
+            bad=(0.0, 0.0, 0.0, 0.0)
+        )
         return cmap, BoundaryNorm([float(b) for b in bounds], cmap.N)
     if bounds and colors and len(colors) >= len(bounds) + 1:
         under, over = colors[0], colors[-1]
         interior = colors[1 : 1 + (len(bounds) - 1)]
-        cmap = ListedColormap(list(interior)).with_extremes(
+        cmap = ListedColormap(list(interior), name=cmap_name).with_extremes(
             under=under, over=over, bad=(0.0, 0.0, 0.0, 0.0)
         )
         return cmap, BoundaryNorm([float(b) for b in bounds], cmap.N)

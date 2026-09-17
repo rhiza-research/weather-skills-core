@@ -67,6 +67,22 @@ def test_plot_spec_holder_zarr_paths():
     assert spec.zarr_paths()[0].as_posix().endswith("a.zarr")
 
 
+def test_plot_spec_zarr_paths_layers_and_xy_skip_geojson():
+    spec = PlotSpec(
+        {
+            "inputs": [{"id": "a", "path": "/tmp/a.zarr"}],
+            "layers": [
+                {"kind": "heatmap", "path": "/tmp/a.zarr"},
+                {"kind": "scatter", "path": "/tmp/stations.zarr"},
+                {"kind": "outline", "path": "/tmp/kenya.geojson"},
+            ],
+            "traces": [{"type": "xy", "x": "/tmp/x.zarr", "y": "/tmp/y.zarr"}],
+        }
+    )
+    names = [p.name for p in spec.zarr_paths()]
+    assert names == ["a.zarr", "stations.zarr", "x.zarr", "y.zarr"]
+
+
 def test_parse_plot_spec_and_dump_dest(tmp_path):
     from weather_skills_core.plot_spec import dump_spec_dest, parse_plot_spec
 
@@ -112,9 +128,10 @@ def test_precip_default_colorscale_is_chirps():
     da.attrs["standard_name"] = "lwe_thickness_of_precipitation_amount"
     scale = resolve_colorscale(da, None)
     assert scale["name"] == "chirps_total"
-    assert scale["bounds"][0] == 2
+    assert scale["bounds"][0] == 0
     assert scale["colors"][0] == "#ffffff"
-    assert scale["colors"][1] == "#c8ffbe"
+    assert scale["colors"][1] == "#ffffff"
+    assert scale["colors"][2] == "#c8ffbe"
     assert scale["colors"][-1] == "#ffe6e6"
     aliased = resolve_colorscale(da, "ppt_total")
     assert aliased["colors"] == scale["colors"]
@@ -477,6 +494,43 @@ def test_pick_rejects_unknown_and_non_json():
         pick({"linewidth": 2, "bogus": 1}, LINE_KEYS, loc="line")
     with pytest.raises(UsageError, match="must be JSON"):
         pick({"linewidth": object()}, LINE_KEYS, loc="line")
+
+
+def test_apply_axes_xlabel_string_and_object():
+    pytest.importorskip("matplotlib")
+    import matplotlib.pyplot as plt
+
+    from weather_skills_core import UsageError
+    from weather_skills_core.plot_mpl import apply_axes
+
+    fig, ax = plt.subplots()
+    apply_axes(ax, {"xlabel": "Lon", "ylabel": "Lat"})
+    assert ax.get_xlabel() == "Lon"
+    assert ax.get_ylabel() == "Lat"
+
+    apply_axes(ax, {"ylabel": {"text": "Frequency (%)", "pad": 12, "rotation": 0}})
+    assert ax.get_ylabel() == "Frequency (%)"
+    assert ax.yaxis.label.get_rotation() == 0
+
+    apply_axes(ax, {"ylabel": {"coords": [1.15, 0.5]}})
+    assert ax.get_ylabel() == "Frequency (%)"
+    pos = ax.yaxis.label.get_position()
+    assert pos == pytest.approx((1.15, 0.5))
+
+    fig_p = plt.figure()
+    ax_p = fig_p.add_subplot(111, projection="polar")
+    ax_p.set_ylabel("Frequency (%)")
+    apply_axes(ax_p, {"ylabel": {"coords": [1.15, 0.5], "rotation": 0}})
+    assert ax_p.get_ylabel() == "Frequency (%)"
+    assert ax_p.yaxis.label.get_position() == pytest.approx((1.15, 0.5))
+    assert ax_p.yaxis.label.get_rotation() == 0
+    plt.close(fig_p)
+
+    with pytest.raises(UsageError, match="unknown key"):
+        apply_axes(ax, {"xlabel": {"text": "x", "bogus": 1}})
+    with pytest.raises(UsageError, match="must be a string or object"):
+        apply_axes(ax, {"xlabel": ["Lon"]})
+    plt.close(fig)
 
 
 def test_apply_rc_sets_and_rejects_backend():
