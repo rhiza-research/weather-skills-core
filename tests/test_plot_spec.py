@@ -244,6 +244,10 @@ def test_export_png_and_sidecar(tmp_path):
     data = json.loads(sidecar.read_text())
     assert data["title"] == "Map"
     assert data["style"]["colormap"]
+    assert "xticks" in data["axes"]
+    assert "yticks" in data["axes"]
+    assert "tick_params" in data["axes"]
+    assert "xlocator" in data["axes"]
 
 
 def test_compile_contour_uses_contour_collections():
@@ -569,3 +573,57 @@ def test_compile_line_twin_and_mediogram_colors():
     facecolor = box.get_facecolor()
     assert facecolor[0] > 0.9 and facecolor[2] > 0.9
     assert facecolor[1] < 0.2
+
+
+def test_compile_dumps_axes_ticks_and_applies_xticks():
+    pytest.importorskip("matplotlib")
+    from weather_skills_core.plot_compile import compile_figure
+    from weather_skills_core.plot_mpl import AXES_TEMPLATE, resolve_axes_block
+
+    dumped = resolve_axes_block({})
+    assert dumped["xticks"] is None
+    assert dumped["yticks"] is None
+    assert dumped["tick_params"] is None
+    assert dumped["xlocator"] is None
+    assert set(AXES_TEMPLATE) <= set(dumped)
+
+    ds = make_gridded(n_time=1)
+    spec = spec_from_flags(
+        variable="precip",
+        style="timeseries",
+        reduce=["latitude", "longitude"],
+    )
+    spec["axes"] = {"yticks": [0.0, 0.5, 1.0], "xticks": {"values": [1, 2], "labels": ["a", "b"]}}
+    fig, resolved = compile_figure(spec, {"a": ds})
+    assert resolved["axes"]["yticks"] == [0.0, 0.5, 1.0]
+    yticks = [float(t) for t in fig.axes[0].get_yticks() if fig.axes[0].get_ylim()[0] <= t <= fig.axes[0].get_ylim()[1]]
+    assert yticks == [0.0, 0.5, 1.0]
+    assert [t.get_text() for t in fig.axes[0].get_xticklabels()] == ["a", "b"]
+
+
+def test_heatmap_grid_and_sidecar_use_shared_axes_spec(tmp_path):
+    pytest.importorskip("matplotlib")
+    from weather_skills_core.plot_export import write_plot_outputs
+    from weather_skills_core.plot_recipes import compile_heatmap_grid, heatmap_cell
+    from weather_skills_core.plot_style import resolve_colorscale
+
+    ds = make_gridded(n_time=1)
+    da = ds["precip"].isel(time=0)
+    scale = resolve_colorscale(da, None)
+    spec = {"axes": {"spines": {"top": False}}}
+    fig = compile_heatmap_grid(
+        [[heatmap_cell(da, "latitude", "longitude")]],
+        extent=[9.5, 13.5, 0.5, 3.5],
+        scales={"field": scale},
+        overlays=False,
+        spec=spec,
+    )
+    ax = next(a for a in fig.axes if a.get_label() != "<colorbar>")
+    assert ax.spines["top"].get_visible() is False
+    out = tmp_path / "grid.png"
+    write_plot_outputs(fig, {"title": "grid", "layout": {}}, out, spec=spec)
+    dumped = json.loads(out.with_name("grid.plot.json").read_text())
+    assert dumped["axes"]["spines"] == {"top": False}
+    assert "xticks" in dumped["axes"]
+
+

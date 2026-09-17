@@ -28,6 +28,7 @@ from weather_skills_core.plot_mpl import (
     finish_figure,
     line_kwargs,
     mesh_kwargs,
+    resolve_axes_block,
 )
 from weather_skills_core.plot_spec import apply_index, overlay_spec, panel_shape, parse_index
 from weather_skills_core.plot_style import (
@@ -846,4 +847,5 @@ def compile_figure(spec: dict, datasets: dict):
         cbar = colorbar_spec(spec)
         if cbar:
             resolved["layout"]["colorbar"] = cbar
+    resolved["axes"] = resolve_axes_block(spec)
     return fig, resolved

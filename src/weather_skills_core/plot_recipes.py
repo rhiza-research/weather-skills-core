@@ -282,8 +282,7 @@ def compile_heatmap_grid(
     if title:
         fig.suptitle(title)
     fig._ws_tight = tight
-    if spec:
-        finish_figure(fig, spec, axes)
+    finish_figure(fig, spec or {}, axes)
     return fig
 
 
@@ -417,8 +416,7 @@ def compile_line_figure(
     if title:
         fig.suptitle(title)
     fig._ws_tight = tight
-    if spec:
-        finish_figure(fig, spec, axes)
+    finish_figure(fig, spec or {}, axes)
     return fig
 
 
@@ -522,6 +520,5 @@ def compile_mediogram(
     if title:
         fig.suptitle(title)
     fig._ws_tight = tight
-    if spec:
-        finish_figure(fig, spec, ax)
+    finish_figure(fig, spec or {}, ax)
     return fig

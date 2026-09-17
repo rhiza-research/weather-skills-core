@@ -331,6 +331,33 @@ _ANNOTATION_META = frozenset(
     {"text", "s", "x", "y", "xy", "xref", "axes", "panel", "transform", "showarrow"}
 )
 
+# Dumped on every resolved spec so agents can see the axis knobs.
+AXES_TEMPLATE = {
+    "xscale": None,
+    "yscale": None,
+    "xlim": None,
+    "ylim": None,
+    "xlabel": None,
+    "ylabel": None,
+    "title": None,
+    "aspect": None,
+    "facecolor": None,
+    "grid": None,
+    "spines": None,
+    "xticks": None,
+    "yticks": None,
+    "xticklabels": None,
+    "yticklabels": None,
+    "tick_params": None,
+    "xlocator": None,
+    "ylocator": None,
+    "xformatter": None,
+    "yformatter": None,
+    "legend": None,
+    "twinx": None,
+    "twiny": None,
+}
+
 
 def assert_json_value(value, loc: str) -> None:
     """Reject callables and other non-JSON types."""
@@ -459,8 +486,55 @@ def _apply_formatter(axis, spec) -> None:
     elif kind in ("format", "strformat") and extra.get("fmt"):
         fmt = str(extra["fmt"])
         axis.set_major_formatter(FuncFormatter(lambda x, _p, f=fmt: f.format(x)))
+    elif kind in ("dayofyear", "doy", "calendar_day"):
+        import datetime as dt
+
+        from weather_skills_core.figure import format_plot_date
+
+        def _doy(x, _p):
+            day = int(round(float(x)))
+            if day < 1 or day > 366:
+                return ""
+            if day == 366:
+                return format_plot_date(dt.date(2023, 12, 31), year=False)
+            return format_plot_date(dt.date(2023, 1, 1) + dt.timedelta(days=day - 1), year=False)
+
+        axis.set_major_formatter(FuncFormatter(_doy))
     else:
-        raise UsageError(f"unknown formatter {kind!r}; use scalar, log, percent, date, or format")
+        raise UsageError(
+            f"unknown formatter {kind!r}; use scalar, log, percent, date, format, or dayofyear"
+        )
+
+
+def _tick_locs_and_labels(raw, loc: str):
+    """Parse ``xticks``/``yticks``: a list of values, or ``{values, labels, minor}``."""
+    if isinstance(raw, dict):
+        values = raw.get("values")
+        if values is None:
+            values = raw.get("ticks")
+        if values is None:
+            values = raw.get("locs")
+        labels = raw.get("labels") if raw.get("labels") is not None else raw.get("ticklabels")
+        minor = bool(raw.get("minor"))
+    elif isinstance(raw, list):
+        values, labels, minor = raw, None, False
+    else:
+        raise UsageError(f"{loc} must be a list of values or {{values, labels}}")
+    if values is not None and not isinstance(values, list):
+        raise UsageError(f"{loc}.values must be a list")
+    if labels is not None and not isinstance(labels, list):
+        raise UsageError(f"{loc}.labels must be a list")
+    return values, labels, minor
+
+
+def _apply_tick_values(ax, which: str, raw, loc: str) -> None:
+    values, labels, minor = _tick_locs_and_labels(raw, loc)
+    setter = ax.set_xticks if which == "x" else ax.set_yticks
+    label_setter = ax.set_xticklabels if which == "x" else ax.set_yticklabels
+    if values is not None:
+        setter(values, minor=minor)
+    if labels is not None:
+        label_setter(labels, minor=minor)
 
 
 def apply_axes(ax, opts: dict | None, *, skip_legend: bool = False) -> None:
@@ -524,6 +598,14 @@ def apply_axes(ax, opts: dict | None, *, skip_legend: bool = False) -> None:
     formatter = opts.get("formatter") if isinstance(opts.get("formatter"), dict) else {}
     _apply_formatter(ax.xaxis, opts.get("xformatter") or formatter.get("x"))
     _apply_formatter(ax.yaxis, opts.get("yformatter") or formatter.get("y"))
+    if opts.get("xticks") is not None:
+        _apply_tick_values(ax, "x", opts["xticks"], "axes.xticks")
+    if opts.get("yticks") is not None:
+        _apply_tick_values(ax, "y", opts["yticks"], "axes.yticks")
+    if opts.get("xticklabels") is not None:
+        ax.set_xticklabels(opts["xticklabels"])
+    if opts.get("yticklabels") is not None:
+        ax.set_yticklabels(opts["yticklabels"])
     for twin_key, factory in (("twinx", ax.twinx), ("twiny", ax.twiny)):
         twin = opts.get(twin_key)
         if not twin:
@@ -825,6 +907,63 @@ def box_kwargs(style: dict | None, *, loc: str = "box") -> dict:
         return {}
     raw = style.get("box") if isinstance(style.get("box"), dict) else style
     return pick({k: v for k, v in raw.items() if k in BOX_KEYS}, BOX_KEYS, loc=loc)
+
+
+def resolve_axes_block(spec: dict | None) -> dict | list:
+    """``axes`` for a dumped spec: template keys plus any user values."""
+
+    def _one(user):
+        out = dict(AXES_TEMPLATE)
+        if isinstance(user, dict):
+            out.update(user)
+        return out
+
+    user = (spec or {}).get("axes")
+    if user is None:
+        user = ((spec or {}).get("layout") or {}).get("axes")
+    if isinstance(user, list):
+        return [_one(item) for item in user]
+    return _one(user)
+
+
+def attach_figure_spec(resolved: dict, spec: dict | None = None) -> dict:
+    """Fill matplotlib layout knobs on a dumped spec (axes, annotations, shapes).
+
+    Every plot sidecar gets the same ``axes`` template so locators, tick lists,
+    spines, and the rest are editable without a per-skill special case.
+    """
+    src = spec or {}
+    out = dict(resolved)
+    if src.get("axes") is not None:
+        out["axes"] = src["axes"]
+    out["axes"] = resolve_axes_block(out)
+    for key in ("annotations", "shapes"):
+        if src.get(key):
+            out[key] = list(src[key])
+        else:
+            out.setdefault(key, list(out.get(key) or []))
+    for key in ("line", "mesh", "contour", "fill", "quiver", "windrose", "mediogram"):
+        if src.get(key) is not None:
+            out[key] = src[key]
+    layout = dict(out.get("layout") or {})
+    spec_layout = src.get("layout") or {}
+    if spec_layout.get("facecolor") is not None:
+        layout["facecolor"] = spec_layout["facecolor"]
+    else:
+        layout.setdefault("facecolor", layout.get("facecolor"))
+    if spec_layout.get("dpi") is not None:
+        layout["dpi"] = spec_layout["dpi"]
+    else:
+        layout.setdefault("dpi", None)
+    if spec_layout.get("colorbar") is not None:
+        layout["colorbar"] = spec_layout["colorbar"]
+    out["layout"] = layout
+    style = dict(out.get("style") or {})
+    rc = (src.get("style") or {}).get("rc") or src.get("rc")
+    if rc:
+        style["rc"] = rc
+    out["style"] = style
+    return out
 
 
 def apply_style_then_rc(spec: dict, *, chart: str, fontsize, template: str) -> None:

@@ -8,6 +8,7 @@ from pathlib import Path
 
 from weather_skills_core.errors import UsageError
 from weather_skills_core.figure import DEFAULT_DPI, save_figure
+from weather_skills_core.plot_mpl import attach_figure_spec
 from weather_skills_core.plot_spec import dump_spec, sidecar_path
 
 
@@ -40,6 +41,7 @@ def write_plot_outputs(
     *,
     datasets=None,
     dump_spec_path=None,
+    spec=None,
 ) -> Path:
     """Write ``--output`` PNG plus the resolved ``*.plot.json`` sidecar."""
     output = Path(output)
@@ -52,7 +54,7 @@ def write_plot_outputs(
         tight = False
     export_png(fig, output, tight=tight)
 
-    spec_out = dict(resolved_spec)
+    spec_out = attach_figure_spec(resolved_spec, spec)
     if datasets:
         spec_out = attach_upstream_history(spec_out, datasets)
     spec_path = dump_spec_path
