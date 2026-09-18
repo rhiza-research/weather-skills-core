@@ -40,7 +40,7 @@ from weather_skills_core.plot.maps import (
     subset_spatial,
     timeseries_axis,
 )
-from weather_skills_core.plot.spec import apply_index, parse_index, trace_at
+from weather_skills_core.plot.spec import apply_index, parse_index, resolve_bar_mode, trace_at
 from weather_skills_core.plot.theme import (
     ALONG_COLOR_CYCLE,
     DEFAULT_FONTSIZE,
@@ -62,6 +62,27 @@ from weather_skills_core.units import (
     variable_label_for_display,
     variable_units,
 )
+
+
+def _bar_x_numeric(xplot):
+    """Numeric x for ``ax.bar``: matplotlib dates, else float, else 0..n-1."""
+    arr = np.asarray(xplot)
+    if arr.dtype.kind == "M":
+        import matplotlib.dates as mdates
+
+        return np.asarray(mdates.date2num(arr), dtype=float)
+    if arr.dtype.kind == "O":
+        return np.arange(len(arr), dtype=float)
+    return np.asarray(arr, dtype=float)
+
+
+def _bar_unit_width(xnum):
+    xnum = np.asarray(xnum, dtype=float)
+    if xnum.size < 2:
+        return 1.0
+    diffs = np.diff(np.sort(xnum))
+    diffs = diffs[np.isfinite(diffs) & (diffs > 0)]
+    return float(np.median(diffs)) if diffs.size else 1.0
 
 
 def leftover_dims(da, time_dim, *, along=None, reduce=None):
@@ -139,6 +160,15 @@ def compile_lines(
     )
     palette_i = 0
     legend_n = n
+    bar_mode = resolve_bar_mode(spec)
+    bar_slots = {}
+    for i, kind in enumerate(kinds):
+        if kind == "bar":
+            bar_slots.setdefault(i if subplots else 0, []).append(i)
+    bar_pos = {
+        i: (k, len(idxs)) for idxs in bar_slots.values() for k, i in enumerate(idxs)
+    }
+    stack_bottom = {}
     for i, ((xvals, yvals, label), kind, style, along_color) in enumerate(
         zip(series, kinds, styles, along_modes, strict=True)
     ):
@@ -216,11 +246,63 @@ def compile_lines(
                     if j == 0:
                         palette_i += 1
                 if kind == "bar":
-                    plot_ax.bar(
-                        np.arange(len(yy)) if np.asarray(xplot).dtype.kind == "O" else xplot,
-                        yy,
-                        **{"color": member_color, "label": name, "alpha": alpha, **bk},
-                    )
+                    slot, n_bar = bar_pos[i]
+                    xnum = _bar_x_numeric(xplot)
+                    unit = _bar_unit_width(xnum)
+                    bar_kw = dict(bk)
+                    user_width = bar_kw.pop("width", None)
+                    ax_i = i if subplots else 0
+                    if bar_mode == "stacked":
+                        width = float(user_width) if user_width is not None else 0.8 * unit
+                        bottom = stack_bottom.get(ax_i)
+                        if bottom is None or len(bottom) != len(yy):
+                            bottom = np.zeros(len(yy), dtype=float)
+                        plot_ax.bar(
+                            xnum,
+                            yy,
+                            **{
+                                "color": member_color,
+                                "label": name,
+                                "alpha": alpha,
+                                "width": width,
+                                "bottom": bottom,
+                                **bar_kw,
+                            },
+                        )
+                        stack_bottom[ax_i] = bottom + np.nan_to_num(
+                            np.asarray(yy, dtype=float), nan=0.0
+                        )
+                    elif bar_mode == "grouped" and n_bar > 1:
+                        width = (
+                            float(user_width)
+                            if user_width is not None
+                            else (0.8 * unit) / n_bar
+                        )
+                        offset = (slot - (n_bar - 1) / 2.0) * width
+                        plot_ax.bar(
+                            xnum + offset,
+                            yy,
+                            **{
+                                "color": member_color,
+                                "label": name,
+                                "alpha": alpha,
+                                "width": width,
+                                **bar_kw,
+                            },
+                        )
+                    else:
+                        width = float(user_width) if user_width is not None else 0.8 * unit
+                        plot_ax.bar(
+                            xnum,
+                            yy,
+                            **{
+                                "color": member_color,
+                                "label": name,
+                                "alpha": alpha,
+                                "width": width,
+                                **bar_kw,
+                            },
+                        )
                 else:
                     plot_ax.plot(
                         xplot,

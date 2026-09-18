@@ -134,8 +134,9 @@ def compile(spec, datasets, *, theme_registry=None):
 def export(compiled, output, *, datasets=None, dump_spec_path=None, spec=None):
     """Write ``output`` PNG. Dump the resolved spec only when ``dump_spec_path`` is set.
 
-    ``dump_spec_path`` is ``None``/``False`` (skip), ``"-"`` (stdout), or a path.
-    Figure skills do not write a ``*.plot.json`` sidecar by default.
+    Figure skills dump with ``maybe_emit_spec`` *before* compile and skip this
+    function. ``dump_spec_path`` is ``None``/``False`` (skip), ``"-"`` (stdout),
+    or a path. No ``*.plot.json`` sidecar is written by default.
     """
     import json
     import sys

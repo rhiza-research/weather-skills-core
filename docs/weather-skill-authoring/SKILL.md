@@ -139,13 +139,14 @@ resolve-time skill and pass the printed `--start-time`/`--end-time` or
 | Figure | Dataset input(s) + decorator `-o` | Path (write PNG yourself) |
 | Inspect | Dataset or Path input; `output=False` | anything (stdout) |
 
-Figure skills keep CLI flags and fold them through `FLAG_TO_SPEC`. `--dump-spec -`
-prints the resolved spec when needed; `--patch` submits edits. `--spec` is an
-optional full JSON object, not a replacement for `--title` / `--variable`.
-`export()` writes the PNG only unless `dump_spec_path` is set. Assemble a spec
-from flags (or call `maps.compile_grid` / `charts.compile_lines` /
-`charts.compile_mediogram` after data prep) and then
-`export(compiled, output, datasets=…)`. Public names:
+Figure skills keep CLI flags and fold them through `FLAG_TO_SPEC`. `--dump-spec`
+dumps the assembled spec as JSON and skips the PNG (`-o` is not required);
+`--patch` submits edits. `--spec` is an optional full JSON object, not a
+replacement for `--title` / `--variable`. Call `maybe_emit_spec` after
+assembling the spec and return before `compile`/`export` when it is True.
+`export()` writes the PNG only. Assemble a spec from flags (or call
+`maps.compile_grid` / `charts.compile_lines` / `charts.compile_mediogram`
+after data prep) and then `export(compiled, output, datasets=…)`. Public names:
 `PlotSpec`, `load_spec`, `dump_spec`, `compile`, `export`. Matplotlib does
 not load on `import weather_skills_core.plot`. The spec must not open files.
 

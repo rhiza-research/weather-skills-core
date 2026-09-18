@@ -74,6 +74,7 @@ LAYOUT_KEYS = frozenset(
         "colorbar",
         "shared_colorscale",
         "subplots",
+        "bar_mode",
     }
 )
 FACET_KEYS = frozenset({"rows", "columns", "max_columns", "n_panels"})
@@ -127,6 +128,7 @@ TRACE_KEYS = (
     | ARTIST_BLOCKS
 )
 LAYER_KEYS = frozenset({"kind", "path", "options", "input", "raw"})
+BAR_MODES = frozenset({"grouped", "stacked", "overlay"})
 
 _SECTIONS = {
     "layout": LAYOUT_KEYS,
@@ -622,6 +624,7 @@ FLAG_TO_SPEC = {
     "dpi": ("layout", "dpi"),
     "facecolor": ("layout", "facecolor"),
     "subplots": ("layout", "subplots"),
+    "bar_mode": ("layout", "bar_mode"),
     "colorbar": ("layout", "colorbar"),
     "cbar_ticks": ("layout", "colorbar", "ticks"),
     "cbar_labels": ("layout", "colorbar", "labels"),
@@ -907,6 +910,7 @@ PLOT_CLI_TO_SPEC = {
     "--columns": "layout.facet.columns",
     "--panels": "layout.facet.columns",
     "--subplots": "layout.subplots",
+    "--bar-mode": "layout.bar_mode",
     "--extent": "geo.extent",
     "--bbox": "geo.bbox",
     "--cities": "geo.cities",
@@ -975,10 +979,10 @@ def patch_parser_for_spec_flags(parser):
 
 
 DUMP_SPEC_ARGUMENT_HELP = (
-    "Dump the resolved plot spec. Default: skip (no sidecar file). "
-    "Use '-' for stdout when you need to inspect knobs before --patch. "
-    "A path writes a file. Token-expensive; omit unless --patch needs a key "
-    "you cannot name from the CLI."
+    "Dump the assembled plot spec as JSON and skip drawing a PNG. "
+    "Bare --dump-spec (or '-') prints to stdout; a path writes a file. "
+    "--output is not required. Token-expensive; omit unless --patch needs "
+    "a key you cannot name from the CLI."
 )
 
 
@@ -1022,7 +1026,64 @@ def dump_spec_dest(value):
         return value
     if str(value).lower() in {"none", "off", "false"}:
         return False
+    if str(value).strip() == "":
+        return "-"
     return value
+
+
+def emit_spec(spec, dest, *, datasets=None) -> str:
+    """Write assembled spec JSON without compiling a figure or writing a PNG."""
+    import sys
+
+    from weather_skills_core.plot.figure import attach_figure_spec
+
+    dest = dump_spec_dest(dest)
+    if dest in (None, False):
+        raise ValueError("emit_spec requires a dump destination")
+    data = spec.data if hasattr(spec, "data") else spec
+    data = copy.deepcopy(data)
+    if datasets and not (data.get("inputs") or []):
+        data["inputs"] = spec_inputs_from_datasets(datasets)
+    elif datasets:
+        filled = {item.get("id"): item for item in spec_inputs_from_datasets(datasets)}
+        for item in data.get("inputs") or []:
+            extra = filled.get(item.get("id"))
+            if extra and extra.get("path") and not item.get("path"):
+                item["path"] = extra["path"]
+    spec_out = attach_figure_spec(data, data)
+    text = dump_spec(spec_out, None if str(dest) == "-" else dest)
+    if str(dest) == "-":
+        sys.stdout.write(text)
+    else:
+        print(f"Wrote spec: {dest}", file=sys.stderr)
+    return text
+
+
+def maybe_emit_spec(spec, dump_spec, *, datasets=None) -> bool:
+    """If ``dump_spec`` is set, write JSON and return True (caller should skip the PNG)."""
+    dest = dump_spec_dest(dump_spec)
+    if dest in (None, False):
+        return False
+    emit_spec(spec, dest, datasets=datasets)
+    return True
+
+
+def resolve_bar_mode(spec: dict | None) -> str:
+    """``layout.bar_mode`` (or ``traces[].bar.mode``): grouped, stacked, or overlay."""
+    layout = (spec or {}).get("layout") or {}
+    mode = layout.get("bar_mode")
+    if not mode:
+        for tr in (spec or {}).get("traces") or []:
+            bar = tr.get("bar") if isinstance(tr, dict) else None
+            if isinstance(bar, dict) and bar.get("mode"):
+                mode = bar["mode"]
+                break
+    mode = str(mode or "grouped").lower()
+    if mode not in BAR_MODES:
+        raise UsageError(
+            f"layout.bar_mode {mode!r} must be one of {', '.join(sorted(BAR_MODES))}"
+        )
+    return mode
 
 
 def opened_datasets_from_spec(spec: PlotSpec | None) -> list:

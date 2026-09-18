@@ -116,6 +116,7 @@ def test_flag_table_writes_and_reads_one_canonical_path():
     assert FLAG_TO_SPEC["lead"] == ("traces", 0, "leads")
     assert FLAG_TO_SPEC["align_day_of_year"] == ("traces", 0, "align")
     assert FLAG_TO_SPEC["subplots"] == ("layout", "subplots")
+    assert FLAG_TO_SPEC["bar_mode"] == ("layout", "bar_mode")
 
 
 def test_theme_file_rejects_unknown_keys(tmp_path):
@@ -261,6 +262,20 @@ def test_parse_plot_spec_and_dump_dest(tmp_path):
     assert dump_spec_dest(None) is None
     assert dump_spec_dest("none") is False
     assert dump_spec_dest("-") == "-"
+    assert dump_spec_dest("") == "-"
+
+
+def test_maybe_emit_spec_writes_json_and_signals_skip(tmp_path):
+    from weather_skills_core.plot.spec import maybe_emit_spec
+
+    dest = tmp_path / "fig.plot.json"
+    spec = {"version": 2, "title": "T", "traces": [{"kind": "heatmap", "input": "a"}]}
+    assert maybe_emit_spec(spec, dest) is True
+    dumped = json.loads(dest.read_text())
+    assert dumped["title"] == "T"
+    assert dumped["traces"][0]["kind"] == "heatmap"
+    assert maybe_emit_spec(spec, None) is False
+    assert maybe_emit_spec(spec, "none") is False
 
 
 def test_parse_plot_patch_inline_and_file(tmp_path):
@@ -612,6 +627,61 @@ def test_compile_heatmap_grid_blank_and_heatmap():
         overlays=False,
     )
     assert _quadmeshes(fig)
+
+
+def test_compile_bars_grouped_stacked_overlay():
+    pytest.importorskip("matplotlib")
+    import matplotlib.pyplot as plt
+    from matplotlib.patches import Rectangle
+
+    from weather_skills_core import UsageError
+    from weather_skills_core.plot.charts import compile_lines
+
+    x = [0, 1, 2]
+    a = [1.0, 2.0, 3.0]
+    b = [0.5, 0.5, 0.5]
+    series = [(x, a, "a"), (x, b, "b")]
+
+    def rects(compiled):
+        return [p for ax in _fig(compiled).axes for p in ax.patches if isinstance(p, Rectangle)]
+
+    grouped = compile_lines(
+        series, kinds=["bar", "bar"], spec={"layout": {"bar_mode": "grouped"}}
+    )
+    g = rects(grouped)
+    assert len(g) == 6
+    assert g[0].get_x() < g[3].get_x()
+    plt.close(_fig(grouped))
+
+    stacked = compile_lines(
+        series, kinds=["bar", "bar"], spec={"layout": {"bar_mode": "stacked"}}
+    )
+    s = rects(stacked)
+    assert s[0].get_y() == pytest.approx(0.0)
+    assert s[3].get_y() == pytest.approx(1.0)
+    assert s[0].get_x() == pytest.approx(s[3].get_x())
+    plt.close(_fig(stacked))
+
+    overlay = compile_lines(
+        series, kinds=["bar", "bar"], spec={"layout": {"bar_mode": "overlay"}}
+    )
+    o = rects(overlay)
+    assert o[0].get_y() == pytest.approx(0.0)
+    assert o[3].get_y() == pytest.approx(0.0)
+    assert o[0].get_x() == pytest.approx(o[3].get_x())
+    plt.close(_fig(overlay))
+
+    aliased = compile_lines(
+        series,
+        kinds=["bar", "bar"],
+        spec={"traces": [{"bar": {"mode": "stacked"}}, {}]},
+    )
+    alias_rects = rects(aliased)
+    assert alias_rects[3].get_y() == pytest.approx(1.0)
+    plt.close(_fig(aliased))
+
+    with pytest.raises(UsageError, match="bar_mode"):
+        compile_lines(series, kinds=["bar", "bar"], spec={"layout": {"bar_mode": "dodged"}})
 
 
 def test_compile_line_and_mediogram():

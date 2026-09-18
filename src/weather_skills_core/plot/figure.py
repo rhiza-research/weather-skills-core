@@ -527,6 +527,7 @@ BAR_KEYS = frozenset(
         "width",
         "zorder",
         "rasterized",
+        "mode",
     }
 )
 
@@ -1336,7 +1337,8 @@ def bar_kwargs(style: dict | None, *, loc: str = "bar") -> dict:
     if not style:
         return {}
     raw = style.get("bar") if isinstance(style.get("bar"), dict) else style
-    return pick({k: v for k, v in raw.items() if k in BAR_KEYS}, BAR_KEYS, loc=loc)
+    mpl_keys = BAR_KEYS - {"mode"}
+    return pick({k: v for k, v in raw.items() if k in mpl_keys}, mpl_keys, loc=loc)
 
 
 def fill_kwargs(trace: dict | None, *, loc: str = "traces[].fill") -> dict:
