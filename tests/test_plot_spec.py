@@ -245,6 +245,19 @@ def test_parse_plot_spec_and_dump_dest(tmp_path):
     assert dump_spec_dest("-") == "-"
 
 
+def test_load_spec_accepts_long_inline_json():
+    raw = json.dumps(
+        {
+            "title": "CHIRPS average annual rainfall, Ethiopia (climatology) "
+            + ("x" * 180),
+            "inputs": [{"variable": "precip_avg"}],
+        }
+    )
+    assert len(raw) > 255
+    loaded = load_spec(raw)
+    assert loaded.data["title"].startswith("CHIRPS")
+
+
 def test_named_datasets_from_spec_and_cli_fallback():
     from weather_skills_core import UsageError
     from weather_skills_core.plot.spec import (

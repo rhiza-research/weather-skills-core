@@ -411,14 +411,29 @@ def load_spec(value) -> PlotSpec:
     raw = str(value).strip()
     if not raw:
         raise UsageError("plot spec is empty")
+    # Inline JSON first. Path.is_file() stats the whole string as a filename, and
+    # Linux NAME_MAX (~255 bytes) raises OSError 36 instead of returning False.
+    if raw[:1] in "{[":
+        return _plot_spec_from_json(raw)
     path = Path(raw)
-    if path.is_file():
+    try:
+        is_file = path.is_file()
+    except OSError:
+        is_file = False
+    if is_file:
         data = json.loads(path.read_text(encoding="utf-8"))
         return PlotSpec(data, path)
     try:
+        return _plot_spec_from_json(raw)
+    except UsageError as exc:
+        raise UsageError(f"plot spec is not a file or JSON object: {exc}") from exc
+
+
+def _plot_spec_from_json(raw: str) -> PlotSpec:
+    try:
         data = json.loads(raw)
     except json.JSONDecodeError as exc:
-        raise UsageError(f"plot spec is not a file or JSON object: {exc}") from exc
+        raise UsageError(f"invalid JSON: {exc}") from exc
     if not isinstance(data, dict):
         raise UsageError("plot spec JSON must be an object")
     return PlotSpec(data)
