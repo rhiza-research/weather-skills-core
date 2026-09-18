@@ -269,15 +269,15 @@ are `PlotSpec`, `load_spec`, `dump_spec`, `compile`, and `export`. Matplotlib
 does not load on `import weather_skills_core.plot`. The spec must not open
 files; pass already-opened Datasets into `compile`. Figure skills take the
 same knobs as CLI flags or as `--spec` JSON (`FLAG_TO_SPEC` is the bridge; a
-set flag overlays the spec). `--spec` is dump/edit/replot, not a replacement
-for `--title` / `--variable` / `--figsize`.
+set flag overlays the spec). `--dump-spec -` prints the resolved spec when
+needed; `--patch` submits edits. No `*.plot.json` sidecar is written.
 
 ```python
 from weather_skills_core.plot import compile, export, load_spec
 
-spec = load_spec("out.plot.json")
+spec = load_spec(dumped_json)  # or a path, if you wrote one with dump_spec
 compiled = compile(spec, {"a": ds})
-export(compiled, "out.png", datasets={"a": ds})
+export(compiled, "out.png", datasets={"a": ds})  # no sidecar unless dump_spec_path=
 ```
 
 Recipe skills that build a cell matrix or series in Python call

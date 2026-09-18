@@ -132,14 +132,18 @@ def compile(spec, datasets, *, theme_registry=None):
 
 
 def export(compiled, output, *, datasets=None, dump_spec_path=None, spec=None):
-    """Write ``output`` PNG plus the resolved ``*.plot.json`` sidecar."""
+    """Write ``output`` PNG. Dump the resolved spec only when ``dump_spec_path`` is set.
+
+    ``dump_spec_path`` is ``None``/``False`` (skip), ``"-"`` (stdout), or a path.
+    Figure skills do not write a ``*.plot.json`` sidecar by default.
+    """
     import json
     import sys
     from pathlib import Path
 
     from weather_skills_core.errors import UsageError
     from weather_skills_core.plot.figure import CompiledFigure, attach_figure_spec, export_png
-    from weather_skills_core.plot.spec import dump_spec, sidecar_path
+    from weather_skills_core.plot.spec import dump_spec
 
     if not isinstance(compiled, CompiledFigure):
         raise TypeError("export() expects a CompiledFigure from compile()")
@@ -167,13 +171,11 @@ def export(compiled, output, *, datasets=None, dump_spec_path=None, spec=None):
                     continue
             spec_out["weather_skills_history"] = raw
             break
-    spec_path = dump_spec_path
-    if spec_path is None:
-        spec_path = sidecar_path(output)
-    if spec_path is not False:
-        text = dump_spec(spec_out, None if str(spec_path) == "-" else spec_path)
-        if str(spec_path) == "-":
-            sys.stdout.write(text)
-        else:
-            print(f"Wrote spec: {spec_path}", file=sys.stderr)
+    if dump_spec_path in (None, False):
+        return output
+    text = dump_spec(spec_out, None if str(dump_spec_path) == "-" else dump_spec_path)
+    if str(dump_spec_path) == "-":
+        sys.stdout.write(text)
+    else:
+        print(f"Wrote spec: {dump_spec_path}", file=sys.stderr)
     return output

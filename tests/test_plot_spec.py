@@ -535,7 +535,7 @@ def test_compile_applies_colorbar_size():
     assert patched.height < default.height * 0.6
 
 
-def test_export_png_and_sidecar(tmp_path):
+def test_export_skips_spec_dump_by_default(tmp_path):
     pytest.importorskip("matplotlib")
     from weather_skills_core.plot import compile, export
 
@@ -545,13 +545,40 @@ def test_export_png_and_sidecar(tmp_path):
     out = tmp_path / "map.png"
     export(compiled, out, datasets={"a": ds})
     assert out.is_file() and out.stat().st_size > 0
-    sidecar = tmp_path / "map.plot.json"
-    data = json.loads(sidecar.read_text())
+    assert not (tmp_path / "map.plot.json").exists()
+
+
+def test_export_png_and_optional_spec_dump(tmp_path):
+    pytest.importorskip("matplotlib")
+    from weather_skills_core.plot import compile, export
+
+    ds = make_gridded(n_time=1)
+    spec = spec_from_flags(variable="precip", kind="heatmap", title="Map")
+    compiled = compile(spec, {"a": ds})
+    out = tmp_path / "map.png"
+    dumped = tmp_path / "map.plot.json"
+    export(compiled, out, datasets={"a": ds}, dump_spec_path=dumped)
+    assert out.is_file() and out.stat().st_size > 0
+    data = json.loads(dumped.read_text())
     assert data["title"] == "Map"
     assert data["theme"]["colormap"]
-    # Only resolved values are dumped; unset knobs stay out of the sidecar.
+    # Only resolved values are dumped; unset knobs stay out of the JSON.
     assert data["axes"] == {}
-    assert "None" not in sidecar.read_text()
+    assert "None" not in dumped.read_text()
+
+
+def test_export_dump_spec_stdout(tmp_path, capsys):
+    pytest.importorskip("matplotlib")
+    from weather_skills_core.plot import compile, export
+
+    ds = make_gridded(n_time=1)
+    spec = spec_from_flags(variable="precip", kind="heatmap", title="Map")
+    compiled = compile(spec, {"a": ds})
+    out = tmp_path / "map.png"
+    export(compiled, out, datasets={"a": ds}, dump_spec_path="-")
+    data = json.loads(capsys.readouterr().out)
+    assert data["title"] == "Map"
+    assert not (tmp_path / "map.plot.json").exists()
 
 
 def test_compile_contour_uses_contour_collections():
@@ -1026,7 +1053,7 @@ def test_compile_dumps_axes_ticks_and_applies_xticks():
     assert [t.get_text() for t in fig.axes[0].get_xticklabels()] == ["a", "b"]
 
 
-def test_heatmap_grid_and_sidecar_use_shared_axes_spec(tmp_path):
+def test_heatmap_grid_and_dumped_spec_use_shared_axes_spec(tmp_path):
     pytest.importorskip("matplotlib")
     from weather_skills_core.plot import export
     from weather_skills_core.plot.maps import compile_grid, heatmap_cell
@@ -1046,6 +1073,7 @@ def test_heatmap_grid_and_sidecar_use_shared_axes_spec(tmp_path):
     ax = next(a for a in _fig(fig).axes if a.get_label() != "<colorbar>")
     assert ax.spines["top"].get_visible() is False
     out = tmp_path / "grid.png"
-    export(fig, out, spec=spec)
-    dumped = json.loads(out.with_name("grid.plot.json").read_text())
+    dumped_path = out.with_name("grid.plot.json")
+    export(fig, out, spec=spec, dump_spec_path=dumped_path)
+    dumped = json.loads(dumped_path.read_text())
     assert dumped["axes"] == {"spines": {"top": False}}

@@ -1355,8 +1355,8 @@ def resolve_axes_block(spec: dict | None) -> dict | list:
     """``axes`` for a dumped spec: only the keys that carry a value.
 
     The full set of editable knobs lives in ``AXES_TEMPLATE`` and is documented
-    in ``docs/plotting.md``; stamping all of them as nulls onto every sidecar
-    buried the handful of values that were actually set.
+    in ``docs/plotting.md``; stamping all of them as nulls onto every dumped
+    spec buried the handful of values that were actually set.
     """
 
     def _one(user):

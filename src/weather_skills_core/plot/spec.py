@@ -135,8 +135,8 @@ _SECTIONS = {
 }
 
 # Keys that used to be read from a second location. Naming the canonical path
-# in the error is the whole point: an agent editing a sidecar gets told where
-# the knob moved instead of watching its edit silently do nothing.
+# in the error is the whole point: an agent editing a dumped spec gets told
+# where the knob moved instead of watching its edit silently do nothing.
 RELOCATED = {
     "patch": "merge your edits into the spec itself (or pass --patch on the CLI)",
     "style": "theme",
@@ -562,7 +562,7 @@ def _plot_spec_from_json(raw: str) -> PlotSpec:
 
 def prune_nulls(value):
     """Drop keys whose value is null. A null in this schema means "unset", so a
-    sidecar reads better showing only what was actually resolved."""
+    dumped spec shows only what was actually resolved."""
     if isinstance(value, dict):
         return {k: prune_nulls(v) for k, v in value.items() if v is not None}
     if isinstance(value, list):
@@ -843,7 +843,7 @@ def spec_from_flags(**flags) -> dict:
 
 
 def sidecar_path(output: Path) -> Path:
-    """``out.png`` → ``out.plot.json``."""
+    """``out.png`` → ``out.plot.json``. Optional dump filename; not written unless requested."""
     output = Path(output)
     return output.with_name(output.stem + ".plot.json")
 
@@ -869,10 +869,10 @@ def spec_inputs_from_datasets(datasets) -> list[dict]:
 SPEC_ARGUMENT_HELP = (
     "Plot spec JSON (path or inline). Same knobs as the CLI (--title, --kind, "
     "--variable, --figsize, --mask-geojson, colormap, layout, …). A first run "
-    "can be flags only; --spec is dump/edit/replot. A set CLI flag overlays "
-    "the spec. A default run writes sidecar *.plot.json. Inputs listed in the "
-    "spec are opened for provenance; dataset flags are optional when the spec "
-    "has paths."
+    "can be flags only. A set CLI flag overlays the spec. Prefer --patch for "
+    "edits; pass --spec only when replaying a dumped object. Inputs listed in "
+    "the spec are opened for provenance; dataset flags are optional when the "
+    "spec has paths."
 )
 
 PATCH_ARGUMENT_HELP = (
@@ -975,8 +975,10 @@ def patch_parser_for_spec_flags(parser):
 
 
 DUMP_SPEC_ARGUMENT_HELP = (
-    "Where to write the resolved plot spec. Default: <output-stem>.plot.json. "
-    "Use '-' for stdout, 'none' to skip."
+    "Dump the resolved plot spec. Default: skip (no sidecar file). "
+    "Use '-' for stdout when you need to inspect knobs before --patch. "
+    "A path writes a file. Token-expensive; omit unless --patch needs a key "
+    "you cannot name from the CLI."
 )
 
 
@@ -1015,7 +1017,7 @@ def parse_plot_patch(value):
 
 
 def dump_spec_dest(value):
-    """Normalize ``--dump-spec``: ``None`` (default sidecar), ``False`` (skip), or a path."""
+    """Normalize ``--dump-spec``: ``None``/``False`` (skip), ``"-"`` (stdout), or a path."""
     if value is None or value is False:
         return value
     if str(value).lower() in {"none", "off", "false"}:
