@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 from conftest import make_forecast, make_gridded
 
-from weather_skills_core.plot_spec import (
+from weather_skills_core.plot.spec import (
     PlotSpec,
     dump_spec,
     load_spec,
@@ -17,7 +17,7 @@ from weather_skills_core.plot_spec import (
     parse_index,
     spec_from_flags,
 )
-from weather_skills_core.plot_style import resolve_colorscale
+from weather_skills_core.plot.style import resolve_colorscale
 
 
 def test_panel_shape_default_caps_columns_at_four():
@@ -62,7 +62,7 @@ def test_spec_roundtrip_json(tmp_path):
 
 def test_normalize_spec_reports_where_a_relocated_key_moved():
     from weather_skills_core import UsageError
-    from weather_skills_core.plot_spec import normalize_spec
+    from weather_skills_core.plot.spec import normalize_spec
 
     for bad, expected in [
         ({"patch": {"title": "x"}}, "pass --patch"),
@@ -81,7 +81,7 @@ def test_normalize_spec_reports_where_a_relocated_key_moved():
 
 
 def test_flag_table_writes_and_reads_one_canonical_path():
-    from weather_skills_core.plot_spec import overlay_flags, resolve_flags, spec_get
+    from weather_skills_core.plot.spec import overlay_flags, resolve_flags, spec_get
 
     spec = overlay_flags({}, title="T", colormap="magma", rows=2, band=[10, 90], bbox=(5, 1, -5, 9))
     assert spec == {
@@ -98,6 +98,117 @@ def test_flag_table_writes_and_reads_one_canonical_path():
         "title": "CLI",
         "colormap": "magma",
     }
+
+
+def test_deprecated_plot_module_shims_reexport_the_package():
+    from weather_skills_core.figure import parse_figsize as shim_figsize
+    from weather_skills_core.plot.figure import parse_figsize
+    from weather_skills_core.plot.spec import overlay_flags
+    from weather_skills_core.plot_spec import overlay_flags as shim_overlay
+
+    assert overlay_flags is shim_overlay
+    assert parse_figsize is shim_figsize
+
+
+def test_colormap_bounds_fold_into_style_colormap():
+    from weather_skills_core import UsageError
+    from weather_skills_core.plot.spec import overlay_flags, spec_from_flags, spec_get
+    from weather_skills_core.plot.style import parse_colormap_spec, resolve_colorscale
+
+    spec = overlay_flags({}, colormap="viridis", colormap_bounds=[0, 10, 50], colormap_under="grey")
+    assert spec["style"]["colormap"] == {
+        "name": "viridis",
+        "bounds": [0.0, 10.0, 50.0],
+        "under": "grey",
+    }
+    folded = spec_from_flags(
+        colormap="white,green,blue",
+        colormap_bounds=[0, 10, 50, 100],
+        cbar_ticks=[0, 50, 100],
+        cbar_labels=["dry", "mid", "wet"],
+    )
+    assert folded["style"]["colormap"]["colors"] == ["white", "green", "blue"]
+    assert folded["style"]["colormap"]["bounds"] == [0.0, 10.0, 50.0, 100.0]
+    assert spec_get(folded, "cbar_ticks") == [0.0, 50.0, 100.0]
+    assert spec_get(folded, "cbar_labels") == ["dry", "mid", "wet"]
+
+    parsed = parse_colormap_spec(
+        {"colors": ["#fff", "#080", "#040"], "bounds": [0, 10, 50, 100], "over": "magenta"}
+    )
+    assert parsed["over"] == "magenta"
+    with pytest.raises(UsageError, match="3 class colors"):
+        parse_colormap_spec({"colors": ["a", "b"], "bounds": [0, 1, 2, 3]})
+    with pytest.raises(UsageError, match="strictly increasing"):
+        parse_colormap_spec({"colors": ["a"], "bounds": [10, 0]})
+
+    da = make_gridded()["precip"]
+    scale = resolve_colorscale(
+        da,
+        "drought",
+        registry={"drought": {"colors": ["#ffffff", "#cc0000"], "bounds": [0, 1, 2]}},
+    )
+    assert scale["name"] == "drought"
+    assert scale["bounds"] == [0, 1, 2]
+    named_bounds = resolve_colorscale(da, {"name": "viridis", "bounds": [0, 10, 50]})
+    assert named_bounds["cmap"] == "viridis"
+    assert named_bounds["bounds"] == [0, 10, 50]
+
+
+def test_normalize_spec_colorbar_labels_need_ticks():
+    from weather_skills_core import UsageError
+    from weather_skills_core.plot.spec import normalize_spec
+
+    with pytest.raises(UsageError, match="requires layout.colorbar.ticks"):
+        normalize_spec({"layout": {"colorbar": {"labels": ["a"]}}})
+    with pytest.raises(UsageError, match="not a known key"):
+        normalize_spec({"style": {"colormap": {"colors": ["#fff", "#000"], "bogus": 1}}})
+    ok = normalize_spec(
+        {
+            "style": {
+                "colormap": {
+                    "colors": ["#fff", "#080", "#040"],
+                    "bounds": [0, 10, 50, 100],
+                    "under": "grey",
+                }
+            },
+            "layout": {"colorbar": {"ticks": [0, 50, 100], "labels": ["dry", "mid", "wet"]}},
+        }
+    )
+    assert ok["layout"]["colorbar"]["labels"] == ["dry", "mid", "wet"]
+
+
+def test_compile_custom_discrete_colormap_and_cbar_labels():
+    pytest.importorskip("matplotlib")
+    from matplotlib.colors import BoundaryNorm
+
+    from weather_skills_core.plot.compile import compile_figure
+
+    ds = make_gridded()
+    spec = spec_from_flags(
+        variable="precip",
+        trace_type="heatmap",
+        colormap={
+            "colors": ["#ffffff", "#88cc88", "#006600"],
+            "bounds": [0, 10, 50, 100],
+            "under": "0.5",
+            "over": "magenta",
+        },
+        cbar_ticks=[0, 50, 100],
+        cbar_labels=["dry", "ok", "wet"],
+    )
+    fig, resolved = compile_figure(spec, {"a": ds})
+    meshes = _quadmeshes(fig)
+    assert meshes
+    assert isinstance(meshes[0].norm, BoundaryNorm)
+    assert list(meshes[0].norm.boundaries) == [0.0, 10.0, 50.0, 100.0]
+    cbar_ax = next(ax for ax in fig.axes if ax.get_label() == "<colorbar>")
+    fig.canvas.draw()
+    labels = [t.get_text() for t in cbar_ax.get_yticklabels() if t.get_text()]
+    if not labels:
+        labels = [t.get_text() for t in cbar_ax.get_xticklabels() if t.get_text()]
+    assert labels == ["dry", "ok", "wet"]
+    assert resolved["style"]["colormap"]["bounds"] == [0.0, 10.0, 50.0, 100.0]
+    assert resolved["layout"]["colorbar"]["labels"] == ["dry", "ok", "wet"]
 
 
 def test_plot_spec_holder_zarr_paths():
@@ -122,7 +233,7 @@ def test_plot_spec_zarr_paths_layers_and_xy_skip_geojson():
 
 
 def test_parse_plot_spec_and_dump_dest(tmp_path):
-    from weather_skills_core.plot_spec import dump_spec_dest, parse_plot_spec
+    from weather_skills_core.plot.spec import dump_spec_dest, parse_plot_spec
 
     path = tmp_path / "fig.plot.json"
     path.write_text('{"version": 1, "inputs": [{"id": "a", "path": "/tmp/a.zarr"}]}\n')
@@ -135,7 +246,7 @@ def test_parse_plot_spec_and_dump_dest(tmp_path):
 
 def test_named_datasets_from_spec_and_cli_fallback():
     from weather_skills_core import UsageError
-    from weather_skills_core.plot_spec import (
+    from weather_skills_core.plot.spec import (
         datasets_from_cli_or_spec,
         named_datasets_from_spec,
         spec_role_datasets,
@@ -206,7 +317,7 @@ def test_precip_anomaly_and_poa_and_spi_colorscales():
 
 
 def test_rank_colorscale_bounds_depend_on_n_seasons():
-    from weather_skills_core.plot_style import rank_colorscale
+    from weather_skills_core.plot.style import rank_colorscale
 
     scale = rank_colorscale(40)
     assert scale["name"] == "ppt_rank"
@@ -228,7 +339,7 @@ def _quadmeshes(fig):
 
 def test_compile_heatmap_facets_time():
     pytest.importorskip("matplotlib")
-    from weather_skills_core.plot_compile import compile_figure
+    from weather_skills_core.plot.compile import compile_figure
 
     ds = make_gridded(n_time=5)
     spec = spec_from_flags(variable="precip", trace_type="heatmap")
@@ -241,7 +352,7 @@ def test_compile_heatmap_facets_time():
 
 def test_compile_timeseries_forecast_valid_time():
     pytest.importorskip("matplotlib")
-    from weather_skills_core.plot_compile import compile_figure
+    from weather_skills_core.plot.compile import compile_figure
 
     ds = make_forecast()
     spec = spec_from_flags(
@@ -257,7 +368,7 @@ def test_compile_timeseries_forecast_valid_time():
 
 def test_compile_applies_title():
     pytest.importorskip("matplotlib")
-    from weather_skills_core.plot_compile import compile_figure
+    from weather_skills_core.plot.compile import compile_figure
 
     ds = make_gridded(n_time=1)
     spec = spec_from_flags(variable="precip", trace_type="heatmap")
@@ -274,7 +385,7 @@ def _colorbar_box(fig):
 
 def test_compile_applies_colorbar_size():
     pytest.importorskip("matplotlib")
-    from weather_skills_core.plot_compile import compile_figure
+    from weather_skills_core.plot.compile import compile_figure
 
     ds = make_gridded(n_time=2)
     spec = spec_from_flags(variable="precip", trace_type="heatmap", columns=2)
@@ -290,8 +401,8 @@ def test_compile_applies_colorbar_size():
 
 def test_export_png_and_sidecar(tmp_path):
     pytest.importorskip("matplotlib")
-    from weather_skills_core.plot_compile import compile_figure
-    from weather_skills_core.plot_export import write_plot_outputs
+    from weather_skills_core.plot.compile import compile_figure
+    from weather_skills_core.plot.export import write_plot_outputs
 
     ds = make_gridded(n_time=1)
     spec = spec_from_flags(variable="precip", trace_type="heatmap", title="Map")
@@ -312,7 +423,7 @@ def test_compile_contour_uses_contour_collections():
     pytest.importorskip("matplotlib")
     from matplotlib.contour import QuadContourSet
 
-    from weather_skills_core.plot_compile import compile_figure
+    from weather_skills_core.plot.compile import compile_figure
 
     ds = make_gridded(n_time=1)
     spec = spec_from_flags(variable="precip", trace_type="contour")
@@ -323,8 +434,8 @@ def test_compile_contour_uses_contour_collections():
 
 def test_compile_heatmap_grid_blank_and_heatmap():
     pytest.importorskip("matplotlib")
-    from weather_skills_core.plot_recipes import blank_cell, compile_heatmap_grid, heatmap_cell
-    from weather_skills_core.plot_style import resolve_colorscale
+    from weather_skills_core.plot.recipes import blank_cell, compile_heatmap_grid, heatmap_cell
+    from weather_skills_core.plot.style import resolve_colorscale
 
     ds = make_gridded(n_time=1)
     da = ds["precip"].isel(time=0)
@@ -342,7 +453,7 @@ def test_compile_heatmap_grid_blank_and_heatmap():
 
 def test_compile_line_and_mediogram():
     pytest.importorskip("matplotlib")
-    from weather_skills_core.plot_recipes import compile_line_figure, compile_mediogram
+    from weather_skills_core.plot.recipes import compile_line_figure, compile_mediogram
 
     fig = compile_line_figure(
         [([1, 2, 3], [0.0, 1.0, 2.0], "a"), ([1, 2, 3], [2.0, 1.0, 0.0], "b")],
@@ -360,8 +471,8 @@ def test_compile_line_and_mediogram():
 
 def test_export_png_timeseries_and_mediogram(tmp_path):
     pytest.importorskip("matplotlib")
-    from weather_skills_core.plot_export import export_png
-    from weather_skills_core.plot_recipes import compile_line_figure, compile_mediogram
+    from weather_skills_core.plot.export import export_png
+    from weather_skills_core.plot.recipes import compile_line_figure, compile_mediogram
 
     lines = compile_line_figure(
         [([1, 2, 3], [0.0, 1.0, 2.0], "a"), ([1, 2, 3], [2.0, 1.0, 0.0], "b")],
@@ -381,9 +492,9 @@ def test_export_png_timeseries_and_mediogram(tmp_path):
 
 def test_export_png_heatmap_grid_with_blank(tmp_path):
     pytest.importorskip("matplotlib")
-    from weather_skills_core.plot_export import export_png
-    from weather_skills_core.plot_recipes import blank_cell, compile_heatmap_grid, heatmap_cell
-    from weather_skills_core.plot_style import resolve_colorscale
+    from weather_skills_core.plot.export import export_png
+    from weather_skills_core.plot.recipes import blank_cell, compile_heatmap_grid, heatmap_cell
+    from weather_skills_core.plot.style import resolve_colorscale
 
     ds = make_gridded(n_time=1)
     da = ds["precip"].isel(time=0)
@@ -402,7 +513,7 @@ def test_export_png_heatmap_grid_with_blank(tmp_path):
 
 
 def test_format_step_dates_and_leads():
-    from weather_skills_core.plot_compile import format_step
+    from weather_skills_core.plot.compile import format_step
 
     assert format_step(np.datetime64("2026-01-01T00:00:00")) == "1 Jan '26"
     assert format_step(np.timedelta64(0, "D")) == "+0d"
@@ -412,7 +523,7 @@ def test_format_step_dates_and_leads():
 def test_panel_title_weekly_range_and_daily_date():
     import xarray as xr
 
-    from weather_skills_core.plot_compile import panel_title, timeseries_axis
+    from weather_skills_core.plot.compile import panel_title, timeseries_axis
 
     weekly = np.arange("2026-08-04", "2026-09-01", dtype="datetime64[D]")[::7]
     da = xr.DataArray(
@@ -448,7 +559,7 @@ def test_panel_title_weekly_range_and_daily_date():
 
 
 def test_parse_band_and_along_dim():
-    from weather_skills_core.plot_style import along_dim, parse_band, resolve_colorscale
+    from weather_skills_core.plot.style import along_dim, parse_band, resolve_colorscale
 
     assert parse_band("10,90") == (10.0, 90.0)
     assert parse_band(True) == (10.0, 90.0)
@@ -465,7 +576,7 @@ def test_compile_timeseries_along_and_band():
     pytest.importorskip("seaborn")
     from matplotlib.collections import PolyCollection
 
-    from weather_skills_core.plot_compile import compile_figure
+    from weather_skills_core.plot.compile import compile_figure
 
     ds = make_forecast(n_number=5)
     spec = spec_from_flags(
@@ -484,7 +595,7 @@ def test_compile_timeseries_along_and_band():
 
 def test_compile_timeseries_align_dayofyear():
     pytest.importorskip("matplotlib")
-    from weather_skills_core.plot_compile import compile_figure
+    from weather_skills_core.plot.compile import compile_figure
 
     ds = make_gridded(n_time=4)
     spec = spec_from_flags(
@@ -502,8 +613,8 @@ def test_compile_timeseries_align_dayofyear():
 def test_colorblind_template_sets_style():
     pytest.importorskip("matplotlib")
     pytest.importorskip("seaborn")
-    from weather_skills_core.plot_compile import compile_figure
-    from weather_skills_core.plot_style import normalize_template
+    from weather_skills_core.plot.compile import compile_figure
+    from weather_skills_core.plot.style import normalize_template
 
     assert normalize_template("colorblind") == "colorblind"
     ds = make_gridded(n_time=1)
@@ -515,7 +626,7 @@ def test_colorblind_template_sets_style():
 
 def test_shared_colorscale_one_norm_across_panels():
     pytest.importorskip("matplotlib")
-    from weather_skills_core.plot_compile import compile_figure
+    from weather_skills_core.plot.compile import compile_figure
 
     ds = make_gridded(n_time=3)
     spec = spec_from_flags(variable="precip", trace_type="heatmap")
@@ -528,7 +639,7 @@ def test_shared_colorscale_one_norm_across_panels():
 
 def test_pick_rejects_unknown_and_non_json():
     from weather_skills_core import UsageError
-    from weather_skills_core.plot_mpl import LINE_KEYS, pick
+    from weather_skills_core.plot.mpl import LINE_KEYS, pick
 
     assert pick({"linewidth": 2.5}, LINE_KEYS, loc="line")["linewidth"] == 2.5
     with pytest.raises(UsageError, match="unknown key"):
@@ -542,7 +653,7 @@ def test_apply_axes_xlabel_string_and_object():
     import matplotlib.pyplot as plt
 
     from weather_skills_core import UsageError
-    from weather_skills_core.plot_mpl import apply_axes
+    from weather_skills_core.plot.mpl import apply_axes
 
     fig, ax = plt.subplots()
     apply_axes(ax, {"xlabel": "Lon", "ylabel": "Lat"})
@@ -579,7 +690,7 @@ def test_apply_rc_sets_and_rejects_backend():
     import matplotlib as mpl
 
     from weather_skills_core import UsageError
-    from weather_skills_core.plot_mpl import apply_rc
+    from weather_skills_core.plot.mpl import apply_rc
 
     apply_rc({"axes.grid": False, "lines.linewidth": 3.0})
     assert mpl.rcParams["lines.linewidth"] == 3.0
@@ -593,7 +704,7 @@ def test_compile_mpl_axes_annotate_mesh_and_log():
     pytest.importorskip("matplotlib")
     from matplotlib.patches import FancyArrowPatch
 
-    from weather_skills_core.plot_compile import compile_figure
+    from weather_skills_core.plot.compile import compile_figure
 
     ds = make_gridded(n_time=1)
     spec = spec_from_flags(variable="precip", trace_type="heatmap")
@@ -635,7 +746,7 @@ def test_compile_contour_levels_from_spec():
     pytest.importorskip("matplotlib")
     from matplotlib.contour import QuadContourSet
 
-    from weather_skills_core.plot_compile import compile_figure
+    from weather_skills_core.plot.compile import compile_figure
 
     ds = make_gridded(n_time=1)
     spec = spec_from_flags(variable="precip", trace_type="contour")
@@ -647,7 +758,7 @@ def test_compile_contour_levels_from_spec():
 
 def test_compile_line_twin_and_mediogram_colors():
     pytest.importorskip("matplotlib")
-    from weather_skills_core.plot_recipes import compile_line_figure, compile_mediogram
+    from weather_skills_core.plot.recipes import compile_line_figure, compile_mediogram
 
     fig = compile_line_figure(
         [([1, 2, 3], [0.0, 1.0, 2.0], "a"), ([1, 2, 3], [20.0, 10.0, 0.0], "b")],
@@ -679,8 +790,8 @@ def test_compile_line_twin_and_mediogram_colors():
 
 def test_compile_dumps_axes_ticks_and_applies_xticks():
     pytest.importorskip("matplotlib")
-    from weather_skills_core.plot_compile import compile_figure
-    from weather_skills_core.plot_mpl import AXES_TEMPLATE, resolve_axes_block
+    from weather_skills_core.plot.compile import compile_figure
+    from weather_skills_core.plot.mpl import AXES_TEMPLATE, resolve_axes_block
 
     # An untouched figure dumps no axes knobs; the editable set is AXES_TEMPLATE.
     assert resolve_axes_block({}) == {}
@@ -707,9 +818,9 @@ def test_compile_dumps_axes_ticks_and_applies_xticks():
 
 def test_heatmap_grid_and_sidecar_use_shared_axes_spec(tmp_path):
     pytest.importorskip("matplotlib")
-    from weather_skills_core.plot_export import write_plot_outputs
-    from weather_skills_core.plot_recipes import compile_heatmap_grid, heatmap_cell
-    from weather_skills_core.plot_style import resolve_colorscale
+    from weather_skills_core.plot.export import write_plot_outputs
+    from weather_skills_core.plot.recipes import compile_heatmap_grid, heatmap_cell
+    from weather_skills_core.plot.style import resolve_colorscale
 
     ds = make_gridded(n_time=1)
     da = ds["precip"].isel(time=0)

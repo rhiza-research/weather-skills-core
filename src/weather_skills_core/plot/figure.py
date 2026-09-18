@@ -1,0 +1,402 @@
+"""Shared matplotlib chrome for weather-skills figures.
+
+Matplotlib places artists; callers set style and data only.
+"""
+
+from __future__ import annotations
+
+import argparse
+from pathlib import Path
+
+DEFAULT_FONTSIZE = 16
+DEFAULT_DPI = 150
+
+# Sept not Sep — the usual meteorological short form.
+_MONTHS = (
+    "Jan",
+    "Feb",
+    "Mar",
+    "Apr",
+    "May",
+    "Jun",
+    "Jul",
+    "Aug",
+    "Sept",
+    "Oct",
+    "Nov",
+    "Dec",
+)
+
+
+def _ymd(value):
+    """Return ``(year, month, day)`` from a datetime-like, or None."""
+    if value is None:
+        return None
+    if hasattr(value, "year") and hasattr(value, "month") and hasattr(value, "day"):
+        try:
+            year, month, day = int(value.year), int(value.month), int(value.day)
+            if 1 <= month <= 12 and 1 <= day <= 31:
+                return year, month, day
+        except (TypeError, ValueError):
+            pass
+    try:
+        import numpy as np
+
+        arr = np.asarray(value)
+        if arr.dtype.kind == "M":
+            sample = np.asarray(arr.reshape(-1)[0]).astype("datetime64[D]")
+            text = str(np.datetime_as_string(sample, unit="D"))
+            return int(text[0:4]), int(text[5:7]), int(text[8:10])
+    except (TypeError, ValueError, IndexError):
+        pass
+    text = str(value)
+    if len(text) >= 10 and text[4:5] == "-" and text[7:8] == "-":
+        try:
+            return int(text[0:4]), int(text[5:7]), int(text[8:10])
+        except ValueError:
+            return None
+    return None
+
+
+def format_plot_date(value, *, year=True):
+    """Figure date: ``14 Sept '26``. Set ``year=False`` for day-of-year ticks."""
+    ymd = _ymd(value)
+    if ymd is None:
+        return str(value)
+    y, month, day = ymd
+    mon = _MONTHS[month - 1]
+    if not year:
+        return f"{day} {mon}"
+    return f"{day} {mon} '{y % 100:02d}"
+
+
+def axis_label(text):
+    """Sentence-case an axis label; map lon/lat shorthand to Longitude/Latitude."""
+    if text is None:
+        return text
+    s = str(text).strip()
+    if not s:
+        return s
+    known = {
+        "lon": "Longitude",
+        "lat": "Latitude",
+        "longitude": "Longitude",
+        "latitude": "Latitude",
+        "valid time": "Valid time",
+        "calendar day": "Calendar day",
+        "time": "Time",
+        "step": "Step",
+        "forecast step": "Forecast step",
+    }
+    key = s.lower()
+    if key in known:
+        return known[key]
+    if s[:1].islower():
+        return s[:1].upper() + s[1:]
+    return s
+
+
+def resolve_axis_label(override, default):
+    """Use ``override`` verbatim when set; otherwise sentence-case ``default``."""
+    if override is not None and str(override).strip() != "":
+        return str(override)
+    return axis_label(default)
+
+
+def is_datetime_axis(values):
+    """True when ``values`` are calendar dates (datetime64 or cftime)."""
+    import numpy as np
+
+    arr = np.asarray(values)
+    if arr.dtype.kind == "M":
+        return True
+    if arr.size == 0:
+        return False
+    first = arr.reshape(-1)[0]
+    return hasattr(first, "year") and hasattr(first, "month")
+
+
+def resolve_time_axis_label(override, default, values):
+    """Axis label for a 1D time axis. Datetime ticks already name the axis."""
+    if override is not None and str(override).strip() != "":
+        return str(override)
+    if is_datetime_axis(values):
+        return ""
+    return axis_label(default)
+
+
+def format_plot_date_range(start, end):
+    """Inclusive range: ``1–7 Sept '26``, ``28 Aug–3 Sept '26``, ``28 Dec '25–3 Jan '26``."""
+    a = _ymd(start)
+    b = _ymd(end)
+    if a is None or b is None:
+        return f"{format_plot_date(start)}–{format_plot_date(end)}"
+    ay, am, ad = a
+    by, bm, bd = b
+    a_mon, b_mon = _MONTHS[am - 1], _MONTHS[bm - 1]
+    a_yr, b_yr = f"'{ay % 100:02d}", f"'{by % 100:02d}"
+    if ay == by and am == bm:
+        return f"{ad}–{bd} {a_mon} {a_yr}"
+    if ay == by:
+        return f"{ad} {a_mon}–{bd} {b_mon} {b_yr}"
+    return f"{ad} {a_mon} {a_yr}–{bd} {b_mon} {b_yr}"
+
+
+def apply_date_ticks(ax):
+    """Show datetime x ticks as ``14 Sept '26``, never midnight timestamps."""
+    import matplotlib.dates as mdates
+    from matplotlib.ticker import FuncFormatter
+
+    def _fmt(x, _pos):
+        return format_plot_date(mdates.num2date(x))
+
+    ax.xaxis.set_major_formatter(FuncFormatter(_fmt))
+
+
+def parse_figsize(value):
+    """Argparse converter for ``W,H`` or ``WxH`` inches."""
+    if value is None:
+        return None
+    raw = str(value).strip().lower().replace("×", "x")
+    if not raw:
+        raise argparse.ArgumentTypeError("--figsize must be W,H inches (e.g. 10,6 or 10x6)")
+    sep = "x" if "x" in raw and "," not in raw else ","
+    parts = [p.strip() for p in raw.split(sep)]
+    if len(parts) != 2:
+        raise argparse.ArgumentTypeError("--figsize must be W,H inches (e.g. 10,6 or 10x6)")
+    try:
+        width, height = float(parts[0]), float(parts[1])
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            "--figsize must be W,H inches (e.g. 10,6 or 10x6)"
+        ) from None
+    if width <= 0 or height <= 0:
+        raise argparse.ArgumentTypeError("--figsize width and height must be positive")
+    return (width, height)
+
+
+def parse_number_list(value):
+    """Argparse converter for comma-separated floats (bounds / colorbar ticks)."""
+    if isinstance(value, (list, tuple)):
+        parts = [str(v).strip() for v in value if str(v).strip()]
+    else:
+        parts = [p.strip() for p in str(value).split(",") if p.strip()]
+    if not parts:
+        raise argparse.ArgumentTypeError("expected comma-separated numbers")
+    try:
+        return [float(p) for p in parts]
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"expected comma-separated numbers, got {value!r}"
+        ) from None
+
+
+def parse_label_list(value):
+    """Argparse converter for comma-separated colorbar tick labels."""
+    if isinstance(value, (list, tuple)):
+        return [str(v) for v in value]
+    return [p.strip() for p in str(value).split(",")]
+
+
+def resolve_figsize(requested, default):
+    """Honor an explicit ``--figsize``; otherwise use ``default``."""
+    return tuple(requested) if requested is not None else tuple(default)
+
+
+def apply_style(fontsize=DEFAULT_FONTSIZE, *, template="weather_skills", chart="line"):
+    """Seaborn chrome plus a single ``--fontsize``.
+
+    ``template`` is ``weather_skills`` (seaborn ``deep``) or ``colorblind``.
+    ``chart`` is ``line`` (whitegrid) or ``map`` (ticks, no background grid).
+    """
+    import matplotlib as mpl
+
+    from weather_skills_core.plot.style import seaborn_palette_name, seaborn_style_name
+
+    palette = seaborn_palette_name(template)
+    style = seaborn_style_name(chart)
+    try:
+        import seaborn as sns
+    except ImportError:
+        sns = None
+    if sns is not None:
+        sns.set_theme(style=style, palette=palette, context="notebook")
+        if chart == "map":
+            mpl.rcParams["axes.grid"] = False
+    fs = int(fontsize)
+    tick = max(8, int(round(fs * 0.85)))
+    legend = max(8, int(round(fs * 0.9)))
+    mpl.rcParams.update(
+        {
+            "font.size": fs,
+            "axes.titlesize": fs,
+            "axes.labelsize": fs,
+            "xtick.labelsize": tick,
+            "ytick.labelsize": tick,
+            "legend.fontsize": legend,
+            "figure.titlesize": fs,
+        }
+    )
+
+
+def _format_cbar_tick(value):
+    """Short numeric tick: ``10`` not ``10.0``."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    if abs(number - round(number)) < 1e-9:
+        return str(int(round(number)))
+    return f"{number:g}"
+
+
+def colorbar_spec(obj: dict | None) -> dict | None:
+    """Return the ``layout.colorbar`` size dict, or None.
+
+    ``len`` / ``shrink`` is the long-side fraction (0–1); ``thickness`` is the
+    short side in pixels (>1) or figure fraction (≤1).
+    """
+    if not isinstance(obj, dict):
+        return None
+    layout = obj.get("layout")
+    if isinstance(layout, dict) and isinstance(layout.get("colorbar"), dict):
+        return dict(layout["colorbar"])
+    return None
+
+
+def colorbar_size_kwargs(spec=None, *, colorbar=None) -> dict:
+    """Matplotlib ``colorbar()`` kwargs from ``len``/``shrink`` and ``thickness``."""
+    cbar = colorbar if colorbar is not None else colorbar_spec(spec)
+    if not cbar:
+        return {}
+    kw = {}
+    length = cbar.get("len") if cbar.get("len") is not None else cbar.get("shrink")
+    if length is not None:
+        kw["shrink"] = float(length)
+    thickness = cbar.get("thickness")
+    if thickness is not None:
+        thick = float(thickness)
+        if thick > 1:
+            kw["aspect"] = max(4.0, 20.0 * (30.0 / thick))
+        elif thick > 0:
+            kw["fraction"] = thick
+    return kw
+
+
+def apply_colorbar_size(fig, spec=None, *, colorbar=None):
+    """Resize existing colorbar axes from ``len``/``shrink`` and ``thickness``."""
+    cbar = colorbar if colorbar is not None else colorbar_spec(spec)
+    if not cbar:
+        return
+    ax = next((a for a in fig.axes if a.get_label() == "<colorbar>"), None)
+    if ax is None:
+        return
+    length = cbar.get("len") if cbar.get("len") is not None else cbar.get("shrink")
+    thickness = cbar.get("thickness")
+    if length is None and thickness is None:
+        return
+    fig.canvas.draw()
+    pos = ax.get_position()
+    horizontal = pos.width >= pos.height
+    fig_w, fig_h = fig.get_size_inches()
+    dpi = float(fig.dpi or DEFAULT_DPI)
+    x0, y0, width, height = pos.x0, pos.y0, pos.width, pos.height
+    if length is not None:
+        frac = float(length)
+        if 0 < frac <= 1:
+            if horizontal:
+                new_w = width * frac
+                x0 = x0 + (width - new_w) / 2
+                width = new_w
+            else:
+                new_h = height * frac
+                y0 = y0 + (height - new_h) / 2
+                height = new_h
+    if thickness is not None:
+        thick = float(thickness)
+        if thick > 1:
+            if horizontal:
+                height = thick / (dpi * fig_h)
+            else:
+                width = thick / (dpi * fig_w)
+        elif thick > 0:
+            if horizontal:
+                height = thick
+            else:
+                width = thick
+    ax.set_in_layout(False)
+    ax.set_position([x0, y0, width, height])
+
+
+def add_shared_colorbar(fig, mappable, axes, label="", *, location=None, **kwargs):
+    """Attach a colorbar in a matplotlib-reserved slot (not a figure-fraction box).
+
+    One map gets a right-hand bar; several maps share a bottom bar. Discrete
+    ``ticks`` (BoundaryNorm bounds) are all labeled.
+    """
+    import numpy as np
+
+    if mappable is None:
+        return None
+    if hasattr(axes, "ravel"):
+        axes = [ax for ax in np.ravel(axes) if getattr(ax, "get_visible", lambda: True)()]
+    elif not isinstance(axes, (list, tuple)):
+        axes = [axes]
+    if not axes:
+        return None
+    if location is None:
+        location = "right" if len(axes) == 1 else "bottom"
+    ticks = kwargs.get("ticks")
+    tick_list = list(ticks) if ticks is not None else None
+    labels = kwargs.pop("labels", None)
+    # Discrete class bars need the full axes span so every bound can be labeled.
+    shrink = kwargs.pop("shrink", None)
+    if shrink is None:
+        shrink = 1.0 if tick_list and len(tick_list) >= 6 else 0.8
+    pad = kwargs.pop("pad", 0.08)
+    if "location" in kwargs:
+        location = kwargs.pop("location")
+    cbar = fig.colorbar(
+        mappable,
+        ax=axes,
+        location=location,
+        shrink=shrink,
+        pad=pad,
+        **kwargs,
+    )
+    if label:
+        cbar.set_label(label)
+    if tick_list is not None:
+        cbar.set_ticks(tick_list)
+        if labels is not None:
+            if len(list(labels)) != len(tick_list):
+                from weather_skills_core.errors import UsageError
+
+                raise UsageError(
+                    f"colorbar labels has {len(list(labels))} entries "
+                    f"but ticks has {len(tick_list)}"
+                )
+            cbar.set_ticklabels(list(labels))
+        else:
+            cbar.set_ticklabels([_format_cbar_tick(t) for t in tick_list])
+    elif labels is not None:
+        from weather_skills_core.errors import UsageError
+
+        raise UsageError("colorbar labels requires ticks")
+    return cbar
+
+
+def save_figure(fig, path, *, pad_inches=None, tight=True, dpi=None):
+    """Write a PNG. Default tight-crops chrome; ``tight=False`` keeps ``figsize``."""
+    import matplotlib.pyplot as plt
+
+    output = Path(path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    kw = {"dpi": DEFAULT_DPI if dpi is None else dpi}
+    if tight:
+        kw["bbox_inches"] = "tight"
+        if pad_inches is not None:
+            kw["pad_inches"] = pad_inches
+    fig.savefig(output, **kw)
+    plt.close(fig)
+    return output

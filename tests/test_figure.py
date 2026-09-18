@@ -1,10 +1,10 @@
-"""Tests for weather_skills_core.figure."""
+"""Tests for weather_skills_core.plot.figure."""
 
 import argparse
 
 import pytest
 
-from weather_skills_core.figure import (
+from weather_skills_core.plot.figure import (
     DEFAULT_FONTSIZE,
     add_shared_colorbar,
     apply_style,
@@ -96,6 +96,30 @@ def test_add_shared_colorbar_labels_every_discrete_tick():
     fig.canvas.draw()
     labels = [t.get_text() for t in cbar.ax.get_xticklabels() if t.get_visible() and t.get_text()]
     assert labels == ["2", "5", "10", "25", "50", "75", "100", "150", "200", "300"]
+    plt.close(fig)
+
+
+def test_add_shared_colorbar_custom_tick_labels():
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import numpy as np
+    from matplotlib.colors import BoundaryNorm, ListedColormap
+
+    bounds = [0, 10, 50, 100]
+    cmap = ListedColormap(["#fff", "#080", "#040"])
+    norm = BoundaryNorm(bounds, cmap.N)
+    fig, ax = plt.subplots(figsize=(4, 3))
+    mesh = ax.pcolormesh(np.arange(4).reshape(2, 2), cmap=cmap, norm=norm)
+    cbar = add_shared_colorbar(
+        fig, mesh, ax, "precip", ticks=bounds, labels=["dry", "low", "wet", "flood"]
+    )
+    fig.canvas.draw()
+    texts = [t.get_text() for t in cbar.ax.get_yticklabels() if t.get_text()]
+    if not texts:
+        texts = [t.get_text() for t in cbar.ax.get_xticklabels() if t.get_text()]
+    assert texts == ["dry", "low", "wet", "flood"]
     plt.close(fig)
 
 
