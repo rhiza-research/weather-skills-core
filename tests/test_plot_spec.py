@@ -367,7 +367,12 @@ def test_precip_nested_windows_keep_absolute_mm_colors():
     )
 
     assert len(PRECIP_MASTER_COLORS) == len(PRECIP_MASTER_BOUNDS) - 1
-    assert PRECIP_MASTER_COLORS == [*PRECIP_COLORS[1:5], *PRECIP_COLORS[6:16]]
+    assert PRECIP_MASTER_COLORS == [
+        *PRECIP_COLORS[1:5],
+        *PRECIP_COLORS[6:8],
+        *PRECIP_COLORS[9:16],
+        "#7a0000",
+    ]
 
     assert precip_window_name(None) == "ppt_week"
     assert precip_window_name(1) == "ppt_daily"
