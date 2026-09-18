@@ -271,20 +271,78 @@ def test_named_datasets_from_spec_and_cli_fallback():
         datasets_from_cli_or_spec(None, None, min_count=1)
 
 
-def test_precip_default_colorscale_is_chirps():
+def test_precip_default_colorscale_is_nested_week_window():
     da = make_gridded()["precip"]
     da.attrs["units"] = "mm"
     da.attrs["standard_name"] = "lwe_thickness_of_precipitation_amount"
     scale = resolve_colorscale(da, None)
-    assert scale["name"] == "chirps_total"
+    assert scale["name"] == "ppt_week"
     assert scale["bounds"][0] == 0
+    assert scale["bounds"][-1] == 200
     assert scale["colors"][0] == "#ffffff"
-    assert scale["colors"][1] == "#ffffff"
-    assert scale["colors"][2] == "#c8ffbe"
-    assert scale["colors"][-1] == "#ffe6e6"
-    aliased = resolve_colorscale(da, "ppt_total")
-    assert aliased["colors"] == scale["colors"]
-    assert aliased["bounds"] == scale["bounds"]
+    assert scale["colors"][1] == "#e4f6d0"
+    assert scale["colors"][5] == "#22b08a"
+    chc = resolve_colorscale(da, "ppt_total")
+    assert chc["name"] == "ppt_total"
+    assert chc["colors"][0] == "#ffffff"
+    assert chc["colors"][1] == "#ffffff"
+    assert chc["colors"][2] == "#c8ffbe"
+    assert chc["colors"][-1] == "#ffe6e6"
+    assert chc["bounds"][-1] == 2500
+
+
+def test_precip_nested_windows_keep_absolute_mm_colors():
+    from weather_skills_core.plot.style import (
+        PRECIP_MASTER_COLORS,
+        PRECIP_OVER,
+        PRECIP_UNDER,
+        precip_nested_palette,
+        precip_window_name,
+        widest_precip_window,
+    )
+
+    assert precip_window_name(None) == "ppt_week"
+    assert precip_window_name(1) == "ppt_daily"
+    assert precip_window_name(1.9) == "ppt_daily"
+    assert precip_window_name(2) == "ppt_week"
+    assert precip_window_name(9.9) == "ppt_week"
+    assert precip_window_name(10) == "ppt_month"
+    assert precip_window_name(39.9) == "ppt_month"
+    assert precip_window_name(40) == "ppt_season"
+    assert widest_precip_window(1, 7, 90) == "ppt_season"
+    assert widest_precip_window(1, None) == "ppt_week"
+
+    daily = make_gridded()["precip"]
+    daily.attrs.update(
+        units="mm",
+        standard_name="lwe_thickness_of_precipitation_amount",
+        aggregation_period="1 day",
+    )
+    weekly = daily.copy()
+    weekly.attrs["aggregation_period"] = "7 day"
+    monthly = daily.copy()
+    monthly.attrs["aggregation_period"] = "10 day"
+    seasonal = daily.copy()
+    seasonal.attrs["aggregation_period"] = "90 day"
+
+    sd, sw, sm, ss = (
+        resolve_colorscale(daily, None),
+        resolve_colorscale(weekly, None),
+        resolve_colorscale(monthly, None),
+        resolve_colorscale(seasonal, None),
+    )
+    assert sd["name"] == "ppt_daily" and sd["bounds"][-1] == 50
+    assert sw["name"] == "ppt_week" and sw["bounds"][-1] == 200
+    assert sm["name"] == "ppt_month" and sm["bounds"][-1] == 400
+    assert ss["name"] == "ppt_season" and ss["bounds"][-1] == 1000
+    assert sd["colors"][5] == sw["colors"][5] == sm["colors"][5] == "#22b08a"
+    season = precip_nested_palette("ppt_season")
+    assert season["colors"][0] == PRECIP_UNDER
+    assert season["colors"][1:-1] == PRECIP_MASTER_COLORS
+    assert season["colors"][-1] == PRECIP_OVER
+    aliased = resolve_colorscale(daily, "ppt_daily")
+    assert aliased["colors"] == sd["colors"]
+    assert aliased["bounds"] == sd["bounds"]
 
 
 def test_precip_anomaly_and_poa_and_spi_colorscales():

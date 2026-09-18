@@ -333,8 +333,9 @@ def _heatmap_scale(da, colormap, *, stretch=False):
     ``BoundaryNorm`` so the colorbar can use arbitrary limits.
 
     Names, comma lists, and ``style.colormap`` objects all go through
-    ``resolve_colorscale`` so a CHC palette, a user-registry name, or a custom
-    discrete ``{colors, bounds}`` object resolve the same way.
+    ``resolve_colorscale`` so a nested precip window, a CHC palette, a
+    user-registry name, or a custom discrete ``{colors, bounds}`` object
+    resolve the same way.
     """
     scale = resolve_colorscale(da, colormap, stretch=stretch)
     if scale.get("bounds") and not stretch:

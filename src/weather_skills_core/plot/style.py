@@ -162,8 +162,40 @@ RANK_COLORS = _rgb(
     (0, 0, 85),
 )
 
+
+def precip_window_name(days: float | None) -> str:
+    """Pick a nested precip colorbar window from ``aggregation_period`` days."""
+    if days is None:
+        return "ppt_week"
+    if days < 2:
+        return "ppt_daily"
+    if days < 10:
+        return "ppt_week"
+    if days < 40:
+        return "ppt_month"
+    return "ppt_season"
+
+
+def widest_precip_window(*days: float | None) -> str:
+    """Window that covers every aggregation in ``days`` (highest vmax)."""
+    return max((precip_window_name(d) for d in days), key=PRECIP_WINDOW_ORDER.index)
+
+
+def precip_nested_palette(name: str) -> dict:
+    """Packed under + master prefix + next-class over for a window name."""
+    if name not in PRECIP_WINDOW_VMAX:
+        raise UsageError(f"unknown precip window {name!r}")
+    vmax = PRECIP_WINDOW_VMAX[name]
+    bounds = [b for b in PRECIP_MASTER_BOUNDS if b <= vmax]
+    n_bins = len(bounds) - 1
+    classes = PRECIP_MASTER_COLORS[:n_bins]
+    over = PRECIP_MASTER_COLORS[n_bins] if n_bins < len(PRECIP_MASTER_COLORS) else PRECIP_OVER
+    return {"colors": [PRECIP_UNDER, *classes, over], "bounds": list(bounds)}
+
+
 DISCRETE_PRECIP_NAMES = frozenset(
     {
+        *PRECIP_WINDOW_ORDER,
         "chirps_total",
         "chirps_short",
         "chirps_anom",
@@ -257,6 +289,7 @@ def default_style() -> dict:
         "dpi": DEFAULT_DPI,
         "colormap": None,
         "colormaps": {
+            **{name: precip_nested_palette(name) for name in PRECIP_WINDOW_ORDER},
             "chirps_total": {"colors": PRECIP_COLORS, "bounds": PRECIP_BOUNDS},
             "ppt_total": {"colors": PRECIP_COLORS, "bounds": PRECIP_BOUNDS},
             "chirps_short": {"colors": PRECIP_COLORS, "bounds": PRECIP_SHORT_BOUNDS},
@@ -482,17 +515,20 @@ def is_spi(da) -> bool:
 
 
 def named_precip_scale(da) -> tuple[str, list[str], list[float]]:
-    """Return ``(name, colors, bounds)`` for the default precip palette."""
+    """Return ``(name, colors, bounds)`` for the default precip palette.
+
+    Totals use a nested absolute-mm master cropped by ``aggregation_period``.
+    The CHC rainbow palettes remain available as ``ppt_total`` / ``ppt_short``.
+    """
     if is_spi(da):
         return "spi", list(SPI_COLORS), list(SPI_BOUNDS)
     if is_precip_poa(da):
         return "ppt_poa", list(PRECIP_POA_COLORS), list(PRECIP_POA_BOUNDS)
     if is_precip_anomaly(da):
         return "chirps_anom", list(PRECIP_ANOMALY_COLORS), list(PRECIP_ANOMALY_BOUNDS)
-    days = aggregation_days(da)
-    if days is not None and days < PRECIP_LONG_MIN_DAYS:
-        return "chirps_short", list(PRECIP_COLORS), list(PRECIP_SHORT_BOUNDS)
-    return "chirps_total", list(PRECIP_COLORS), list(PRECIP_BOUNDS)
+    name = precip_window_name(aggregation_days(da))
+    entry = precip_nested_palette(name)
+    return name, list(entry["colors"]), list(entry["bounds"])
 
 
 def rank_colorscale(n_seasons: int) -> dict:
@@ -651,8 +687,9 @@ def resolve_colorscale(
 
     ``colormap`` may be a matplotlib name, a comma-separated color list, or an
     object with ``colors`` / ``bounds`` / ``under`` / ``over``. Named palettes
-    resolve against the built-in CHC aliases, then the active ``--style-file``
-    / user registry (so a custom ``colormaps.drought`` entry is not ignored).
+    resolve against the built-in nested ``ppt_*`` windows and CHC aliases, then
+    the active ``--style-file`` / user registry (so a custom ``colormaps.drought``
+    entry is not ignored).
     """
     parsed = parse_colormap_spec(colormap)
     palettes = colormap_palettes(registry)

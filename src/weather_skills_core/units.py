@@ -474,7 +474,7 @@ def precip_for_display(ds, name: str):
     if looks_like_rate_display_name(attrs.get("GRIB_name")):
         attrs["GRIB_name"] = PRECIP_AMOUNT_LONG_NAME
     attrs["cell_methods"] = format_cell_methods(dim, "sum")
-    # Keep aggregation_period so plotters can pick a period-aware precip palette.
+    # Keep aggregation_period so plotters can crop the nested precip palette.
     out = ds.copy(deep=False)
     out[name] = plain
     out[name].attrs = attrs
