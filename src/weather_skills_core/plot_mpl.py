@@ -838,16 +838,8 @@ def apply_annotations_and_shapes(fig, spec: dict, axes=None) -> None:
     visible = _visible_axes(fig, axes)
     if not visible:
         return
-    layout = spec.get("layout") or {}
-    patch = spec.get("patch") or {}
-    anns = list(
-        spec.get("annotations") or layout.get("annotations") or patch.get("annotations") or []
-    )
-    if isinstance(patch.get("layout"), dict):
-        anns = anns or list(patch["layout"].get("annotations") or [])
-    shapes = list(spec.get("shapes") or layout.get("shapes") or patch.get("shapes") or [])
-    if isinstance(patch.get("layout"), dict):
-        shapes = shapes or list(patch["layout"].get("shapes") or [])
+    anns = list(spec.get("annotations") or [])
+    shapes = list(spec.get("shapes") or [])
     for i, ann in enumerate(anns):
         if not isinstance(ann, dict):
             continue
@@ -870,8 +862,6 @@ def apply_annotations_and_shapes(fig, spec: dict, axes=None) -> None:
 
 def apply_axes_from_spec(fig, spec: dict, axes=None) -> None:
     opts = spec.get("axes")
-    if opts is None:
-        opts = (spec.get("layout") or {}).get("axes")
     if opts is None:
         return
     visible = _visible_axes(fig, axes)
@@ -905,25 +895,25 @@ def line_kwargs(style: dict | None, *, loc: str = "line") -> dict:
     return pick({k: v for k, v in raw.items() if k in LINE_KEYS}, LINE_KEYS, loc=loc)
 
 
-def mesh_kwargs(spec: dict, trace: dict | None = None) -> dict:
-    raw = (trace or {}).get("mesh") or spec.get("mesh") or {}
-    return pick(raw, MESH_KEYS, loc="mesh") if raw else {}
+def mesh_kwargs(trace: dict | None) -> dict:
+    raw = (trace or {}).get("mesh") or {}
+    return pick(raw, MESH_KEYS, loc="traces[].mesh") if raw else {}
 
 
-def contour_kwargs(spec: dict, trace: dict | None = None) -> dict:
-    raw = dict((trace or {}).get("contour") or spec.get("contour") or {})
+def contour_kwargs(trace: dict | None) -> dict:
+    raw = dict((trace or {}).get("contour") or {})
     raw.pop("lines", None)
-    return pick(raw, CONTOUR_KEYS, loc="contour") if raw else {}
+    return pick(raw, CONTOUR_KEYS, loc="traces[].contour") if raw else {}
 
 
-def quiver_kwargs(spec: dict, trace: dict | None = None) -> dict:
-    raw = (trace or {}).get("quiver") or spec.get("quiver") or {}
-    return pick(raw, QUIVER_KEYS, loc="quiver") if raw else {}
+def quiver_kwargs(trace: dict | None) -> dict:
+    raw = (trace or {}).get("quiver") or {}
+    return pick(raw, QUIVER_KEYS, loc="traces[].quiver") if raw else {}
 
 
-def windrose_kwargs(spec: dict) -> dict:
-    raw = spec.get("windrose") or {}
-    return pick(raw, WINDROSE_KEYS, loc="windrose") if raw else {}
+def windrose_kwargs(trace: dict | None) -> dict:
+    raw = (trace or {}).get("windrose") or {}
+    return pick(raw, WINDROSE_KEYS, loc="traces[].windrose") if raw else {}
 
 
 def scatter_kwargs(style: dict | None, *, loc: str = "scatter") -> dict:
@@ -940,8 +930,8 @@ def bar_kwargs(style: dict | None, *, loc: str = "bar") -> dict:
     return pick({k: v for k, v in raw.items() if k in BAR_KEYS}, BAR_KEYS, loc=loc)
 
 
-def fill_kwargs(spec: dict | None, *, loc: str = "fill") -> dict:
-    raw = (spec or {}).get("fill") if isinstance(spec, dict) else None
+def fill_kwargs(trace: dict | None, *, loc: str = "traces[].fill") -> dict:
+    raw = (trace or {}).get("fill") if isinstance(trace, dict) else None
     return pick(raw, FILL_KEYS, loc=loc) if raw else {}
 
 
@@ -953,17 +943,19 @@ def box_kwargs(style: dict | None, *, loc: str = "box") -> dict:
 
 
 def resolve_axes_block(spec: dict | None) -> dict | list:
-    """``axes`` for a dumped spec: template keys plus any user values."""
+    """``axes`` for a dumped spec: only the keys that carry a value.
+
+    The full set of editable knobs lives in ``AXES_TEMPLATE`` and is documented
+    in ``docs/plotting.md``; stamping all of them as nulls onto every sidecar
+    buried the handful of values that were actually set.
+    """
 
     def _one(user):
-        out = dict(AXES_TEMPLATE)
-        if isinstance(user, dict):
-            out.update(user)
-        return out
+        if not isinstance(user, dict):
+            return {}
+        return {k: v for k, v in user.items() if v is not None}
 
     user = (spec or {}).get("axes")
-    if user is None:
-        user = ((spec or {}).get("layout") or {}).get("axes")
     if isinstance(user, list):
         return [_one(item) for item in user]
     return _one(user)
@@ -985,24 +977,14 @@ def attach_figure_spec(resolved: dict, spec: dict | None = None) -> dict:
             out[key] = list(src[key])
         else:
             out.setdefault(key, list(out.get(key) or []))
-    for key in ("line", "mesh", "contour", "fill", "quiver", "windrose", "mediogram"):
-        if src.get(key) is not None:
-            out[key] = src[key]
     layout = dict(out.get("layout") or {})
     spec_layout = src.get("layout") or {}
-    if spec_layout.get("facecolor") is not None:
-        layout["facecolor"] = spec_layout["facecolor"]
-    else:
-        layout.setdefault("facecolor", layout.get("facecolor"))
-    if spec_layout.get("dpi") is not None:
-        layout["dpi"] = spec_layout["dpi"]
-    else:
-        layout.setdefault("dpi", None)
-    if spec_layout.get("colorbar") is not None:
-        layout["colorbar"] = spec_layout["colorbar"]
+    for key in ("facecolor", "dpi", "colorbar"):
+        if spec_layout.get(key) is not None:
+            layout[key] = spec_layout[key]
     out["layout"] = layout
     style = dict(out.get("style") or {})
-    rc = (src.get("style") or {}).get("rc") or src.get("rc")
+    rc = (src.get("style") or {}).get("rc")
     if rc:
         style["rc"] = rc
     out["style"] = style
@@ -1013,17 +995,15 @@ def apply_style_then_rc(spec: dict, *, chart: str, fontsize, template: str) -> N
     from weather_skills_core.figure import apply_style
 
     apply_style(fontsize, template=template, chart=chart)
-    style = spec.get("style") or {}
-    apply_rc(style.get("rc") or spec.get("rc"))
+    apply_rc((spec.get("style") or {}).get("rc"))
 
 
 def finish_figure(fig, spec: dict, axes=None) -> None:
     """Post-draw: per-axes options, annotations, shapes, figure facecolor."""
     apply_axes_from_spec(fig, spec, axes)
     apply_annotations_and_shapes(fig, spec, axes)
-    facecolor = (spec.get("layout") or {}).get("facecolor") or spec.get("facecolor")
-    if facecolor:
-        fig.patch.set_facecolor(facecolor)
-    dpi = (spec.get("layout") or {}).get("dpi") or (spec.get("style") or {}).get("dpi")
-    if dpi:
-        fig.set_dpi(float(dpi))
+    layout = spec.get("layout") or {}
+    if layout.get("facecolor"):
+        fig.patch.set_facecolor(layout["facecolor"])
+    if layout.get("dpi"):
+        fig.set_dpi(float(layout["dpi"]))

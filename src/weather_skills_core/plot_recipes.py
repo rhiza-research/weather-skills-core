@@ -5,12 +5,8 @@ from __future__ import annotations
 import numpy as np
 
 from weather_skills_core.figure import add_shared_colorbar, apply_date_ticks
-from weather_skills_core.plot_compile import (
-    as_plot_x,
-    draw_geo_lines,
-    figsize_from_extent,
-    geojson_lines,
-)
+from weather_skills_core.plot_compile import as_plot_x, figsize_from_extent
+from weather_skills_core.plot_geo import draw_geo_overlays, load_geo_overlays
 from weather_skills_core.plot_mpl import (
     LEGEND_KEYS,
     apply_style_then_rc,
@@ -23,6 +19,7 @@ from weather_skills_core.plot_mpl import (
     pick,
     scatter_kwargs,
 )
+from weather_skills_core.plot_spec import trace_at
 from weather_skills_core.plot_style import (
     DEFAULT_FONTSIZE,
     mpl_cmap_norm,
@@ -166,11 +163,10 @@ def compile_heatmap_grid(
     import matplotlib.pyplot as plt
 
     apply_style_then_rc(spec or {}, chart="map", fontsize=fontsize, template=template)
+    trace = trace_at(spec)
     nrows = len(cells)
     ncols = max((len(row) for row in cells), default=1)
-    geo_x = geo_y = None
-    if overlays and extent is not None:
-        geo_x, geo_y = geojson_lines(extent)
+    geo_layers = load_geo_overlays(extent) if overlays else []
     sw, sh = (5.0, 4.0)
     if extent is not None:
         sw, sh = figsize_from_extent(*extent)
@@ -215,7 +211,7 @@ def compile_heatmap_grid(
                     color="#888888",
                 )
             elif kind == "scatter":
-                sk = scatter_kwargs((spec or {}).get("scatter") or cell.get("scatter") or {})
+                sk = scatter_kwargs(trace.get("scatter") or {})
                 mappable = ax.scatter(
                     cell["x"],
                     cell["y"],
@@ -232,9 +228,9 @@ def compile_heatmap_grid(
                 )
                 if scale_id not in mappables:
                     mappables[scale_id] = mappable
-                draw_geo_lines(ax, geo_x, geo_y, lw=0.5)
+                draw_geo_overlays(ax, geo_layers)
             else:
-                mk = mesh_kwargs(spec or {}, cell)
+                mk = mesh_kwargs(trace)
                 mappable = ax.pcolormesh(
                     np.asarray(cell["x"], dtype=float),
                     np.asarray(cell["y"], dtype=float),
@@ -243,7 +239,7 @@ def compile_heatmap_grid(
                 )
                 if scale_id not in mappables:
                     mappables[scale_id] = mappable
-                draw_geo_lines(ax, geo_x, geo_y, lw=0.5)
+                draw_geo_overlays(ax, geo_layers)
             note = None
             if cell_notes and r < len(cell_notes) and c < len(cell_notes[r]):
                 note = cell_notes[r][c]
@@ -437,7 +433,7 @@ def compile_mediogram(
     import matplotlib.pyplot as plt
 
     apply_style_then_rc(spec or {}, chart="line", fontsize=fontsize, template=template)
-    opts = (spec or {}).get("mediogram") or {}
+    opts = trace_at(spec).get("mediogram") or {}
     n_steps = fc.shape[1]
     if figsize is not None:
         fig_w, fig_h = float(figsize[0]), float(figsize[1])

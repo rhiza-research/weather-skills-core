@@ -17,6 +17,176 @@ from weather_skills_core.plot_style import (
 _INDEX_INT_RE = re.compile(r"[+-]?[0-9]+")
 _NON_ZARR_SUFFIXES = {".geojson", ".json", ".shp", ".gpkg", ".kml"}
 
+# Artist option blocks. Their contents are checked against the matplotlib
+# allowlists in plot_mpl; here we only fix where they may appear.
+ARTIST_BLOCKS = frozenset(
+    {"line", "mesh", "contour", "scatter", "bar", "quiver", "windrose", "fill", "box", "mediogram"}
+)
+
+# The one home for every knob. A knob named here may not be read anywhere else.
+TOP_KEYS = frozenset(
+    {
+        "version",
+        "skill",
+        "inputs",
+        "traces",
+        "layers",
+        "layout",
+        "style",
+        "geo",
+        "axes",
+        "annotations",
+        "shapes",
+        "title",
+        "subplot_titles",
+        "xlabel",
+        "ylabel",
+        "cbar_label",
+        "legend",
+        "vmin",
+        "vmax",
+        "weather_skills_history",
+    }
+)
+LAYOUT_KEYS = frozenset(
+    {
+        "figsize",
+        "autosize",
+        "dpi",
+        "facecolor",
+        "facet",
+        "colorbar",
+        "shared_colorscale",
+        "subplots",
+    }
+)
+FACET_KEYS = frozenset({"rows", "columns", "max_columns", "n_panels"})
+STYLE_KEYS = frozenset({"template", "colormap", "fontsize", "rc"})
+GEO_KEYS = frozenset(
+    {"extent", "bbox", "cities", "mask_geojson", "draw_boxes", "overlays", "lat", "lon"}
+)
+INPUT_KEYS = frozenset({"id", "path", "variable", "index", "label", "colormap", "role"})
+TRACE_KEYS = (
+    frozenset(
+        {
+            "type",
+            "input",
+            "style",
+            "x",
+            "y",
+            "path",
+            "along",
+            "reduce",
+            "align",
+            "band",
+            "pair_on",
+            "u_variable",
+            "v_variable",
+            "x_variable",
+            "y_variable",
+            "metric",
+            "leads",
+        }
+    )
+    | ARTIST_BLOCKS
+)
+LAYER_KEYS = frozenset({"kind", "path", "options", "input", "raw"})
+
+_SECTIONS = {
+    "layout": LAYOUT_KEYS,
+    "style": STYLE_KEYS,
+    "geo": GEO_KEYS,
+}
+
+# Keys that used to be read from a second location. Naming the canonical path
+# in the error is the whole point: an agent editing a sidecar gets told where
+# the knob moved instead of watching its edit silently do nothing.
+RELOCATED = {
+    "patch": "merge your edits into the spec itself (or pass --patch on the CLI)",
+    "layered": "traces[0].type = 'layer'",
+    "rc": "style.rc",
+    "facecolor": "layout.facecolor",
+    "colorbar": "layout.colorbar",
+    "along": "traces[].along",
+    "reduce": "traces[].reduce",
+    "align": "traces[].align",
+    "band": "traces[].band",
+    "u_variable": "traces[].u_variable",
+    "v_variable": "traces[].v_variable",
+    "x_variable": "traces[].x_variable",
+    "y_variable": "traces[].y_variable",
+    "pair_on": "traces[].pair_on",
+    "layout.title": "title",
+    "layout.axes": "axes",
+    "layout.annotations": "annotations",
+    "layout.shapes": "shapes",
+    "layout.coloraxis": "layout.colorbar",
+    "layout.rows": "layout.facet.rows",
+    "layout.columns": "layout.facet.columns",
+    "layout.metric": "traces[].metric",
+    "layout.leads": "traces[].leads",
+    "style.dpi": "layout.dpi",
+    "style.max_columns": "layout.facet.max_columns",
+    "style.colormap_a": "inputs[0].colormap",
+    "style.colormap_b": "inputs[1].colormap",
+    **{key: f"traces[].{key}" for key in sorted(ARTIST_BLOCKS)},
+}
+
+
+def _check_keys(obj, allowed, loc, *, relocated_prefix=""):
+    """Raise on any key of ``obj`` outside ``allowed``, naming its new home."""
+    if not isinstance(obj, dict):
+        raise UsageError(f"plot spec {loc} must be an object")
+    for key in obj:
+        if key in allowed:
+            continue
+        moved = RELOCATED.get(f"{relocated_prefix}{key}") or RELOCATED.get(key)
+        where = f"{loc}.{key}" if loc else key
+        if moved:
+            raise UsageError(f"plot spec {where} moved to {moved}")
+        raise UsageError(
+            f"plot spec {where} is not a known key; allowed here: {', '.join(sorted(allowed))}"
+        )
+
+
+def normalize_spec(data: dict) -> dict:
+    """Validate a spec against the canonical schema, returning it unchanged.
+
+    Every knob has exactly one home (see ``TOP_KEYS`` and friends). An unknown
+    key is an error rather than a silent no-op, and a key that used to live
+    somewhere else reports the path it moved to.
+    """
+    if not isinstance(data, dict):
+        raise UsageError("plot spec must be a JSON object")
+    _check_keys(data, TOP_KEYS, "")
+    for section, allowed in _SECTIONS.items():
+        block = data.get(section)
+        if block is None:
+            continue
+        _check_keys(block, allowed, section, relocated_prefix=f"{section}.")
+    facet = (data.get("layout") or {}).get("facet")
+    if facet is not None:
+        _check_keys(facet, FACET_KEYS, "layout.facet")
+    for i, item in enumerate(data.get("inputs") or []):
+        if isinstance(item, dict):
+            _check_keys(item, INPUT_KEYS, f"inputs[{i}]")
+    for i, item in enumerate(data.get("traces") or []):
+        if isinstance(item, dict):
+            _check_keys(item, TRACE_KEYS, f"traces[{i}]")
+    for i, item in enumerate(data.get("layers") or []):
+        if isinstance(item, dict):
+            _check_keys(item, LAYER_KEYS, f"layers[{i}]")
+    return data
+
+
+def trace_at(spec: dict | None, index: int = 0) -> dict:
+    """The ``traces[index]`` object, or ``{}``. The one home for trace knobs."""
+    traces = (spec or {}).get("traces") or []
+    if not isinstance(traces, list) or index >= len(traces):
+        return {}
+    trace = traces[index]
+    return trace if isinstance(trace, dict) else {}
+
 
 def _zarr_spec_path(raw):
     """Return a Zarr ``Path`` from a spec field, or ``None`` for ids / GeoJSON."""
@@ -39,7 +209,7 @@ class PlotSpec:
     def __init__(self, data: dict, path: Path | None = None):
         if not isinstance(data, dict):
             raise UsageError("plot spec must be a JSON object")
-        self.data = data
+        self.data = normalize_spec(data)
         self.path = Path(path) if path is not None else None
         self.ds = None
         self.datasets = None
@@ -215,10 +385,22 @@ def load_spec(value) -> PlotSpec:
     return PlotSpec(data)
 
 
+def prune_nulls(value):
+    """Drop keys whose value is null. A null in this schema means "unset", so a
+    sidecar reads better showing only what was actually resolved."""
+    if isinstance(value, dict):
+        return {k: prune_nulls(v) for k, v in value.items() if v is not None}
+    if isinstance(value, list):
+        return [prune_nulls(v) for v in value]
+    return value
+
+
 def dump_spec(spec: dict | PlotSpec, path=None) -> str:
     """Serialize a spec (optionally write ``path``; ``-`` means stdout)."""
     data = spec.to_dict() if isinstance(spec, PlotSpec) else copy.deepcopy(spec)
     data.setdefault("version", SPEC_VERSION)
+    normalize_spec(data)
+    data = prune_nulls(data)
     text = json.dumps(data, indent=2, default=str) + "\n"
     if path is None:
         return text
@@ -240,113 +422,182 @@ def overlay_spec(base: dict, overlay: dict | None) -> dict:
     return deep_merge(base, overlay)
 
 
-def spec_from_flags(
-    *,
-    input_path=None,
-    variable=None,
-    style="heatmap",
-    colormap=None,
-    title=None,
-    subplot_titles=None,
-    xlabel=None,
-    ylabel=None,
-    cbar_label=None,
-    index=None,
-    extent=None,
-    cities=None,
-    fontsize=None,
-    figsize=None,
-    legend=None,
-    bbox=None,
-    mask_geojson=None,
-    draw_boxes=None,
-    rows=None,
-    columns=None,
-    vmin=None,
-    vmax=None,
-    patch=None,
-    along=None,
-    reduce=None,
-    align=None,
-    band=None,
-    template=None,
-) -> dict:
-    """Build a (possibly partial) spec from CLI flags."""
-    inputs = []
-    if input_path is not None:
-        item = {"id": "a", "path": str(input_path)}
-        if variable:
-            item["variable"] = variable
-        if index:
-            item["index"] = index
-        inputs.append(item)
-    facet = {}
-    if rows is not None:
-        facet["rows"] = rows
-    if columns is not None:
-        facet["columns"] = columns
-    if style in ("heatmap", "contour"):
-        facet.setdefault("max_columns", DEFAULT_MAX_COLUMNS)
+# One CLI flag, one canonical spec path. This table is the only place that
+# knows how a flag lands in the spec, so adding a flag is a line here rather
+# than a branch in every skill. An int segment indexes a list.
+FLAG_TO_SPEC = {
+    "title": ("title",),
+    "subplot_titles": ("subplot_titles",),
+    "xlabel": ("xlabel",),
+    "ylabel": ("ylabel",),
+    "cbar_label": ("cbar_label",),
+    "legend": ("legend",),
+    "vmin": ("vmin",),
+    "vmax": ("vmax",),
+    "axes": ("axes",),
+    "annotations": ("annotations",),
+    "shapes": ("shapes",),
+    "colormap": ("style", "colormap"),
+    "fontsize": ("style", "fontsize"),
+    "template": ("style", "template"),
+    "rc": ("style", "rc"),
+    "figsize": ("layout", "figsize"),
+    "dpi": ("layout", "dpi"),
+    "facecolor": ("layout", "facecolor"),
+    "subplots": ("layout", "subplots"),
+    "colorbar": ("layout", "colorbar"),
+    "rows": ("layout", "facet", "rows"),
+    "columns": ("layout", "facet", "columns"),
+    "max_columns": ("layout", "facet", "max_columns"),
+    "shared_colorscale": ("layout", "shared_colorscale"),
+    # plot-compare / plot-compare-forecasts name the panel-column count --panels.
+    "panels": ("layout", "facet", "columns"),
+    "extent": ("geo", "extent"),
+    "bbox": ("geo", "bbox"),
+    "cities": ("geo", "cities"),
+    "mask_geojson": ("geo", "mask_geojson"),
+    "draw_boxes": ("geo", "draw_boxes"),
+    "lat": ("geo", "lat"),
+    "lon": ("geo", "lon"),
+    "input_path": ("inputs", 0, "path"),
+    "variable": ("inputs", 0, "variable"),
+    "index": ("inputs", 0, "index"),
+    "label": ("inputs", 0, "label"),
+    # plot-compare's two sides are inputs[0] and inputs[1].
+    "variable_a": ("inputs", 0, "variable"),
+    "variable_b": ("inputs", 1, "variable"),
+    "colormap_a": ("inputs", 0, "colormap"),
+    "colormap_b": ("inputs", 1, "colormap"),
+    "trace_type": ("traces", 0, "type"),
+    "trace_style": ("traces", 0, "style"),
+    "along": ("traces", 0, "along"),
+    "reduce": ("traces", 0, "reduce"),
+    "align": ("traces", 0, "align"),
+    "band": ("traces", 0, "band"),
+    "pair_on": ("traces", 0, "pair_on"),
+    "u_variable": ("traces", 0, "u_variable"),
+    "v_variable": ("traces", 0, "v_variable"),
+    "x_variable": ("traces", 0, "x_variable"),
+    "y_variable": ("traces", 0, "y_variable"),
+    "metric": ("traces", 0, "metric"),
+    "leads": ("traces", 0, "leads"),
+}
+
+# Flags whose value is normalized on the way into the spec (JSON-safe types).
+_FLAG_COERCE = {
+    "figsize": lambda v: [float(v[0]), float(v[1])],
+    "bbox": lambda v: list(v),
+    "draw_boxes": lambda v: [list(b) for b in v],
+    "subplot_titles": lambda v: list(v),
+    "mask_geojson": str,
+    "input_path": str,
+    "reduce": lambda v: [v] if isinstance(v, str) else list(v),
+    "band": lambda v: list(v) if isinstance(v, (list, tuple)) else v,
+}
+
+
+def _flag_path(flag):
+    try:
+        return FLAG_TO_SPEC[flag]
+    except KeyError:
+        raise UsageError(f"{flag!r} is not a known plot flag; add it to FLAG_TO_SPEC") from None
+
+
+def _dig(spec, path, *, create):
+    """Walk ``path[:-1]``, returning the container that holds ``path[-1]``."""
+    node = spec
+    for i, segment in enumerate(path[:-1]):
+        nxt = path[i + 1]
+        blank = [] if isinstance(nxt, int) else {}
+        if isinstance(segment, int):
+            if not isinstance(node, list):
+                return None
+            while create and len(node) <= segment:
+                node.append({})
+            if segment >= len(node):
+                return None
+            node = node[segment]
+        else:
+            if not isinstance(node, dict):
+                return None
+            if segment not in node or node[segment] is None:
+                if not create:
+                    return None
+                node[segment] = blank
+            node = node[segment]
+    return node
+
+
+def spec_set(spec: dict, flag: str, value) -> dict:
+    """Write ``value`` at ``flag``'s canonical path, creating containers."""
+    path = _flag_path(flag)
+    holder = _dig(spec, path, create=True)
+    coerce = _FLAG_COERCE.get(flag)
+    holder[path[-1]] = coerce(value) if coerce else value
+    return spec
+
+
+def spec_get(spec: dict | None, flag: str, default=None):
+    """Read ``flag`` from its canonical path in ``spec``."""
+    path = _flag_path(flag)
+    holder = _dig(spec or {}, path, create=False)
+    if holder is None:
+        return default
+    key = path[-1]
+    if isinstance(key, int):
+        if not isinstance(holder, list) or key >= len(holder):
+            return default
+        found = holder[key]
+    else:
+        if not isinstance(holder, dict):
+            return default
+        found = holder.get(key)
+    return default if found is None else found
+
+
+def overlay_flags(spec: dict | None, **flags) -> dict:
+    """Copy ``spec`` with every set flag written to its canonical path."""
+    out = copy.deepcopy(spec) if spec else {}
+    for flag, value in flags.items():
+        if value is None or value is False or value == () or value == []:
+            continue
+        spec_set(out, flag, value)
+    return out
+
+
+def resolve_flags(spec: dict | None, **cli) -> dict:
+    """Merge CLI flags over a spec: a set CLI value wins, else the spec's value.
+
+    This is the single precedence rule for every figure skill. Pass the flags
+    the skill accepts and read the resolved values back by flag name.
+    """
+    return {
+        flag: value if value is not None and value != () and value != [] else spec_get(spec, flag)
+        for flag, value in cli.items()
+    }
+
+
+def spec_from_flags(**flags) -> dict:
+    """Build a spec from CLI flags, with the structural defaults filled in."""
+    trace_type = flags.pop("trace_type", None) or flags.pop("style", None) or "heatmap"
     spec = {
         "version": SPEC_VERSION,
-        "inputs": inputs,
-        "layout": {
-            "facet": facet,
-            "shared_colorscale": True,
-            "autosize": True,
-        },
-        "traces": [{"type": style, "input": "a"}],
+        "inputs": [{"id": "a"}],
+        "layout": {"shared_colorscale": True, "autosize": True, "facet": {}},
+        "traces": [{"type": trace_type, "input": "a"}],
         "style": {},
         "geo": {},
         "annotations": [],
         "shapes": [],
     }
-    if along:
-        spec["traces"][0]["along"] = along
-    if reduce:
-        spec["traces"][0]["reduce"] = list(reduce) if not isinstance(reduce, str) else [reduce]
-    if align:
-        spec["align"] = align
-    if band is not None:
-        spec["band"] = band
-    if template:
-        spec["style"]["template"] = template
-    if colormap:
-        spec["style"]["colormap"] = colormap
-    if fontsize is not None:
-        spec["style"]["fontsize"] = fontsize
-    if title is not None:
-        spec["title"] = title
-    if subplot_titles:
-        spec["subplot_titles"] = list(subplot_titles)
-    if xlabel is not None:
-        spec["xlabel"] = xlabel
-    if ylabel is not None:
-        spec["ylabel"] = ylabel
-    if cbar_label is not None:
-        spec["cbar_label"] = cbar_label
-    if legend is not None:
-        spec["legend"] = legend
-    if vmin is not None:
-        spec["vmin"] = vmin
-    if vmax is not None:
-        spec["vmax"] = vmax
-    if figsize is not None:
-        spec["layout"]["figsize"] = list(figsize)
+    if trace_type in ("heatmap", "contour"):
+        spec["layout"]["facet"]["max_columns"] = DEFAULT_MAX_COLUMNS
+    spec = overlay_flags(spec, **flags)
+    if flags.get("figsize") is not None:
         spec["layout"]["autosize"] = False
-    if extent is not None:
-        spec["geo"]["extent"] = extent
-    if cities:
-        spec["geo"]["cities"] = cities
-    if bbox is not None:
-        spec["geo"]["bbox"] = bbox
-    if mask_geojson:
-        spec["geo"]["mask_geojson"] = str(mask_geojson)
-    if draw_boxes:
-        spec["geo"]["draw_boxes"] = list(draw_boxes)
-    if patch:
-        spec["patch"] = patch
-    return spec
+    if not spec["inputs"][0].get("path"):
+        spec["inputs"] = []
+    return normalize_spec(spec)
 
 
 def sidecar_path(output: Path) -> Path:

@@ -28,13 +28,16 @@ weather-skills-core = "weather_skills_core.linting.cli:main"
 geo = ["shapely>=2.1.2", "geopandas>=1.0"]
 # Figure chrome (rcParams, colorbar, save). Plot skills already depend on matplotlib.
 figure = ["matplotlib>=3.8"]
-# Matplotlib compiler (heatmap/timeseries/recipes). PNG via the Agg backend.
-plot = ["matplotlib>=3.8", "seaborn>=0.13", "shapely>=2.1.2"]
+# Matplotlib compiler (maps/timeseries/recipes). PNG via the Agg backend.
+# cartopy carries the map axes and the Natural Earth overlays. matplotlib<3.10
+# because the cartopy gridliner crashes on newer releases.
+plot = ["matplotlib>=3.8,<3.10", "seaborn>=0.13", "shapely>=2.1.2", "cartopy"]
 
 [dependency-groups]
 dev = [
+    "cartopy",
     "geopandas>=1.0",
-    "matplotlib>=3.8",
+    "matplotlib>=3.8,<3.10",
     "seaborn>=0.13",
     "pre-commit>=4.6",
     "pytest>=9.1",

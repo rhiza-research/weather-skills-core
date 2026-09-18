@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import sys
-from importlib.resources import files
 from pathlib import Path
 
 import numpy as np
@@ -12,7 +11,6 @@ import numpy as np
 from weather_skills_core.cf import auto_variable, cf_dim
 from weather_skills_core.errors import UsageError
 from weather_skills_core.figure import (
-    add_shared_colorbar,
     apply_date_ticks,
     axis_label,
     colorbar_spec,
@@ -22,24 +20,24 @@ from weather_skills_core.figure import (
 )
 from weather_skills_core.plot_mpl import (
     apply_style_then_rc,
-    colorbar_mpl_kwargs,
-    contour_kwargs,
     fill_kwargs,
     finish_figure,
     line_kwargs,
-    mesh_kwargs,
     resolve_axes_block,
 )
-from weather_skills_core.plot_spec import apply_index, overlay_spec, panel_shape, parse_index
+from weather_skills_core.plot_spec import (
+    apply_index,
+    overlay_spec,
+    parse_index,
+    trace_at,
+)
 from weather_skills_core.plot_style import (
     DEFAULT_FONTSIZE,
     DEFAULT_MAX_COLUMNS,
     aggregation_days,
     along_dim,
-    mpl_cmap_norm,
     normalize_template,
     parse_band,
-    resolve_colorscale,
 )
 from weather_skills_core.standard_utils import (
     ensure_normalized_longitude,
@@ -54,6 +52,8 @@ from weather_skills_core.units import (
     to_standard_units,
     variable_label_for_display,
 )
+
+_TRACE_SELECTION = ("along", "reduce", "align", "band")
 
 
 def plain(da):
@@ -347,43 +347,6 @@ def timeseries_axis(da, sdim):
     return (init + steps).astype("datetime64[ns]"), "Valid time"
 
 
-def geojson_lines(_extent):
-    """Country outlines from bundled Natural Earth."""
-    raw = json.loads(files("weather_skills_core.data").joinpath("countries.geojson").read_text())
-    xs, ys = [], []
-
-    def _add_ring(ring):
-        if not ring:
-            return
-        xs.extend(float(p[0]) for p in ring)
-        ys.extend(float(p[1]) for p in ring)
-        xs.append(None)
-        ys.append(None)
-
-    def _walk(geom):
-        gtype = geom.get("type")
-        coords = geom.get("coordinates")
-        if gtype == "Polygon":
-            for ring in coords:
-                _add_ring(ring)
-        elif gtype == "MultiPolygon":
-            for poly in coords:
-                for ring in poly:
-                    _add_ring(ring)
-        elif gtype == "LineString":
-            _add_ring(coords)
-        elif gtype == "MultiLineString":
-            for line in coords:
-                _add_ring(line)
-
-    for feat in raw.get("features") or []:
-        geom = feat.get("geometry") or {}
-        _walk(geom)
-    if not xs:
-        return [], []
-    return xs, ys
-
-
 def _prepare_field(ds, spec_input: dict, geo: dict, style: str):
     variable = spec_input.get("variable") or auto_variable(ds)
     if not variable or variable not in ds:
@@ -427,14 +390,13 @@ def _prepare_field(ds, spec_input: dict, geo: dict, style: str):
         if along:
             extras = [d for d in extras if d != along]
         if extras:
-            if reduce_req or along:
-                hint = extras[0]
-                raise UsageError(
-                    f"variable still has non-time dims {extras} after reduce. "
-                    f"Pass reduce for each leftover dim, or along {hint}."
-                )
-            da = da.mean(extras, keep_attrs=True)
-            along = None
+            # Averaging a leftover dim is a decision about the data, so it is
+            # the caller's to make (same rule as plot-timeseries).
+            hint = extras[0]
+            raise UsageError(
+                f"variable still has non-time dims {extras}. Pass --reduce <dim> for "
+                f"each, or --along {hint} to draw one line per {hint} value."
+            )
         if along:
             da = da.transpose(sdim, along)
         return {
@@ -489,14 +451,6 @@ def _prepare_field(ds, spec_input: dict, geo: dict, style: str):
     }
 
 
-def _title_text(value) -> str:
-    if value is None:
-        return ""
-    if isinstance(value, dict):
-        return str(value.get("text") or "")
-    return str(value)
-
-
 def as_plot_x(values):
     """Matplotlib x values: datetime64 stays; timedeltas become days."""
     arr = np.asarray(values)
@@ -505,33 +459,13 @@ def as_plot_x(values):
     return arr
 
 
-def draw_geo_lines(ax, geo_x, geo_y, *, lw=0.6):
-    if not geo_x:
-        return
-    x = [np.nan if v is None else v for v in geo_x]
-    y = [np.nan if v is None else v for v in geo_y]
-    ax.plot(x, y, color="#444444", linewidth=lw, zorder=3)
-
-
-def _apply_patch(fig, axes, patch: dict | None, *, map_extent=None):
-    """Apply spec ``patch`` title. Annotations and shapes go through ``finish_figure``."""
-    del axes, map_extent
-    if not patch:
-        return fig
-    layout = patch.get("layout") or {}
-    title = _title_text(layout.get("title") or patch.get("title"))
-    if title:
-        fig.suptitle(title)
-    return fig
-
-
 def _compile_timeseries(prepared, spec, fontsize, *, template="weather_skills"):
     import matplotlib.pyplot as plt
 
     apply_style_then_rc(spec, chart="line", fontsize=fontsize, template=template)
     da = prepared["da"]
     sdim = prepared["sdim"]
-    align = prepared.get("align") or spec.get("align")
+    align = prepared.get("align")
     xvals, default_xlabel = timeseries_axis(da, sdim)
     if align in ("dayofyear", "day_of_year", "day-of-year"):
         try:
@@ -560,11 +494,11 @@ def _compile_timeseries(prepared, spec, fontsize, *, template="weather_skills"):
     fig, ax = plt.subplots(figsize=tuple(figsize), layout="constrained")
     xplot = as_plot_x(xvals)
     yarr = np.asarray(da.values, dtype=float)
-    band = parse_band(prepared.get("band") or spec.get("band"))
-    trace0 = (spec.get("traces") or [{}])[0]
-    lk = line_kwargs(spec.get("line") or trace0.get("line") or {}, loc="line")
+    band = parse_band(prepared.get("band"))
+    trace0 = trace_at(spec)
+    lk = line_kwargs(trace0.get("line") or {}, loc="traces[0].line")
     color = lk.get("color") or lk.get("c") or "C0"
-    fill_kw = {"color": color, "alpha": 0.25, "linewidth": 0, "zorder": 1, **fill_kwargs(spec)}
+    fill_kw = {"color": color, "alpha": 0.25, "linewidth": 0, "zorder": 1, **fill_kwargs(trace0)}
     if yarr.ndim == 2 and band is not None:
         low = np.nanpercentile(yarr, band[0], axis=1)
         high = np.nanpercentile(yarr, band[1], axis=1)
@@ -613,181 +547,58 @@ def _compile_timeseries(prepared, spec, fontsize, *, template="weather_skills"):
     return fig
 
 
-def _compile_heatmap(prepared, spec, fontsize, *, trace_type="heatmap", template="weather_skills"):
-    import matplotlib.pyplot as plt
-
-    apply_style_then_rc(spec, chart="map", fontsize=fontsize, template=template)
-    da = prepared["da"]
-    lat_dim = prepared["lat_dim"]
-    lon_dim = prepared["lon_dim"]
-    extent = prepared["extent"]
-    sdim = step_dim(da)
-    if sdim is None or da.sizes.get(sdim, 1) == 1:
-        if sdim and sdim in da.dims:
-            da = da.squeeze(sdim, drop=True)
-        steps = [None]
-        sdim = None
-    else:
-        steps = list(da[sdim].values)
-    n = len(steps)
-    facet = spec.get("layout", {}).get("facet") or {}
-    max_columns = int(facet.get("max_columns") or DEFAULT_MAX_COLUMNS)
-    nrows, ncols = panel_shape(
-        n,
-        rows=facet.get("rows"),
-        columns=facet.get("columns"),
-        max_columns=max_columns,
-    )
-    user_titles = list(spec.get("subplot_titles") or [])
-    if len(user_titles) > n:
-        raise UsageError(
-            f"--subplot-title was passed {len(user_titles)} time(s) but this figure "
-            f"has {n} panel(s)"
-        )
-    titles = []
-    title_steps = prepared.get("native_steps") if prepared.get("native_step_dim") == sdim else steps
-    for i, step in enumerate(steps):
-        if i < len(user_titles):
-            titles.append(user_titles[i])
-        elif step is not None:
-            titles.append(panel_title(da, sdim, step, title_steps))
-        else:
-            titles.append("")
-
-    scale = resolve_colorscale(
-        da,
-        (spec.get("style") or {}).get("colormap"),
-        stretch=spec.get("vmin") is not None or spec.get("vmax") is not None,
-    )
-    if spec.get("vmin") is not None:
-        scale["cmin"] = spec["vmin"]
-    if spec.get("vmax") is not None:
-        scale["cmax"] = spec["vmax"]
-    label = spec.get("cbar_label") or variable_label_for_display(da)
-    cmap, norm = mpl_cmap_norm(scale)
-    lon = np.asarray(da[lon_dim].values, dtype=float)
-    lat = np.asarray(da[lat_dim].values, dtype=float)
-    overlays = spec.get("geo", {}).get("overlays", "auto")
-    geo_x = geo_y = None
-    if overlays not in (None, False, "none", "off"):
-        geo_x, geo_y = geojson_lines(extent)
-    cities = parse_cities(spec.get("geo", {}).get("cities"))
-    boxes = parse_draw_boxes(spec.get("geo", {}).get("draw_boxes"))
-    xlabel = resolve_axis_label(spec.get("xlabel"), "Longitude")
-    ylabel = resolve_axis_label(spec.get("ylabel"), "Latitude")
-
-    sw, sh = figsize_from_extent(*extent)
-    user_figsize = spec.get("layout", {}).get("figsize")
-    if user_figsize is not None:
-        fig_w, fig_h = float(user_figsize[0]), float(user_figsize[1])
-    else:
-        fig_w, fig_h = sw * ncols, sh * nrows
-    fig, axes = plt.subplots(
-        nrows, ncols, figsize=(fig_w, fig_h), squeeze=False, layout="constrained"
-    )
-    mappable = None
-    for i, _step in enumerate(steps):
-        row, col = divmod(i, ncols)
-        ax = axes[row, col]
-        slab = da if sdim is None else da.isel({sdim: i})
-        slab = slab.transpose(lat_dim, lon_dim)
-        z = np.asarray(slab.values, dtype=float)
-        trace0 = (spec.get("traces") or [{}])[0]
-        if trace_type == "contour":
-            ck = contour_kwargs(spec, trace0)
-            levels = ck.pop("levels", 12)
-            line_lw = ck.pop("linewidths", None)
-            line_ls = ck.pop("linestyles", None)
-            line_colors = ck.pop("colors", None)
-            filled = ax.contourf(lon, lat, z, cmap=cmap, norm=norm, levels=levels, **ck)
-            contour_lines = (spec.get("contour") or trace0.get("contour") or {}).get("lines")
-            if contour_lines is not False:
-                line_kw = {"colors": line_colors or "black", "linewidths": line_lw or 0.4}
-                if line_ls is not None:
-                    line_kw["linestyles"] = line_ls
-                ax.contour(lon, lat, z, levels=filled.levels, **line_kw)
-            mappable = filled
-        else:
-            mk = mesh_kwargs(spec, trace0)
-            mappable = ax.pcolormesh(lon, lat, z, cmap=cmap, norm=norm, shading="nearest", **mk)
-        draw_geo_lines(ax, geo_x, geo_y)
-        if cities:
-            ax.scatter(
-                [lon_ for _, lon_ in cities.values()],
-                [lat_ for lat_, _ in cities.values()],
-                c="black",
-                s=64,
-                zorder=5,
-            )
-            for name, (clat, clon) in cities.items():
-                ax.annotate(
-                    name, (clon, clat), textcoords="offset points", xytext=(-4, 4), ha="right"
-                )
-        ax.set_xlim(extent[0], extent[1])
-        ax.set_ylim(extent[2], extent[3])
-        ax.set_aspect("equal", adjustable="box")
-        if titles[i]:
-            ax.set_title(titles[i])
-        if row == nrows - 1:
-            ax.set_xlabel(xlabel)
-        if col == 0:
-            ax.set_ylabel(ylabel)
-        for box in boxes:
-            n_, w, s_, e = box
-            from matplotlib.patches import Rectangle
-
-            ax.add_patch(
-                Rectangle(
-                    (w, s_), e - w, n_ - s_, fill=False, edgecolor="black", linewidth=1.5, zorder=6
-                )
-            )
-
-    for j in range(n, nrows * ncols):
-        row, col = divmod(j, ncols)
-        axes[row, col].set_visible(False)
-        axes[row, col].set_axis_off()
-
-    visible = [ax for ax in axes.ravel() if ax.get_visible()]
-    ticks = scale.get("bounds")
-    cbar_kw = colorbar_mpl_kwargs(spec)
-    location = cbar_kw.pop("location", "right" if n <= 1 else "bottom")
-    add_shared_colorbar(
-        fig,
-        mappable,
-        visible,
-        label=label,
-        location=location,
-        ticks=ticks,
-        **cbar_kw,
-    )
-    if spec.get("title"):
-        fig.suptitle(spec["title"])
-    fig._ws_tight = spec.get("layout", {}).get("autosize", True) and user_figsize is None
-    return fig, scale, (nrows, ncols), n, axes
-
-
 def compile_figure(spec: dict, datasets: dict):
     """Compile ``spec`` against ``datasets`` ``{id: Dataset}``.
 
     Returns ``(fig, resolved_spec)``. ``resolved_spec`` has defaults filled in.
     ``fig`` is a matplotlib Figure.
+
+    Maps (``heatmap``, ``contour``, ``quiver``, ``layer``) all go through the
+    single layered-map renderer in :mod:`weather_skills_core.plot_layers`, so a
+    field draws the same way whether it arrived as a style or as a layer.
     """
+    from weather_skills_core.plot_layers import MAP_STYLES, compile_map_figure
+
     spec = overlay_spec({"version": 1, "layout": {}, "style": {}, "geo": {}}, spec)
     traces = spec.get("traces") or [{"type": "heatmap", "input": "a"}]
     trace0 = traces[0]
     style = trace0.get("type") or "heatmap"
-    input_id = trace0.get("input") or "a"
     inputs = spec.get("inputs") or []
+    fontsize = int((spec.get("style") or {}).get("fontsize") or DEFAULT_FONTSIZE)
+    template = normalize_template((spec.get("style") or {}).get("template"))
+
+    if style in MAP_STYLES or spec.get("layers"):
+        fig = compile_map_figure(spec, datasets, fontsize=fontsize, template=template)
+        finish_figure(fig, spec, fig.axes)
+        drawn = getattr(fig, "_ws_map", {}) or {}
+        resolved = overlay_spec(spec, {})
+        resolved["traces"] = traces
+        resolved["style"] = {
+            **(resolved.get("style") or {}),
+            "template": template,
+            "fontsize": fontsize,
+            "colormap": (resolved.get("style") or {}).get("colormap") or drawn.get("colormap"),
+        }
+        layout = resolved.setdefault("layout", {})
+        layout.setdefault("shared_colorscale", True)
+        layout["facet"] = {
+            "max_columns": (layout.get("facet") or {}).get("max_columns", DEFAULT_MAX_COLUMNS),
+            **{k: drawn[k] for k in ("rows", "columns", "n_panels") if drawn.get(k) is not None},
+        }
+        if drawn.get("extent"):
+            resolved.setdefault("geo", {})["extent"] = drawn["extent"]
+        cbar = colorbar_spec(spec)
+        if cbar:
+            layout["colorbar"] = cbar
+        resolved["axes"] = resolve_axes_block(spec)
+        return fig, resolved
+
+    input_id = trace0.get("input") or "a"
     spec_input = next((i for i in inputs if i.get("id") == input_id), None)
     if spec_input is None:
         spec_input = inputs[0] if inputs else {"id": input_id}
-    spec_input = dict(spec_input)
-    for key in ("along", "reduce", "align", "band"):
-        if spec_input.get(key) is None:
-            if trace0.get(key) is not None:
-                spec_input[key] = trace0[key]
-            elif spec.get(key) is not None:
-                spec_input[key] = spec[key]
+    # Selection comes from the input; how to draw it comes from the trace.
+    spec_input = {**spec_input, **{k: trace0[k] for k in _TRACE_SELECTION if k in trace0}}
     ds = datasets.get(input_id) or datasets.get("a")
     if ds is None and len(datasets) == 1:
         ds = next(iter(datasets.values()))
@@ -795,24 +606,11 @@ def compile_figure(spec: dict, datasets: dict):
         raise UsageError("plot spec has no Dataset for the requested input")
     if "path" not in spec_input:
         spec_input = {**spec_input, "id": spec_input.get("id", input_id)}
-    fontsize = int((spec.get("style") or {}).get("fontsize") or DEFAULT_FONTSIZE)
-    template = normalize_template((spec.get("style") or {}).get("template"))
-    prepared = _prepare_field(ds, spec_input, spec.get("geo") or {}, style)
-    axes = None
-    if style == "timeseries":
-        fig = _compile_timeseries(prepared, spec, fontsize, template=template)
-        scale = None
-        nrows = ncols = n = 1
-        axes = fig.axes
-    elif style in ("heatmap", "contour"):
-        fig, scale, (nrows, ncols), n, axes = _compile_heatmap(
-            prepared, spec, fontsize, trace_type=style, template=template
-        )
-    else:
+    if style != "timeseries":
         raise UsageError(f"plot compiler does not yet support style {style!r}")
-
-    _apply_patch(fig, axes, spec.get("patch"), map_extent=prepared.get("extent"))
-    finish_figure(fig, spec, axes)
+    prepared = _prepare_field(ds, spec_input, spec.get("geo") or {}, style)
+    fig = _compile_timeseries(prepared, spec, fontsize, template=template)
+    finish_figure(fig, spec, fig.axes)
 
     resolved = overlay_spec(spec, {})
     resolved["traces"] = traces
@@ -821,31 +619,8 @@ def compile_figure(spec: dict, datasets: dict):
         **(resolved.get("style") or {}),
         "template": template,
         "fontsize": fontsize,
-        "colormap": (scale or {}).get("name") or (resolved.get("style") or {}).get("colormap"),
+        "colormap": (resolved.get("style") or {}).get("colormap"),
     }
-    layout = resolved.setdefault("layout", {})
-    layout.setdefault("shared_colorscale", True)
-    if style in ("heatmap", "contour"):
-        resolved["layout"] = {
-            **(resolved.get("layout") or {}),
-            "facet": {
-                **((resolved.get("layout") or {}).get("facet") or {}),
-                "rows": nrows,
-                "columns": ncols,
-                "max_columns": (resolved.get("layout") or {})
-                .get("facet", {})
-                .get("max_columns", DEFAULT_MAX_COLUMNS),
-                "n_panels": n,
-            },
-        }
-        if prepared.get("extent"):
-            resolved.setdefault("geo", {})["extent"] = prepared["extent"]
-        if spec_input.get("variable") or prepared.get("variable"):
-            resolved["inputs"] = [
-                {**spec_input, "variable": spec_input.get("variable") or prepared.get("variable")}
-            ]
-        cbar = colorbar_spec(spec)
-        if cbar:
-            resolved["layout"]["colorbar"] = cbar
+    resolved.setdefault("layout", {}).setdefault("shared_colorscale", True)
     resolved["axes"] = resolve_axes_block(spec)
     return fig, resolved

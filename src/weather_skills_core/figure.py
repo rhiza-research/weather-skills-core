@@ -228,24 +228,17 @@ def _format_cbar_tick(value):
 
 
 def colorbar_spec(obj: dict | None) -> dict | None:
-    """Return a colorbar-size dict from spec ``layout`` or ``patch``.
+    """Return the ``layout.colorbar`` size dict, or None.
 
-    Accepts ``layout.colorbar``, ``layout.coloraxis.colorbar``, or a top-level
-    ``colorbar``. ``len`` / ``shrink`` is the long-side fraction (0–1);
-    ``thickness`` is the short side in pixels (>1) or figure fraction (≤1).
+    ``len`` / ``shrink`` is the long-side fraction (0–1); ``thickness`` is the
+    short side in pixels (>1) or figure fraction (≤1).
     """
     if not isinstance(obj, dict):
         return None
-    if isinstance(obj.get("colorbar"), dict):
-        return dict(obj["colorbar"])
     layout = obj.get("layout")
-    if isinstance(layout, dict):
-        if isinstance(layout.get("colorbar"), dict):
-            return dict(layout["colorbar"])
-        coloraxis = layout.get("coloraxis")
-        if isinstance(coloraxis, dict) and isinstance(coloraxis.get("colorbar"), dict):
-            return dict(coloraxis["colorbar"])
-    return colorbar_spec(obj.get("patch"))
+    if isinstance(layout, dict) and isinstance(layout.get("colorbar"), dict):
+        return dict(layout["colorbar"])
+    return None
 
 
 def colorbar_size_kwargs(spec=None, *, colorbar=None) -> dict:
