@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 
+from weather_skills_core.errors import UsageError
 from weather_skills_core.plot.compile import as_plot_x, figsize_from_extent
 from weather_skills_core.plot.figure import add_shared_colorbar, apply_date_ticks
 from weather_skills_core.plot.geo import draw_geo_overlays, load_geo_overlays
@@ -21,9 +22,11 @@ from weather_skills_core.plot.mpl import (
 )
 from weather_skills_core.plot.spec import trace_at
 from weather_skills_core.plot.style import (
+    ALONG_COLOR_CYCLE,
     DEFAULT_FONTSIZE,
     mpl_cmap_norm,
     mpl_color,
+    parse_along_color,
     parse_colormap_spec,
     resolve_colorscale,
 )
@@ -329,14 +332,25 @@ def compile_line_figure(
     else:
         fig, ax = plt.subplots(figsize=(fig_w, fig_h), layout="constrained")
         axes = np.array([[ax]])
-    for i, ((xvals, yvals, label), kind, style) in enumerate(
-        zip(series, kinds, styles, strict=True)
+    along_modes = [
+        parse_along_color(
+            style.get("along_color") or (trace_at(spec, i).get("along_color") if spec else None)
+        )
+        for i, style in enumerate(styles)
+    ]
+    any_cycle = any(
+        mode == ALONG_COLOR_CYCLE and np.asarray(yvals).ndim == 2
+        for (_, yvals, _), mode in zip(series, along_modes, strict=True)
+    )
+    palette_i = 0
+    legend_n = n
+    for i, ((xvals, yvals, label), kind, style, along_color) in enumerate(
+        zip(series, kinds, styles, along_modes, strict=True)
     ):
         ax = axes[i if subplots else 0, 0]
         plot_ax = ax
         if style.get("twin") in (True, "y", "twinx"):
             plot_ax = ax.twinx()
-        color = mpl_color(style.get("color")) or f"C{i % 10}"
         width_pt = style.get("lw") or style.get("linewidth") or style.get("width") or 2
         yarr = np.asarray(yvals, dtype=float)
         xplot = as_plot_x(xvals)
@@ -346,6 +360,19 @@ def compile_line_figure(
         alpha = float(style.get("alpha") or 1)
         lk = line_kwargs(style.get("line") or {}, loc=f"styles[{i}].line")
         bk = bar_kwargs(style.get("bar") or {}, loc=f"styles[{i}].bar")
+        cycle = along_color == ALONG_COLOR_CYCLE and yarr.ndim == 2
+        if cycle and band:
+            raise UsageError("along_color cycle cannot be combined with a percentile band.")
+        if cycle and (style.get("color") is not None or "color" in lk or "c" in lk):
+            raise UsageError(
+                "along_color cycle cannot set a single color; omit color to cycle, "
+                "or use along_color same."
+            )
+        if along_color == ALONG_COLOR_CYCLE and yarr.ndim != 2 and style.get("along_color"):
+            raise UsageError("along_color requires an along (2-D) series.")
+        color = mpl_color(style.get("color"))
+        if color is None:
+            color = f"C{(palette_i if any_cycle else i) % 10}"
         if yarr.ndim == 2 and band:
             lo_q, hi_q = band
             low = np.nanpercentile(yarr, lo_q, axis=1)
@@ -375,38 +402,49 @@ def compile_line_figure(
                     **lk,
                 },
             )
+            palette_i += 1
         else:
             traces_y = [yarr] if yarr.ndim == 1 else [yarr[:, j] for j in range(yarr.shape[1])]
-            member_alpha = alpha if yarr.ndim == 1 else float(style.get("alpha") or 0.35)
+            member_alpha = alpha if (yarr.ndim == 1 or cycle) else float(style.get("alpha") or 0.35)
+            along_labels = style.get("along_labels") or []
+            if cycle:
+                legend_n += max(0, len(traces_y) - 1)
             for j, yy in enumerate(traces_y):
-                name = label if j == 0 else "_nolegend_"
+                if cycle:
+                    member = along_labels[j] if j < len(along_labels) else str(j)
+                    name = f"{label} {member}" if n > 1 else member
+                    member_color = f"C{palette_i % 10}"
+                    palette_i += 1
+                else:
+                    name = label if j == 0 else "_nolegend_"
+                    member_color = color
+                    if j == 0:
+                        palette_i += 1
                 if kind == "bar":
                     plot_ax.bar(
                         np.arange(len(yy)) if np.asarray(xplot).dtype.kind == "O" else xplot,
                         yy,
-                        **{"color": color, "label": name, "alpha": alpha, **bk},
+                        **{"color": member_color, "label": name, "alpha": alpha, **bk},
                     )
                 else:
                     plot_ax.plot(
                         xplot,
                         yy,
                         **{
-                            "color": color,
+                            "color": member_color,
                             "linewidth": (
-                                width_pt if yarr.ndim == 1 else min(float(width_pt), 1.2)
+                                width_pt if (yarr.ndim == 1 or cycle) else min(float(width_pt), 1.2)
                             ),
                             "marker": "o" if use_marker else None,
                             "markersize": float(style.get("markersize") or 6),
                             "alpha": member_alpha if yarr.ndim == 2 else alpha,
-                            "label": (
-                                name
-                                if (j == 0 and not subplots)
-                                else (name if j == 0 else "_nolegend_")
-                            ),
+                            "label": name,
                             "zorder": float(style.get("zorder") or 2),
                             **lk,
                         },
                     )
+            if subplots and cycle:
+                plot_ax.legend(loc="best")
         if np.asarray(xvals).dtype.kind == "M":
             apply_date_ticks(ax)
         if subplots:
@@ -417,7 +455,9 @@ def compile_line_figure(
             ax.set_xlabel(xlabel)
             ax.set_ylabel(ylabels[0] if ylabels else "")
     if not subplots:
-        axes[0, 0].legend(loc="upper center", bbox_to_anchor=(0.5, -0.12), ncol=min(n, 4))
+        axes[0, 0].legend(
+            loc="upper center", bbox_to_anchor=(0.5, -0.12), ncol=min(max(legend_n, 1), 4)
+        )
     if title:
         fig.suptitle(title)
     fig._ws_tight = tight

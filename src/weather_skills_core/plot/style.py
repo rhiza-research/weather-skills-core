@@ -250,6 +250,51 @@ def along_dim(da, along: str | None) -> str | None:
     return next((name for name in names_for(preferred) if name in da.dims), None)
 
 
+ALONG_COLOR_SAME = "same"
+ALONG_COLOR_CYCLE = "cycle"
+_ALONG_COLOR_ALIASES = {
+    "same": ALONG_COLOR_SAME,
+    "shared": ALONG_COLOR_SAME,
+    "cycle": ALONG_COLOR_CYCLE,
+    "distinct": ALONG_COLOR_CYCLE,
+}
+
+
+def parse_along_color(value) -> str:
+    """``traces[].along_color``: ``same`` (default) or ``cycle``."""
+    if value is None or value is False or value == "":
+        return ALONG_COLOR_SAME
+    raw = str(value).strip().lower().replace("_", "-")
+    if raw in _ALONG_COLOR_ALIASES:
+        return _ALONG_COLOR_ALIASES[raw]
+    raise UsageError(
+        "traces[].along_color must be 'same' (one color for every along member) "
+        f"or 'cycle' (a distinct color per value); got {value!r}."
+    )
+
+
+def along_member_label(value) -> str:
+    """Short legend label for one coordinate along ``traces[].along``."""
+    import numpy as np
+
+    if value is None:
+        return ""
+    arr = np.asarray(value)
+    item = arr.reshape(-1)[0] if arr.size else value
+    kind = np.asarray(item).dtype.kind
+    if kind == "M" or isinstance(item, np.datetime64):
+        try:
+            return str(np.datetime_as_string(np.asarray(item, dtype="datetime64[ns]"), unit="D"))
+        except (TypeError, ValueError):
+            return str(item).strip()
+    if isinstance(item, (np.integer, int)) and not isinstance(item, bool):
+        return str(int(item))
+    if isinstance(item, (np.floating, float)):
+        num = float(item)
+        return str(int(num)) if num.is_integer() else str(num)
+    return str(item).strip()
+
+
 def parse_band(value) -> tuple[float, float] | None:
     """Parse ``--band`` / spec ``band`` as two percentiles, default ``10,90``."""
     if value is None or value is False or value == "":

@@ -70,6 +70,7 @@ def test_normalize_spec_reports_where_a_relocated_key_moved():
         ({"rc": {"axes.grid": False}}, "style.rc"),
         ({"mesh": {"alpha": 0.4}}, r"traces\[\].mesh"),
         ({"band": [10, 90]}, r"traces\[\].band"),
+        ({"along_color": "cycle"}, r"traces\[\].along_color"),
         ({"layout": {"title": "x"}}, "moved to title"),
         ({"layout": {"axes": {}}}, "moved to axes"),
         ({"style": {"dpi": 200}}, "layout.dpi"),
@@ -617,10 +618,24 @@ def test_panel_title_weekly_range_and_daily_date():
 
 
 def test_parse_band_and_along_dim():
-    from weather_skills_core.plot.style import along_dim, parse_band, resolve_colorscale
+    from weather_skills_core import UsageError
+    from weather_skills_core.plot.style import (
+        along_dim,
+        along_member_label,
+        parse_along_color,
+        parse_band,
+        resolve_colorscale,
+    )
 
     assert parse_band("10,90") == (10.0, 90.0)
     assert parse_band(True) == (10.0, 90.0)
+    assert parse_along_color(None) == "same"
+    assert parse_along_color("cycle") == "cycle"
+    assert parse_along_color("distinct") == "cycle"
+    with pytest.raises(UsageError, match="same"):
+        parse_along_color("rainbow")
+    assert along_member_label(3) == "3"
+    assert along_member_label(2015.0) == "2015"
     da = make_forecast()["tp"]
     assert along_dim(da, "member") == "number"
     temp = make_gridded(name="t2m", units="K")["t2m"]
@@ -646,9 +661,62 @@ def test_compile_timeseries_along_and_band():
     )
     fig, resolved = compile_figure(spec, {"a": ds})
     assert resolved["layout"]["shared_colorscale"] is True
+    assert resolved["traces"][0]["along_color"] == "same"
     fills = [c for ax in fig.axes for c in ax.collections if isinstance(c, PolyCollection)]
     assert fills
     assert fig.axes[0].lines
+
+
+def test_compile_timeseries_along_color_cycle_and_same():
+    pytest.importorskip("matplotlib")
+    pytest.importorskip("seaborn")
+    from matplotlib.colors import to_hex
+
+    from weather_skills_core import UsageError
+    from weather_skills_core.plot.compile import compile_figure
+
+    ds = make_forecast(n_number=3)
+    shared = spec_from_flags(
+        variable="tp",
+        trace_type="timeseries",
+        along="number",
+        reduce=["latitude", "longitude"],
+    )
+    fig_same, resolved_same = compile_figure(shared, {"a": ds})
+    same_colors = [to_hex(ln.get_color()) for ln in fig_same.axes[0].lines]
+    assert len(same_colors) == 3
+    assert len(set(same_colors)) == 1
+    assert resolved_same["traces"][0]["along_color"] == "same"
+    assert fig_same.axes[0].lines[0].get_label() != "_nolegend_"
+    assert all(ln.get_label() == "_nolegend_" for ln in fig_same.axes[0].lines[1:])
+
+    cycled = spec_from_flags(
+        variable="tp",
+        trace_type="timeseries",
+        along="number",
+        along_color="cycle",
+        reduce=["latitude", "longitude"],
+    )
+    fig_cycle, resolved_cycle = compile_figure(cycled, {"a": ds})
+    cycle_colors = [to_hex(ln.get_color()) for ln in fig_cycle.axes[0].lines]
+    assert len(cycle_colors) == 3
+    assert len(set(cycle_colors)) == 3
+    assert resolved_cycle["traces"][0]["along_color"] == "cycle"
+    labels = [ln.get_label() for ln in fig_cycle.axes[0].lines]
+    assert labels == ["0", "1", "2"]
+
+    with pytest.raises(UsageError, match="cannot be combined"):
+        compile_figure(
+            spec_from_flags(
+                variable="tp",
+                trace_type="timeseries",
+                along="number",
+                along_color="cycle",
+                band="10,90",
+                reduce=["latitude", "longitude"],
+            ),
+            {"a": ds},
+        )
 
 
 def test_compile_timeseries_align_dayofyear():

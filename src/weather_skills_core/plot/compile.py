@@ -32,11 +32,14 @@ from weather_skills_core.plot.spec import (
     trace_at,
 )
 from weather_skills_core.plot.style import (
+    ALONG_COLOR_CYCLE,
     DEFAULT_FONTSIZE,
     DEFAULT_MAX_COLUMNS,
     aggregation_days,
     along_dim,
+    along_member_label,
     normalize_template,
+    parse_along_color,
     parse_band,
 )
 from weather_skills_core.standard_utils import (
@@ -398,12 +401,15 @@ def _prepare_field(ds, spec_input: dict, geo: dict, style: str):
                 f"for each leftover dim, or traces[].along {hint!r} to draw one "
                 f"line per {hint} value."
             )
+        along_labels = None
         if along:
             da = da.transpose(sdim, along)
+            along_labels = [along_member_label(v) for v in da[along].values]
         return {
             "da": plain(da),
             "sdim": sdim,
             "along": along,
+            "along_labels": along_labels,
             "align": spec_input.get("align"),
             "band": spec_input.get("band"),
         }
@@ -497,9 +503,22 @@ def _compile_timeseries(prepared, spec, fontsize, *, template="weather_skills"):
     yarr = np.asarray(da.values, dtype=float)
     band = parse_band(prepared.get("band"))
     trace0 = trace_at(spec)
+    along_color_raw = trace0.get("along_color")
+    if along_color_raw and not prepared.get("along"):
+        raise UsageError("traces[].along_color requires traces[].along")
+    along_color = parse_along_color(along_color_raw)
+    if along_color == ALONG_COLOR_CYCLE and band is not None:
+        raise UsageError("traces[].along_color cycle cannot be combined with traces[].band")
     lk = line_kwargs(trace0.get("line") or {}, loc="traces[0].line")
+    if along_color == ALONG_COLOR_CYCLE and ("color" in lk or "c" in lk):
+        raise UsageError(
+            "traces[].along_color cycle cannot set traces[].line.color; "
+            "omit color to cycle, or use along_color same."
+        )
     color = lk.get("color") or lk.get("c") or "C0"
     fill_kw = {"color": color, "alpha": 0.25, "linewidth": 0, "zorder": 1, **fill_kwargs(trace0)}
+    cycle = along_color == ALONG_COLOR_CYCLE and yarr.ndim == 2
+    along_labels = prepared.get("along_labels") or []
     if yarr.ndim == 2 and band is not None:
         low = np.nanpercentile(yarr, band[0], axis=1)
         high = np.nanpercentile(yarr, band[1], axis=1)
@@ -508,17 +527,18 @@ def _compile_timeseries(prepared, spec, fontsize, *, template="weather_skills"):
         ax.plot(xplot, mean, **{"color": color, "linewidth": 2, "label": qty, "zorder": 3, **lk})
     elif yarr.ndim == 2:
         for j in range(yarr.shape[1]):
-            ax.plot(
-                xplot,
-                yarr[:, j],
-                **{
-                    "color": color,
-                    "linewidth": 1.0,
-                    "alpha": 0.35,
-                    "label": qty if j == 0 else "_nolegend_",
-                    **lk,
-                },
-            )
+            member = along_labels[j] if j < len(along_labels) else str(j)
+            line_kw = {
+                "linewidth": 2.0 if cycle else 1.0,
+                "alpha": 1.0 if cycle else 0.35,
+                "label": member if cycle else (qty if j == 0 else "_nolegend_"),
+                **lk,
+            }
+            if cycle:
+                line_kw["color"] = f"C{j % 10}"
+            else:
+                line_kw["color"] = color
+            ax.plot(xplot, yarr[:, j], **line_kw)
     else:
         ax.plot(
             xplot,
@@ -537,7 +557,9 @@ def _compile_timeseries(prepared, spec, fontsize, *, template="weather_skills"):
     ax.set_xlabel(xlabel)
     ax.set_ylabel(ylabel)
     legend = spec.get("legend")
-    if legend not in (None, "none", "off"):
+    if cycle and legend in (None, "on", "true", "yes"):
+        ax.legend()
+    elif legend not in (None, "none", "off"):
         loc = legend if isinstance(legend, str) else None
         ax.legend(**({"loc": loc} if loc and loc not in ("on", "true", "yes") else {}))
     fig.suptitle(spec.get("title") or f"{qty} (timeseries)")
@@ -623,5 +645,9 @@ def compile_figure(spec: dict, datasets: dict):
         "colormap": (resolved.get("style") or {}).get("colormap"),
     }
     resolved.setdefault("layout", {}).setdefault("shared_colorscale", True)
+    if prepared.get("along") and resolved.get("traces"):
+        resolved["traces"][0]["along_color"] = parse_along_color(
+            (resolved["traces"][0] or {}).get("along_color")
+        )
     resolved["axes"] = resolve_axes_block(spec)
     return fig, resolved
