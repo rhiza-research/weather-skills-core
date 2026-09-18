@@ -3,7 +3,7 @@ from datetime import date
 import numpy as np
 import pytest
 import xarray as xr
-from conftest import make_gridded
+from conftest import make_gridded, make_station
 
 from weather_skills_core import standard_utils as utils
 from weather_skills_core.errors import DataError, UsageError
@@ -22,15 +22,6 @@ def test_parse_date_rejects_relative():
 def test_parse_date_rejects_compact():
     with pytest.raises(UsageError, match="YYYY-MM-DD"):
         utils.parse_date("20260115")
-
-
-def test_parse_range_ok():
-    assert utils.parse_range("2026-01-01", "2026-01-07") == (date(2026, 1, 1), date(2026, 1, 7))
-
-
-def test_parse_range_reversed():
-    with pytest.raises(UsageError, match="reversed"):
-        utils.parse_range("2026-01-10", "2026-01-01")
 
 
 def test_parse_bbox_valid():
@@ -153,6 +144,44 @@ def test_bbox_subset_data_selected_matches_coords():
     sub = utils.bbox_subset(ds, (2.5, 10.5, 0.5, 12.5))
     assert sub["precip"].shape == (2, 2, 2)
     assert isinstance(sub, xr.Dataset)
+
+
+def test_bbox_subset_stations_keeps_in_box():
+    ds = make_station()
+    sub = utils.bbox_subset(ds, (0.5, 35.0, -0.5, 37.5))
+    assert list(sub.station_id.values) == ["TA0001"]
+    assert sub.sizes["time"] == 2
+
+
+def test_bbox_subset_stations_unsorted_lat_lon():
+    ds = make_station(n_station=3)
+    ds = ds.assign_coords(
+        latitude=("station_id", [1.28, -4.04, 0.51]),
+        longitude=("station_id", [36.82, 39.67, 34.77]),
+    )
+    sub = utils.bbox_subset(ds, (-3.9187, 39.5667, -4.1550, 39.7639))
+    assert list(sub.station_id.values) == ["TA0001"]
+
+
+def test_bbox_subset_stations_empty_is_data_error():
+    with pytest.raises(DataError, match="no stations"):
+        utils.bbox_subset(make_station(), (60.0, 10.0, 50.0, 13.0))
+
+
+def test_bbox_subset_point_id_dim():
+    ds = make_station().rename({"station_id": "point_id"})
+    sub = utils.bbox_subset(ds, (0.5, 35.0, -0.5, 37.5))
+    assert list(sub.point_id.values) == ["TA0001"]
+
+
+def test_bbox_subset_stations_antimeridian():
+    ds = make_station(n_station=3)
+    ds = ds.assign_coords(
+        latitude=("station_id", [0.0, 0.0, 0.0]),
+        longitude=("station_id", [170.0, 0.0, -175.0]),
+    )
+    sub = utils.bbox_subset(ds, (1.0, 165.0, -1.0, -170.0))
+    assert list(sub.station_id.values) == ["TA0000", "TA0002"]
 
 
 def test_lat_slice_ascending():
@@ -280,35 +309,34 @@ def test_polygon_from_geojson_malformed_coordinates_raise_usage_error_not_a_trac
         utils.polygon_from_geojson(_polygon_from_geojson_write(tmp_path, payload))
 
 
-def test_normalize_longitude_0_360_axis_wraps_and_sorts():
+def test_ensure_normalized_longitude_wraps_and_sorts():
     ds = make_gridded(lons=(0.0, 90.0, 180.0, 270.0))
-    out = utils.normalize_longitude(ds)
+    out = utils.ensure_normalized_longitude(ds)
     assert list(out["longitude"].values) == [-180.0, -90.0, 0.0, 90.0]
 
 
-def test_normalize_longitude_values_follow_their_cells():
+def test_ensure_normalized_longitude_values_follow_their_cells():
     ds = make_gridded(lons=(0.0, 90.0, 180.0, 270.0))
     ds["precip"][:, :, 3] = 7.0
-    out = utils.normalize_longitude(ds)
+    out = utils.ensure_normalized_longitude(ds)
     assert float(out["precip"].sel(longitude=-90.0).isel(time=0, latitude=0)) == 7.0
 
 
-def test_normalize_longitude_already_normalized_axis_is_unchanged():
+def test_ensure_normalized_longitude_is_noop_when_already_180():
     ds = make_gridded(lons=(-90.0, 0.0, 90.0))
-    out = utils.normalize_longitude(ds)
-    assert list(out["longitude"].values) == [-90.0, 0.0, 90.0]
+    assert utils.ensure_normalized_longitude(ds) is ds
 
 
-def test_normalize_longitude_custom_dim_name():
+def test_ensure_normalized_longitude_custom_dim_name():
     ds = make_gridded(lons=(0.0, 270.0)).rename({"longitude": "lon"})
-    out = utils.normalize_longitude(ds, lon_dim="lon")
+    out = utils.ensure_normalized_longitude(ds, lon_dim="lon")
     assert list(out["lon"].values) == [-90.0, 0.0]
 
 
-def test_normalize_longitude_longitude_attrs_preserved_across_the_wrap():
+def test_ensure_normalized_longitude_attrs_preserved_across_the_wrap():
     ds = make_gridded(lons=(0.0, 90.0, 180.0, 270.0))
     ds["longitude"].attrs = {"standard_name": "longitude", "units": "degrees_east", "axis": "X"}
-    out = utils.normalize_longitude(ds)
+    out = utils.ensure_normalized_longitude(ds)
     assert out["longitude"].attrs == {
         "standard_name": "longitude",
         "units": "degrees_east",
@@ -316,20 +344,33 @@ def test_normalize_longitude_longitude_attrs_preserved_across_the_wrap():
     }
 
 
-def test_normalize_longitude_duplicate_endpoint_is_dropped_and_axis_stays_sorted():
+def test_ensure_normalized_longitude_duplicate_endpoint_is_dropped_and_axis_stays_sorted():
     ds = make_gridded(lons=(0.0, 90.0, 180.0, 270.0, 360.0))
-    out = utils.normalize_longitude(ds)
+    out = utils.ensure_normalized_longitude(ds)
     lons = list(out["longitude"].values)
     assert lons == [-180.0, -90.0, 0.0, 90.0]
     assert len(lons) == len(set(lons))
 
 
-def test_normalize_longitude_duplicate_drop_keeps_the_first_occurrence():
+def test_ensure_normalized_longitude_duplicate_drop_keeps_the_first_occurrence():
     ds = make_gridded(lons=(0.0, 90.0, 180.0, 270.0, 360.0))
     ds["precip"][:, :, 0] = 5.0
     ds["precip"][:, :, 4] = 9.0
-    out = utils.normalize_longitude(ds)
+    out = utils.ensure_normalized_longitude(ds)
     assert float(out["precip"].sel(longitude=0.0).isel(time=0, latitude=0)) == 5.0
+
+
+def test_ensure_normalized_longitude_accepts_dataarray():
+    ds = make_gridded(lons=(0.0, 90.0, 180.0, 270.0))
+    out = utils.ensure_normalized_longitude(ds["precip"])
+    assert list(out["longitude"].values) == [-180.0, -90.0, 0.0, 90.0]
+
+
+def test_ensure_normalized_longitude_wraps_station_coord():
+    ds = make_station(n_station=2)
+    ds = ds.assign_coords(longitude=("station_id", [10.0, 270.0]))
+    out = utils.ensure_normalized_longitude(ds, lon_dim="longitude")
+    assert list(out["longitude"].values) == [10.0, -90.0]
 
 
 @pytest.mark.parametrize(
@@ -443,16 +484,6 @@ def test_pick_time_dim_missing_override():
         utils.pick_time_dim(make_gridded(), "nope")
 
 
-def test_dataset_label_from_source_attr():
-    ds = make_gridded()
-    ds.attrs["weather_skills_source"] = "ecmwf-s2s"
-    assert utils.dataset_label(ds, "fallback") == "ecmwf-s2s"
-
-
-def test_dataset_label_fallback():
-    assert utils.dataset_label(make_gridded(), "input 1") == "input 1"
-
-
 def test_apply_write_encoding_time_and_fill():
     import numpy as np
 
@@ -488,6 +519,59 @@ def test_normalize_step_coord_casts_timedelta_us_to_ns():
     assert out["step"].values[0] == np.timedelta64(7, "D")
 
 
+def test_normalize_latlon_coords_rounds_and_casts_float32():
+    import numpy as np
+
+    ds = make_gridded(
+        lats=(5.9749990996248385, -1.2750010213),
+        lons=(33.0, 36.800000000000004),
+    )
+    out = utils.normalize_latlon_coords(ds)
+    assert out["latitude"].dtype == np.float32
+    assert out["longitude"].dtype == np.float32
+    np.testing.assert_array_equal(
+        out["latitude"].values,
+        np.round(np.array([5.9749990996248385, -1.2750010213]), 5).astype(np.float32),
+    )
+    np.testing.assert_array_equal(
+        out["longitude"].values,
+        np.round(np.array([33.0, 36.800000000000004]), 5).astype(np.float32),
+    )
+    assert out["latitude"].attrs == ds["latitude"].attrs
+
+
+def test_normalize_latlon_coords_keeps_half_cell_offset():
+    import numpy as np
+
+    kenya = make_gridded(lats=(-1.275,), lons=(36.80,))
+    chirps = make_gridded(lats=(-1.275,), lons=(36.825,))
+    k = utils.normalize_latlon_coords(kenya)
+    c = utils.normalize_latlon_coords(chirps)
+    np.testing.assert_array_equal(k["latitude"].values, c["latitude"].values)
+    assert not np.array_equal(k["longitude"].values, c["longitude"].values)
+
+
+def test_normalize_latlon_coords_point_obs_and_aliases():
+    import numpy as np
+
+    ds = make_station()
+    ds = ds.assign_coords(latitude=ds["latitude"].values + 1e-8)
+    out = utils.normalize_latlon_coords(ds)
+    assert out["latitude"].dtype == np.float32
+    assert out["longitude"].dtype == np.float32
+
+    aliased = make_gridded().rename({"latitude": "lat", "longitude": "lon"})
+    out_a = utils.normalize_latlon_coords(aliased)
+    assert out_a["lat"].dtype == np.float32
+    assert out_a["lon"].dtype == np.float32
+
+
+def test_normalize_latlon_coords_idempotent():
+    first = utils.normalize_latlon_coords(make_gridded())
+    second = utils.normalize_latlon_coords(first)
+    assert second is first
+
+
 def test_normalize_step_coord_noop_when_already_ns():
     import numpy as np
     import xarray as xr
@@ -509,11 +593,37 @@ def test_clip_by_geometry_grid_drop():
     assert list(out.longitude.values) == [11.0, 12.0]
 
 
+def test_clip_by_geometry_grid_keeps_any_cell_overlap():
+    from shapely.geometry import box
+
+    ds = make_gridded()
+    # Touches the left half of the lon=11 cell (cell span is 10.5..11.5),
+    # but does not contain the center point (11, 1).
+    out = utils.clip_by_geometry(ds, box(10.6, 0.6, 10.9, 1.4), drop=True)
+    assert list(out.latitude.values) == [1.0]
+    assert list(out.longitude.values) == [11.0]
+
+
 def test_clip_by_geometry_empty_raises():
     from shapely.geometry import box
 
     with pytest.raises(DataError, match="no grid cells"):
         utils.clip_by_geometry(make_gridded(), box(50, 50, 51, 51), drop=True)
+
+
+def test_clip_by_geometry_stations_drop():
+    from shapely.geometry import box
+
+    ds = make_station()
+    out = utils.clip_by_geometry(ds, box(36.5, -0.5, 37.5, 0.5), drop=True)
+    assert list(out.station_id.values) == ["TA0001"]
+
+
+def test_clip_by_geometry_stations_empty_raises():
+    from shapely.geometry import box
+
+    with pytest.raises(DataError, match="no stations"):
+        utils.clip_by_geometry(make_station(), box(50, 50, 51, 51), drop=True)
 
 
 def test_stride_dates_daily():

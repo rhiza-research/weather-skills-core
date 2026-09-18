@@ -150,15 +150,15 @@ ontology name or a type, not every possible name.
 | List | Any one of these (OR) | `Dataset(["forecast", "ensemble_forecast"])` |
 | `"any"` | Any Zarr (no dim check) | `Dataset("any")` |
 
-Pass several Zarrs on one flag with `nargs=2` (exactly two paths) or
-`nargs="+"` (one or more). `--input` still arrives as `ds`, now a list. Give
-each input its own flag when the roles differ (`--forecast` vs `--obs`).
+Pass several Zarrs by repeating the flag with `action="append"`
+(`-i a.zarr -i b.zarr`). `--input` still arrives as `ds`, now a list.
+Give each input its own flag when the roles differ (`--forecast` vs `--obs`).
 
 ```python
 @weather_skill(name="concat", version="0.1.0")
-@weather_skill.argument("-i", "--input", type=Dataset("any"), nargs="+", required=True)
+@weather_skill.argument("-i", "--input", type=Dataset("any"), action="append", required=True)
 def concat(ds, output, **kwargs):
-    # uv run concat.py -i a.zarr b.zarr -o stacked.zarr
+    # uv run concat.py -i a.zarr -i b.zarr -o stacked.zarr
     return xr.concat(ds, dim="member")
 
 
@@ -262,6 +262,29 @@ See
 [`docs/weather-skill-authoring/references/UNITS.md`](docs/weather-skill-authoring/references/UNITS.md)
 for the full units contract.
 
+## Plotting
+
+Install the `[plot]` extra (matplotlib, seaborn, cartopy). The public names
+are `PlotSpec`, `load_spec`, `dump_spec`, `compile`, and `export`. Matplotlib
+does not load on `import weather_skills_core.plot`. The spec must not open
+files; pass already-opened Datasets into `compile`. Figure skills take the
+same knobs as CLI flags or as `--spec` JSON (`FLAG_TO_SPEC` is the bridge; a
+set flag overlays the spec). `--dump-spec -` dumps the assembled spec as
+JSON and skips the PNG (`-o` is not required); `--patch` submits edits.
+No `*.plot.json` sidecar is written.
+
+```python
+from weather_skills_core.plot import compile, export, load_spec
+
+spec = load_spec(dumped_json)  # or a path, if you wrote one with dump_spec
+compiled = compile(spec, {"a": ds})
+export(compiled, "out.png", datasets={"a": ds})  # no sidecar unless dump_spec_path=
+```
+
+Recipe skills that build a cell matrix or series in Python call
+`maps.compile_grid`, `charts.compile_lines`, or `charts.compile_mediogram`.
+Those helpers return the same `CompiledFigure` and go through `export`.
+
 ## Install
 
 ```
@@ -289,6 +312,8 @@ Country polygons and Natural Earth region labels (continent, UN subregion,
 World Bank region, …) live in
 `src/weather_skills_core/data/countries.geojson`. `resolve-region` groups
 those features at runtime, so names like `East Africa` need no sidecar.
+A few briefing boxes that are not Natural Earth labels (e.g.
+`Kenya OND region`) are listed in `region.py` as custom rectangles.
 Rebuild the file from upstream Natural Earth 110m admin-0
 (`uv run python tools/build_countries.py --help` for the contract):
 
