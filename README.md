@@ -262,6 +262,25 @@ See
 [`docs/weather-skill-authoring/references/UNITS.md`](docs/weather-skill-authoring/references/UNITS.md)
 for the full units contract.
 
+## Plotting
+
+Install the `[plot]` extra (matplotlib, seaborn, cartopy). The public names
+are `PlotSpec`, `load_spec`, `dump_spec`, `compile`, and `export`. Matplotlib
+does not load on `import weather_skills_core.plot`. The spec must not open
+files; pass already-opened Datasets into `compile`.
+
+```python
+from weather_skills_core.plot import compile, export, load_spec
+
+spec = load_spec("out.plot.json")
+compiled = compile(spec, {"a": ds})
+export(compiled, "out.png", datasets={"a": ds})
+```
+
+Recipe skills that build a cell matrix or series in Python call
+`maps.compile_grid`, `charts.compile_lines`, or `charts.compile_mediogram`.
+Those helpers return the same `CompiledFigure` and go through `export`.
+
 ## Install
 
 ```

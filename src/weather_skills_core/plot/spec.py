@@ -8,19 +8,33 @@ import re
 from pathlib import Path
 
 from weather_skills_core.errors import UsageError
-from weather_skills_core.plot.style import (
+from weather_skills_core.plot.theme import (
     COLORMAP_SPEC_KEYS,
     DEFAULT_MAX_COLUMNS,
-    SPEC_VERSION,
     deep_merge,
     parse_colormap_spec,
 )
 
+SPEC_VERSION = 2
+TRACE_KINDS = frozenset(
+    {
+        "heatmap",
+        "contour",
+        "quiver",
+        "layer",
+        "timeseries",
+        "xy",
+        "windrose",
+        "grid",
+        "mediogram",
+    }
+)
+MAP_KINDS = frozenset({"heatmap", "contour", "quiver", "layer"})
+
 _INDEX_INT_RE = re.compile(r"[+-]?[0-9]+")
 _NON_ZARR_SUFFIXES = {".geojson", ".json", ".shp", ".gpkg", ".kml"}
 
-# Artist option blocks. Their contents are checked against the matplotlib
-# allowlists in plot_mpl; here we only fix where they may appear.
+# Artist option blocks. Contents are checked against figure allowlists.
 ARTIST_BLOCKS = frozenset(
     {"line", "mesh", "contour", "scatter", "bar", "quiver", "windrose", "fill", "box", "mediogram"}
 )
@@ -34,7 +48,7 @@ TOP_KEYS = frozenset(
         "traces",
         "layers",
         "layout",
-        "style",
+        "theme",
         "geo",
         "axes",
         "annotations",
@@ -81,7 +95,7 @@ COLORBAR_KEYS = frozenset(
         "labels",
     }
 )
-STYLE_KEYS = frozenset({"template", "colormap", "fontsize", "rc"})
+THEME_KEYS = frozenset({"template", "colormap", "fontsize", "rc"})
 GEO_KEYS = frozenset(
     {"extent", "bbox", "cities", "mask_geojson", "draw_boxes", "overlays", "lat", "lon"}
 )
@@ -89,9 +103,9 @@ INPUT_KEYS = frozenset({"id", "path", "variable", "index", "label", "colormap", 
 TRACE_KEYS = (
     frozenset(
         {
-            "type",
+            "kind",
             "input",
-            "style",
+            "mark",
             "x",
             "y",
             "path",
@@ -107,6 +121,7 @@ TRACE_KEYS = (
             "y_variable",
             "metric",
             "leads",
+            "quiver_step",
         }
     )
     | ARTIST_BLOCKS
@@ -115,7 +130,7 @@ LAYER_KEYS = frozenset({"kind", "path", "options", "input", "raw"})
 
 _SECTIONS = {
     "layout": LAYOUT_KEYS,
-    "style": STYLE_KEYS,
+    "theme": THEME_KEYS,
     "geo": GEO_KEYS,
 }
 
@@ -124,8 +139,9 @@ _SECTIONS = {
 # the knob moved instead of watching its edit silently do nothing.
 RELOCATED = {
     "patch": "merge your edits into the spec itself (or pass --patch on the CLI)",
-    "layered": "traces[0].type = 'layer'",
-    "rc": "style.rc",
+    "style": "theme",
+    "layered": "traces[0].kind = 'layer'",
+    "rc": "theme.rc",
     "facecolor": "layout.facecolor",
     "colorbar": "layout.colorbar",
     "along": "traces[].along",
@@ -151,6 +167,14 @@ RELOCATED = {
     "style.max_columns": "layout.facet.max_columns",
     "style.colormap_a": "inputs[0].colormap",
     "style.colormap_b": "inputs[1].colormap",
+    "style.rc": "theme.rc",
+    "style.template": "theme.template",
+    "style.colormap": "theme.colormap",
+    "style.fontsize": "theme.fontsize",
+    "theme.dpi": "layout.dpi",
+    "theme.max_columns": "layout.facet.max_columns",
+    "traces[].type": "traces[].kind",
+    "traces[].style": "traces[].mark",
     **{key: f"traces[].{key}" for key in sorted(ARTIST_BLOCKS)},
 }
 
@@ -180,6 +204,16 @@ def normalize_spec(data: dict) -> dict:
     """
     if not isinstance(data, dict):
         raise UsageError("plot spec must be a JSON object")
+    version = data.get("version")
+    if version is not None:
+        try:
+            version = int(version)
+        except (TypeError, ValueError) as exc:
+            raise UsageError(f"plot spec version must be an integer; got {version!r}") from exc
+        if version != SPEC_VERSION:
+            raise UsageError(
+                f"plot spec version {version} is not supported; expected {SPEC_VERSION}"
+            )
     _check_keys(data, TOP_KEYS, "")
     for section, allowed in _SECTIONS.items():
         block = data.get(section)
@@ -200,22 +234,109 @@ def normalize_spec(data: dict) -> dict:
                 f"plot spec layout.colorbar.labels has {len(list(labels))} entries "
                 f"but ticks has {len(list(ticks))}"
             )
-    colormap = (data.get("style") or {}).get("colormap")
+    colormap = (data.get("theme") or {}).get("colormap")
     if isinstance(colormap, dict):
-        _check_keys(colormap, COLORMAP_SPEC_KEYS, "style.colormap")
+        _check_keys(colormap, COLORMAP_SPEC_KEYS, "theme.colormap")
         parse_colormap_spec(colormap)
-    for i, item in enumerate(data.get("inputs") or []):
-        if isinstance(item, dict):
+    inputs = data.get("inputs")
+    if inputs is not None:
+        if not isinstance(inputs, list):
+            raise UsageError("plot spec inputs must be a list of objects")
+        for i, item in enumerate(inputs):
+            if not isinstance(item, dict):
+                raise UsageError(f"plot spec inputs[{i}] must be an object")
             _check_keys(item, INPUT_KEYS, f"inputs[{i}]")
             if isinstance(item.get("colormap"), dict):
                 parse_colormap_spec(item["colormap"])
-    for i, item in enumerate(data.get("traces") or []):
-        if isinstance(item, dict):
-            _check_keys(item, TRACE_KEYS, f"traces[{i}]")
-    for i, item in enumerate(data.get("layers") or []):
-        if isinstance(item, dict):
+    traces = data.get("traces")
+    if traces is not None:
+        if not isinstance(traces, list):
+            raise UsageError("plot spec traces must be a list of objects")
+        for i, item in enumerate(traces):
+            if not isinstance(item, dict):
+                raise UsageError(f"plot spec traces[{i}] must be an object")
+            _check_keys(item, TRACE_KEYS, f"traces[{i}]", relocated_prefix="traces[].")
+            kind = item.get("kind")
+            if kind is not None and kind not in TRACE_KINDS:
+                raise UsageError(
+                    f"plot spec traces[{i}].kind {kind!r} is not known; "
+                    f"expected one of {', '.join(sorted(TRACE_KINDS))}"
+                )
+            _validate_artist_blocks(item, f"traces[{i}]")
+    layers = data.get("layers")
+    if layers is not None:
+        if not isinstance(layers, list):
+            raise UsageError("plot spec layers must be a list of objects")
+        for i, item in enumerate(layers):
+            if not isinstance(item, dict):
+                raise UsageError(f"plot spec layers[{i}] must be an object")
             _check_keys(item, LAYER_KEYS, f"layers[{i}]")
+    _validate_axes_annotations(data)
     return data
+
+
+def _validate_artist_blocks(item: dict, loc: str) -> None:
+    from weather_skills_core.plot.figure import (
+        BAR_KEYS,
+        BOX_KEYS,
+        CONTOUR_KEYS,
+        FILL_KEYS,
+        LINE_KEYS,
+        MESH_KEYS,
+        QUIVER_KEYS,
+        SCATTER_KEYS,
+        WINDROSE_KEYS,
+        pick,
+    )
+
+    keys = {
+        "line": LINE_KEYS,
+        "mesh": MESH_KEYS,
+        "contour": CONTOUR_KEYS,
+        "scatter": SCATTER_KEYS,
+        "bar": BAR_KEYS,
+        "quiver": QUIVER_KEYS,
+        "windrose": WINDROSE_KEYS,
+        "fill": FILL_KEYS,
+        "box": BOX_KEYS,
+        "mediogram": frozenset({"width", "forecast", "mclimate", "mean", "legend"}),
+    }
+    for name, allowed in keys.items():
+        block = item.get(name)
+        if block is None:
+            continue
+        if name == "mediogram":
+            if not isinstance(block, dict):
+                raise UsageError(f"{loc}.{name} must be an object")
+            _check_keys(block, allowed, f"{loc}.{name}")
+            continue
+        pick(block, allowed, loc=f"{loc}.{name}")
+
+
+def _validate_axes_annotations(data: dict) -> None:
+    from weather_skills_core.plot.figure import AXES_TEMPLATE, pick
+
+    axes = data.get("axes")
+    allowed = frozenset(AXES_TEMPLATE)
+    if isinstance(axes, dict):
+        pick(axes, allowed, loc="axes")
+    elif isinstance(axes, list):
+        for i, item in enumerate(axes):
+            if isinstance(item, dict):
+                pick(item, allowed, loc=f"axes[{i}]")
+            elif item is not None:
+                raise UsageError(f"plot spec axes[{i}] must be an object")
+    elif axes is not None:
+        raise UsageError("plot spec axes must be an object or a list of objects")
+    for section in ("annotations", "shapes"):
+        items = data.get(section)
+        if items is None:
+            continue
+        if not isinstance(items, list):
+            raise UsageError(f"plot spec {section} must be a list")
+        for i, item in enumerate(items):
+            if not isinstance(item, dict):
+                raise UsageError(f"plot spec {section}[{i}] must be an object")
 
 
 def trace_at(spec: dict | None, index: int = 0) -> dict:
@@ -338,24 +459,24 @@ def parse_index(spec):
             key, _, raw = token.partition("=")
             current = key.strip()
             if not current:
-                raise ValueError(f"--index token {token.strip()!r} has an empty dimension name")
+                raise UsageError(f"--index token {token.strip()!r} has an empty dimension name")
             if current in values:
-                raise ValueError(f"--index dimension {current!r} is given more than once")
+                raise UsageError(f"--index dimension {current!r} is given more than once")
             values[current] = []
             raw = raw.strip()
             if not raw:
-                raise ValueError(f"--index value for {current!r} is empty")
+                raise UsageError(f"--index value for {current!r} is empty")
         else:
             raw = token.strip()
             if not raw:
-                raise ValueError("--index spec has an empty token (stray comma)")
+                raise UsageError("--index spec has an empty token (stray comma)")
             if current is None:
-                raise ValueError(f"--index token {raw!r} appears before any 'dim=' assignment")
+                raise UsageError(f"--index token {raw!r} appears before any 'dim=' assignment")
         if not _INDEX_INT_RE.fullmatch(raw):
-            raise ValueError(f"--index value {raw!r} for {current!r} is not an integer")
+            raise UsageError(f"--index value {raw!r} for {current!r} is not an integer")
         pos = int(raw)
         if pos in values[current]:
-            raise ValueError(f"--index position {pos} is repeated for dimension {current!r}")
+            raise UsageError(f"--index position {pos} is repeated for dimension {current!r}")
         values[current].append(pos)
     return {k: v[0] if len(v) == 1 else v for k, v in values.items()}
 
@@ -491,13 +612,13 @@ FLAG_TO_SPEC = {
     "axes": ("axes",),
     "annotations": ("annotations",),
     "shapes": ("shapes",),
-    "colormap": ("style", "colormap"),
-    "colormap_bounds": ("style", "colormap", "bounds"),
-    "colormap_under": ("style", "colormap", "under"),
-    "colormap_over": ("style", "colormap", "over"),
-    "fontsize": ("style", "fontsize"),
-    "template": ("style", "template"),
-    "rc": ("style", "rc"),
+    "colormap": ("theme", "colormap"),
+    "colormap_bounds": ("theme", "colormap", "bounds"),
+    "colormap_under": ("theme", "colormap", "under"),
+    "colormap_over": ("theme", "colormap", "over"),
+    "fontsize": ("theme", "fontsize"),
+    "template": ("theme", "template"),
+    "rc": ("theme", "rc"),
     "figsize": ("layout", "figsize"),
     "dpi": ("layout", "dpi"),
     "facecolor": ("layout", "facecolor"),
@@ -527,8 +648,8 @@ FLAG_TO_SPEC = {
     "variable_b": ("inputs", 1, "variable"),
     "colormap_a": ("inputs", 0, "colormap"),
     "colormap_b": ("inputs", 1, "colormap"),
-    "trace_type": ("traces", 0, "type"),
-    "trace_style": ("traces", 0, "style"),
+    "kind": ("traces", 0, "kind"),
+    "mark": ("traces", 0, "mark"),
     "along": ("traces", 0, "along"),
     "along_color": ("traces", 0, "along_color"),
     "reduce": ("traces", 0, "reduce"),
@@ -541,8 +662,11 @@ FLAG_TO_SPEC = {
     "y_variable": ("traces", 0, "y_variable"),
     "metric": ("traces", 0, "metric"),
     "leads": ("traces", 0, "leads"),
+    # plot-verify's repeatable --lead titles land on the same list.
+    "lead": ("traces", 0, "leads"),
+    "align_day_of_year": ("traces", 0, "align"),
     "quiver_scale": ("traces", 0, "quiver", "scale"),
-    "quiver_step": ("traces", 0, "quiver", "step"),
+    "quiver_step": ("traces", 0, "quiver_step"),
 }
 
 # Flags whose value is normalized on the way into the spec (JSON-safe types).
@@ -558,6 +682,10 @@ _FLAG_COERCE = {
     "colormap_bounds": lambda v: [float(x) for x in v],
     "cbar_ticks": lambda v: [float(x) for x in v],
     "cbar_labels": lambda v: [str(x) for x in v],
+    "lead": lambda v: [v] if isinstance(v, str) else list(v),
+    "leads": lambda v: [v] if isinstance(v, str) else list(v),
+    "align_day_of_year": lambda v: "dayofyear" if v else None,
+    "quiver_step": int,
 }
 
 # CLI flags that fold into style.colormap instead of replacing a string name.
@@ -601,7 +729,7 @@ def _dig(spec, path, *, create):
 
 
 def _colormap_object(value) -> dict:
-    """Coerce a stored ``style.colormap`` value into a dict."""
+    """Coerce a stored ``theme.colormap`` value into a dict."""
     if value is None:
         return {}
     if isinstance(value, dict):
@@ -613,20 +741,20 @@ def spec_set(spec: dict, flag: str, value) -> dict:
     """Write ``value`` at ``flag``'s canonical path, creating containers.
 
     ``colormap-bounds`` / ``under`` / ``over`` fold into the single
-    ``style.colormap`` object so a string name becomes
+    ``theme.colormap`` object so a string name becomes
     ``{name, bounds, …}`` instead of crashing when the path walks into a string.
     """
     if flag in _COLORMAP_FOLD:
         field = _COLORMAP_FOLD[flag]
         coerce = _FLAG_COERCE.get(flag)
-        style = spec.setdefault("style", {})
-        obj = _colormap_object(style.get("colormap"))
+        theme = spec.setdefault("theme", {})
+        obj = _colormap_object(theme.get("colormap"))
         obj[field] = coerce(value) if coerce else value
-        style["colormap"] = obj
+        theme["colormap"] = obj
         return spec
     if flag == "colormap":
-        style = spec.setdefault("style", {})
-        current = style.get("colormap")
+        theme = spec.setdefault("theme", {})
+        current = theme.get("colormap")
         incoming = parse_colormap_spec(value)
         keep = isinstance(current, dict) and any(
             current.get(key) is not None for key in ("bounds", "under", "over", "colors")
@@ -636,13 +764,13 @@ def spec_set(spec: dict, flag: str, value) -> dict:
             for key, item in incoming.items():
                 if item is not None:
                     merged[key] = item
-            style["colormap"] = merged
+            theme["colormap"] = merged
             return spec
         raw = value.strip() if isinstance(value, str) else None
         if raw is not None and "," not in raw and not raw.startswith("{"):
-            style["colormap"] = raw
+            theme["colormap"] = raw
             return spec
-        style["colormap"] = incoming if incoming else value
+        theme["colormap"] = incoming if incoming else value
         return spec
     path = _flag_path(flag)
     holder = _dig(spec, path, create=True)
@@ -694,18 +822,18 @@ def params_from_spec(spec: dict | None) -> dict:
 
 def spec_from_flags(**flags) -> dict:
     """Build a spec from named knobs, with the structural defaults filled in."""
-    trace_type = flags.pop("trace_type", None) or flags.pop("style", None) or "heatmap"
+    kind = flags.pop("kind", None) or "heatmap"
     spec = {
         "version": SPEC_VERSION,
         "inputs": [{"id": "a"}],
         "layout": {"shared_colorscale": True, "autosize": True, "facet": {}},
-        "traces": [{"type": trace_type, "input": "a"}],
-        "style": {},
+        "traces": [{"kind": kind, "input": "a"}],
+        "theme": {},
         "geo": {},
         "annotations": [],
         "shapes": [],
     }
-    if trace_type in ("heatmap", "contour"):
+    if kind in ("heatmap", "contour"):
         spec["layout"]["facet"]["max_columns"] = DEFAULT_MAX_COLUMNS
     spec = overlay_flags(spec, **flags)
     if flags.get("figsize") is not None:
@@ -740,7 +868,7 @@ def spec_inputs_from_datasets(datasets) -> list[dict]:
 
 
 SPEC_ARGUMENT_HELP = (
-    "Plot spec JSON (path or inline). Figure options (title, style, colormap, "
+    "Plot spec JSON (path or inline). Figure options (title, kind, colormap, "
     "layout, variable, …) belong here, not as CLI flags. A default run writes "
     "sidecar *.plot.json; edit and pass back. Inputs listed in the spec are "
     "opened for provenance; dataset flags are optional when the spec has paths."
@@ -759,14 +887,14 @@ PLOT_CLI_TO_SPEC = {
     "--legend": "legend",
     "--vmin": "vmin",
     "--vmax": "vmax",
-    "--colormap": "style.colormap",
-    "--colormap-bounds": "style.colormap.bounds",
-    "--colormap-under": "style.colormap.under",
-    "--colormap-over": "style.colormap.over",
+    "--colormap": "theme.colormap",
+    "--colormap-bounds": "theme.colormap.bounds",
+    "--colormap-under": "theme.colormap.under",
+    "--colormap-over": "theme.colormap.over",
     "--colormap-a": "inputs[0].colormap",
     "--colormap-b": "inputs[1].colormap",
-    "--fontsize": "style.fontsize",
-    "--theme": "style.template",
+    "--fontsize": "theme.fontsize",
+    "--theme": "theme.template",
     "--figsize": "layout.figsize",
     "--rows": "layout.facet.rows",
     "--columns": "layout.facet.columns",
@@ -785,7 +913,8 @@ PLOT_CLI_TO_SPEC = {
     "--variable-b": "inputs[1].variable",
     "--index": "inputs[].index",
     "--label": "inputs[].label",
-    "--style": "traces[].type",
+    "--kind": "traces[].kind",
+    "--mark": "traces[].mark",
     "--along": "traces[].along",
     "--along-color": "traces[].along_color",
     "--reduce": "traces[].reduce",
@@ -816,9 +945,7 @@ def hint_moved_plot_flags(message: str) -> str:
     lines = [message.rstrip(), "Plotting options belong in --spec, not CLI flags:"]
     for flag, path in found:
         lines.append(f"  {flag} → {path}")
-    lines.append(
-        'Example: --spec \'{"title": "S2S precip", "layout": {"facet": {"columns": 4}}}\''
-    )
+    lines.append('Example: --spec \'{"title": "S2S precip", "layout": {"facet": {"columns": 4}}}\'')
     return "\n".join(lines)
 
 
@@ -831,6 +958,8 @@ def patch_parser_for_spec_flags(parser):
 
     parser.error = error
     return parser
+
+
 DUMP_SPEC_ARGUMENT_HELP = (
     "Where to write the resolved plot spec. Default: <output-stem>.plot.json. "
     "Use '-' for stdout, 'none' to skip."

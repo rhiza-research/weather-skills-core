@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "weather-skills-core"
-version = "0.1.1"
+version = "0.2.0"
 description = "Core library for weather skills: the @weather_skill decorator owning CLI construction, standard-dataset validation, provenance, and output writing."
 readme = "README.md"
 license = "MIT"
@@ -70,8 +70,3 @@ extend-exclude = ["tests/fixtures/linting"]
 
 [tool.ruff.lint]
 select = ["E4", "E7", "E9", "F", "I", "B", "UP"]
-
-[tool.ruff.lint.per-file-ignores]
-# Top-level plot_*.py / figure.py are compatibility shims (star-reexport).
-"src/weather_skills_core/plot_*.py" = ["F403"]
-"src/weather_skills_core/figure.py" = ["F403"]

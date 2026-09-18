@@ -1,57 +1,576 @@
-"""Layered map compilation: heatmap, scatter, quiver and outline on shared axes.
+"""Lon/lat figures: heatmap, contour, quiver, layers, compare/verify grids.
 
-One renderer for every map in the stack. ``plot --style heatmap|contour|quiver``
-is a single-layer figure and ``plot --layer`` is the multi-layer case, so the
-same field draws identically whichever way it was asked for. Cartopy supplies
-the axes; :mod:`weather_skills_core.plot.geo` supplies the overlays.
+Cartopy supplies the axes; Natural Earth overlays are drawn here. Spatial
+subsetting (bbox/mask/extent) lives here because only geographic figures need it.
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import sys
+from importlib.resources import files
 from pathlib import Path
+
+import numpy as np
 
 from weather_skills_core.cf import auto_variable, cf_dim
 from weather_skills_core.display_labels import dataset_display_label, resolve_input_labels
 from weather_skills_core.errors import UsageError
-from weather_skills_core.plot.compile import (
-    axis_kind,
-    figsize_from_extent,
-    pad_cell_extent,
-    panel_title,
-    parse_cities,
-    parse_extent,
-    plain,
-    step_dim,
-    subset_spatial,
-)
 from weather_skills_core.plot.figure import (
     add_shared_colorbar,
+    apply_style_then_rc,
+    colorbar_mpl_kwargs,
+    finish_figure,
+    format_plot_date,
+    format_plot_date_range,
+    mesh_kwargs,
+    quiver_kwargs,
     resolve_axis_label,
     resolve_figsize,
+    scatter_kwargs,
 )
-from weather_skills_core.plot.geo import (
-    draw_box_outlines,
-    draw_geo_overlays,
-    load_geo_overlays,
-)
-from weather_skills_core.plot.mpl import colorbar_mpl_kwargs, mesh_kwargs, quiver_kwargs
 from weather_skills_core.plot.spec import apply_index, panel_shape, parse_index, trace_at
-from weather_skills_core.plot.style import (
+from weather_skills_core.plot.theme import (
+    DEFAULT_FONTSIZE,
     DISCRETE_PRECIP_NAMES,
+    aggregation_days,
     mpl_cmap_norm,
     parse_colormap_spec,
     resolve_colorscale,
 )
-from weather_skills_core.standard_utils import ensure_normalized_longitude, polygon_from_geojson
+from weather_skills_core.standard_utils import (
+    ensure_normalized_longitude,
+    lat_slice,
+    parse_bbox,
+    polygon_from_geojson,
+)
 from weather_skills_core.units import (
+    DATA_INTERVAL_ATTR,
+    parse_aggregation_period,
     precip_for_display,
     to_standard_units,
     units_equal,
     variable_label_for_display,
     variable_units,
 )
+
+# Natural Earth scale vs map span (max of the lon/lat extent in degrees).
+# Admin-1 (states / provinces / counties) is only readable on country-scale
+# views; a multi-country or basin map would be a thicket of province lines.
+ADMIN1_MAX_SPAN_DEG = 20.0
+HIRES_MAX_SPAN_DEG = 45.0
+MIDRES_MAX_SPAN_DEG = 90.0
+
+# KMD-style water fill (Lake Victoria, Turkana, …) drawn on top of the heatmap.
+LAKE_FACECOLOR = "#4da6ff"
+ADMIN1_STYLE = {"facecolor": "none", "edgecolor": "0.45", "linewidth": 0.4, "zorder": 3}
+LAKES_STYLE = {
+    "facecolor": LAKE_FACECOLOR,
+    "edgecolor": LAKE_FACECOLOR,
+    "linewidth": 0.4,
+    "zorder": 3.5,
+}
+BORDERS_STYLE = {"facecolor": "none", "edgecolor": "0.15", "linewidth": 0.8, "zorder": 4}
+COAST_STYLE = {"facecolor": "none", "edgecolor": "black", "linewidth": 0.8, "zorder": 4}
+
+
+def extent_span_deg(extent):
+    lon_min, lon_max, lat_min, lat_max = extent
+    return max(abs(lon_max - lon_min), abs(lat_max - lat_min))
+
+
+def boundary_layers(extent):
+    """Natural Earth scale and whether to overlay admin-1 for this view."""
+    span = extent_span_deg(extent)
+    if span > MIDRES_MAX_SPAN_DEG:
+        return {"scale": "110m", "admin1": False}
+    if span > HIRES_MAX_SPAN_DEG:
+        return {"scale": "50m", "admin1": False}
+    return {"scale": "10m", "admin1": span <= ADMIN1_MAX_SPAN_DEG}
+
+
+def extent_clip_geom(extent):
+    """Shapely clip geometry for ``lon_min,lon_max,lat_min,lat_max``.
+
+    Antimeridian views store a continuous unwrapped lon (e.g. 170..190) which
+    is split back into ``[-180, 180]`` pieces for Natural Earth intersection.
+    """
+    from shapely.geometry import box
+
+    lon_min, lon_max, lat_min, lat_max = extent
+    if lon_max > 180.0:
+        return box(lon_min, lat_min, 180.0, lat_max).union(
+            box(-180.0, lat_min, lon_max - 360.0, lat_max)
+        )
+    if lon_min > lon_max:
+        return box(lon_min, lat_min, 180.0, lat_max).union(box(-180.0, lat_min, lon_max, lat_max))
+    return box(lon_min, lat_min, lon_max, lat_max)
+
+
+def unwrap_geoms(geoms, lon_min):
+    """Shift western-hemisphere pieces so they match an unwrapped lon axis."""
+    import numpy as np
+    import shapely
+
+    def shift(coords):
+        out = np.asarray(coords).copy()
+        out[:, 0] = np.where(out[:, 0] < lon_min, out[:, 0] + 360.0, out[:, 0])
+        return out
+
+    return [shapely.transform(g, shift) for g in geoms if g is not None and not g.is_empty]
+
+
+def clip_ne_geoms(resolution, category, name, clip_geom):
+    """Natural Earth geometries intersecting ``clip_geom`` (eager download)."""
+    import cartopy.io.shapereader as shpreader
+
+    path = shpreader.natural_earth(resolution=resolution, category=category, name=name)
+    geoms = []
+    for geom in shpreader.Reader(path).geometries():
+        if geom is None or geom.is_empty:
+            continue
+        try:
+            if not geom.intersects(clip_geom):
+                continue
+            clipped = geom.intersection(clip_geom)
+        except Exception:  # noqa: BLE001
+            clipped = geom
+        if clipped is None or clipped.is_empty:
+            continue
+        if clipped.geom_type == "GeometryCollection":
+            geoms.extend(g for g in clipped.geoms if g is not None and not g.is_empty)
+        else:
+            geoms.append(clipped)
+    return geoms
+
+
+def _bundled_country_geoms(clip_geom):
+    """Country outlines from the bundled Natural Earth extract (no cartopy)."""
+    import shapely
+    from shapely.geometry import shape
+
+    raw = json.loads(files("weather_skills_core.data").joinpath("countries.geojson").read_text())
+    geoms = []
+    for feat in raw.get("features") or []:
+        geom = feat.get("geometry")
+        if not geom:
+            continue
+        try:
+            poly = shape(geom)
+            if not poly.intersects(clip_geom):
+                continue
+            geoms.append(poly.intersection(clip_geom))
+        except Exception:  # noqa: BLE001
+            continue
+    return [shapely.boundary(g) for g in geoms if g is not None and not g.is_empty]
+
+
+def load_geo_overlays(extent):
+    """Scale-appropriate coastline / border / filled-lake / admin-1 overlays.
+
+    Returns a list of ``(geometries, matplotlib style)`` layers, each clipped to
+    the map extent so a country-scale view does not draw the rest of the world.
+    Download or clip failures warn and skip that layer — the map still renders.
+    """
+    if extent is None:
+        return []
+    spec = boundary_layers(extent)
+    try:
+        clip = extent_clip_geom(extent)
+    except Exception as exc:  # noqa: BLE001
+        print(f"Warning: geographic overlays unavailable ({exc}); skipping.", file=sys.stderr)
+        return []
+    lon_min, lon_max = extent[0], extent[1]
+    layers = []
+
+    def add(category, name, style, resolution=None):
+        res = resolution or spec["scale"]
+        try:
+            geoms = clip_ne_geoms(res, category, name, clip)
+        except Exception as exc:  # noqa: BLE001
+            print(f"Warning: {name} overlay unavailable ({exc}); skipping.", file=sys.stderr)
+            return
+        if lon_max > 180.0:
+            geoms = unwrap_geoms(geoms, lon_min)
+        if geoms:
+            layers.append((geoms, style))
+
+    try:
+        import cartopy.io.shapereader  # noqa: F401
+    except ImportError:
+        try:
+            geoms = _bundled_country_geoms(clip)
+        except Exception as exc:  # noqa: BLE001
+            print(f"Warning: geographic overlays unavailable ({exc}); skipping.", file=sys.stderr)
+            return []
+        if lon_max > 180.0:
+            geoms = unwrap_geoms(geoms, lon_min)
+        return [(geoms, BORDERS_STYLE)] if geoms else []
+
+    if spec["admin1"]:
+        add("cultural", "admin_1_states_provinces", ADMIN1_STYLE, resolution="10m")
+    add("physical", "lakes", LAKES_STYLE)
+    add("cultural", "admin_0_boundary_lines_land", BORDERS_STYLE)
+    add("physical", "coastline", COAST_STYLE)
+    return layers
+
+
+def draw_geo_overlays(ax, overlays, crs=None):
+    """Draw ``load_geo_overlays`` layers on ``ax``.
+
+    A cartopy GeoAxes takes the geometries directly; a plain Axes gets them as
+    line collections so both map paths share one set of overlays.
+    """
+    if not overlays:
+        return
+    if crs is not None and hasattr(ax, "add_geometries"):
+        for geoms, style in overlays:
+            ax.add_geometries(geoms, crs, **style)
+        return
+    from matplotlib.collections import LineCollection, PathCollection
+    from matplotlib.path import Path as MplPath
+
+    for geoms, style in overlays:
+        segments, rings = [], []
+        for geom in geoms:
+            for part in getattr(geom, "geoms", [geom]):
+                if part.geom_type in ("Polygon",):
+                    rings.append(list(part.exterior.coords))
+                    segments.extend(list(hole.coords) for hole in part.interiors)
+                elif part.geom_type in ("LineString", "LinearRing"):
+                    segments.append(list(part.coords))
+        face = style.get("facecolor", "none")
+        if rings and face not in (None, "none"):
+            ax.add_collection(
+                PathCollection(
+                    [MplPath(ring) for ring in rings],
+                    facecolors=face,
+                    edgecolors=style.get("edgecolor", face),
+                    linewidths=style.get("linewidth", 0.5),
+                    zorder=style.get("zorder", 3),
+                )
+            )
+        else:
+            segments.extend(rings)
+        if segments:
+            ax.add_collection(
+                LineCollection(
+                    segments,
+                    colors=style.get("edgecolor", "#444444"),
+                    linewidths=style.get("linewidth", 0.6),
+                    zorder=style.get("zorder", 3),
+                )
+            )
+
+
+def draw_box_outlines(ax, boxes, transform=None):
+    """Outline each N/W/S/E box in black (split antimeridian spans into two)."""
+    from matplotlib.patches import Rectangle
+
+    kw = {"fill": False, "edgecolor": "black", "linewidth": 1.5, "zorder": 6}
+    if transform is not None:
+        kw["transform"] = transform
+    for north, west, south, east in boxes:
+        height = north - south
+        if west <= east:
+            ax.add_patch(Rectangle((west, south), east - west, height, **kw))
+        else:
+            # Antimeridian: west..180 and -180..east
+            ax.add_patch(Rectangle((west, south), 180.0 - west, height, **kw))
+            ax.add_patch(Rectangle((-180.0, south), east + 180.0, height, **kw))
+
+
+def plain(da):
+    if getattr(da.pint, "units", None) is not None:
+        return da.pint.dequantify()
+    return da
+
+
+def step_dim(da):
+    for cand in ("step", "time", "valid_time"):
+        if cand in da.dims:
+            return cand
+    cf = cf_dim(da, "time")
+    return cf if cf and cf in da.dims else None
+
+
+def pad_cell_extent(lat_vals, lon_vals):
+    lat_vals = np.asarray(lat_vals, dtype=float)
+    lon_vals = np.asarray(lon_vals, dtype=float)
+    dlat = float(np.nanmean(np.abs(np.diff(lat_vals)))) if lat_vals.size > 1 else 0.5
+    dlon = float(np.nanmean(np.abs(np.diff(lon_vals)))) if lon_vals.size > 1 else 0.5
+    lon_min = float(np.nanmin(lon_vals)) - dlon / 2
+    lon_max = float(np.nanmax(lon_vals)) + dlon / 2
+    lat_min = float(np.nanmin(lat_vals)) - dlat / 2
+    lat_max = float(np.nanmax(lat_vals)) + dlat / 2
+    if lon_max - lon_min >= 360.0 - 1e-6:
+        lon_min, lon_max = -180.0, 180.0
+    lat_min = max(lat_min, -90.0)
+    lat_max = min(lat_max, 90.0)
+    return [lon_min, lon_max, lat_min, lat_max]
+
+
+def figsize_from_extent(lon_min, lon_max, lat_min, lat_max, base_height=5.0):
+    lat_range = abs(lat_max - lat_min)
+    lon_range = abs(lon_max - lon_min)
+    if lat_range == 0 or lon_range == 0:
+        return base_height, base_height
+    height = base_height
+    width = height * lon_range / lat_range
+    return max(width, 2.0), height
+
+
+def subset_spatial(da, lat_dim, lon_dim, bbox_nwse, region_polygon, extent_vals):
+    if bbox_nwse is None and region_polygon is None:
+        return da, extent_vals
+    import xarray as xr
+
+    da = ensure_normalized_longitude(da, lon_dim)
+    if bbox_nwse is not None:
+        r_n, r_w, r_s, r_e = bbox_nwse
+        da = da.sel({lat_dim: lat_slice(da[lat_dim].values, r_n, r_s)})
+        if r_w > r_e:
+            da = da.where((da[lon_dim] >= r_w) | (da[lon_dim] <= r_e), drop=True)
+        else:
+            da = da.sel({lon_dim: slice(r_w, r_e)})
+    if region_polygon is not None:
+        import shapely
+
+        lon_grid, lat_grid = np.meshgrid(da[lon_dim].values, da[lat_dim].values)
+        mask = shapely.contains_xy(region_polygon, lon_grid, lat_grid)
+        da = da.where(xr.DataArray(mask, dims=(lat_dim, lon_dim)))
+    if bbox_nwse is not None:
+        r_n, r_w, r_s, r_e = bbox_nwse
+        if r_w > r_e:
+            shifted = ((da[lon_dim] - r_w) % 360.0) + r_w
+            da = da.assign_coords({lon_dim: shifted}).sortby(lon_dim)
+        if extent_vals is None:
+            if r_w > r_e:
+                extent_vals = [float(r_w), float(r_e) + 360.0, float(r_s), float(r_n)]
+            else:
+                extent_vals = [float(r_w), float(r_e), float(r_s), float(r_n)]
+    return da, extent_vals
+
+
+def slice_bbox_mask(da, lat_dim, lon_dim, bbox, polygon, label):
+    """Slice a lat/lon field to ``bbox`` / polygon; error if the grid is empty."""
+    if bbox is None and polygon is None:
+        return da
+    da, _ = subset_spatial(da, lat_dim, lon_dim, bbox, polygon, None)
+    if polygon is not None:
+        import shapely
+
+        lon_grid, lat_grid = np.meshgrid(da[lon_dim].values, da[lat_dim].values)
+        if not bool(shapely.contains_xy(polygon, lon_grid, lat_grid).any()):
+            print(
+                f"Warning: --mask-geojson polygon does not intersect {label}; "
+                "its panels will be entirely empty.",
+                file=sys.stderr,
+            )
+    if da.sizes.get(lat_dim, 0) == 0 or da.sizes.get(lon_dim, 0) == 0:
+        raise UsageError(
+            f"selection produced an empty grid on {label} "
+            "(no cells remain after --bbox/--mask-geojson); nothing to plot."
+        )
+    return da
+
+
+def extent_from_da(da, lat_dim, lon_dim, bbox=None):
+    """Lon/lat extent from ``bbox`` (NWSE) or half-cell padding around ``da``."""
+    if bbox is not None:
+        r_n, r_w, r_s, r_e = bbox
+        if r_w > r_e:
+            return [float(r_w), float(r_e) + 360.0, float(r_s), float(r_n)]
+        return [float(r_w), float(r_e), float(r_s), float(r_n)]
+    return pad_cell_extent(da[lat_dim].values, da[lon_dim].values)
+
+
+def is_cftime_axis(values):
+    arr = np.asarray(values)
+    return (
+        getattr(arr.dtype, "kind", None) == "O"
+        and arr.size > 0
+        and hasattr(arr.flat[0], "calendar")
+    )
+
+
+def axis_kind(values):
+    kind = getattr(np.asarray(values).dtype, "kind", None)
+    if kind == "M":
+        return "datetime"
+    if kind == "m":
+        return "timedelta"
+    if is_cftime_axis(values):
+        return "datetime"
+    return None
+
+
+def parse_extent(spec):
+    if not spec:
+        return None
+    if isinstance(spec, (list, tuple)) and len(spec) == 4:
+        return [float(x) for x in spec]
+    parts = [float(x) for x in str(spec).split(",")]
+    if len(parts) != 4:
+        raise UsageError("--extent expects lon_min,lon_max,lat_min,lat_max")
+    return parts
+
+
+def parse_cities(spec):
+    if not spec:
+        return {}
+    if isinstance(spec, dict):
+        data = spec
+    else:
+        p = Path(spec)
+        raw = p.read_text(encoding="utf-8") if p.exists() else str(spec)
+        data = json.loads(raw)
+    out = {}
+    for name, val in data.items():
+        if isinstance(val, dict):
+            out[name] = (float(val["lat"]), float(val["lon"]))
+        else:
+            out[name] = (float(val[0]), float(val[1]))
+    return out
+
+
+def parse_draw_boxes(specs):
+    if not specs:
+        return []
+    boxes = []
+    for spec in specs:
+        if isinstance(spec, (list, tuple)) and len(spec) == 4:
+            boxes.append(tuple(float(x) for x in spec))
+        else:
+            boxes.append(tuple(parse_bbox(spec)))
+    return boxes
+
+
+def format_step(value):
+    """Lead-time or calendar label: ``+3d`` or ``1 Jan '26``."""
+    arr = np.asarray(value)
+    if arr.dtype.kind == "M":
+        return format_plot_date(value)
+    if arr.dtype.kind == "m":
+        days = int(arr.astype("timedelta64[D]").astype("int64").reshape(-1)[0])
+        return f"+{days}d"
+    if hasattr(value, "year") and hasattr(value, "month") and hasattr(value, "day"):
+        return format_plot_date(value)
+    return str(value)
+
+
+def calendar_bin_width(da, all_steps):
+    """Days in a left-labeled multi-day calendar bin, or None for a single date."""
+    days = aggregation_days(da)
+    if days is not None and days >= 2:
+        return float(days)
+    arr = np.asarray(all_steps)
+    if arr.size < 2:
+        return None
+    if arr.dtype.kind == "M":
+        try:
+            diffs = np.diff(arr.astype("datetime64[ns]").astype("int64"))
+        except (TypeError, ValueError):
+            return None
+        positive = diffs[diffs > 0]
+        if positive.size == 0:
+            return None
+        median_ns = float(np.median(positive))
+        if median_ns < 2 * 86_400_000_000_000:
+            return None
+        return median_ns / 86_400_000_000_000
+    if is_cftime_axis(arr):
+        ordered = np.sort(arr)
+        deltas = [
+            abs((ordered[i + 1] - ordered[i]).total_seconds()) for i in range(ordered.size - 1)
+        ]
+        if not deltas:
+            return None
+        seconds = float(np.median(deltas))
+        if seconds < 2 * 86_400:
+            return None
+        return seconds / 86_400
+    return None
+
+
+def format_calendar_panel(value, bin_width=None):
+    """``14 Sept '26``, or ``4–10 Aug '26`` for multi-day left-edge bins."""
+    import datetime as _dt
+
+    if bin_width is None:
+        return format_plot_date(value)
+    try:
+        if hasattr(bin_width, "to"):
+            days = float(bin_width.to("day").magnitude)
+        elif hasattr(bin_width, "total_seconds"):
+            days = float(bin_width.total_seconds()) / 86_400
+        else:
+            days = float(bin_width)
+    except (TypeError, ValueError, AttributeError):
+        return format_plot_date(value)
+    if days <= 1.5:
+        return format_plot_date(value)
+
+    offset_days = int(round(days)) - 1
+    if hasattr(value, "calendar"):
+        try:
+            end = value + _dt.timedelta(days=offset_days)
+        except (TypeError, ValueError):
+            return format_plot_date(value)
+        return format_plot_date_range(value, end)
+
+    try:
+        start = np.asarray(value, dtype="datetime64[D]")
+        end = start + np.timedelta64(offset_days, "D")
+        return format_plot_date_range(start, end)
+    except (TypeError, ValueError):
+        return format_step(value)
+
+
+def panel_title(da, sdim, step_value, all_steps):
+    """Human panel label: calendar range, forecast valid window, or ``<sdim>=…``."""
+    step_arr = np.asarray(all_steps)
+    value_arr = np.asarray(step_value)
+    if step_arr.dtype.kind == "m" and "time" in da.coords and getattr(da["time"], "ndim", 1) == 0:
+        fallback = f"{sdim}={format_step(step_value)}"
+        try:
+            time_val = np.asarray(da["time"].values)
+            start = time_val + np.asarray(step_value)
+            dt = None
+            interval = da.attrs.get(DATA_INTERVAL_ATTR)
+            if isinstance(interval, str) and interval.strip():
+                try:
+                    seconds = float(parse_aggregation_period(interval).to("second").magnitude)
+                    dt = np.timedelta64(int(round(seconds)), "s")
+                except (TypeError, ValueError, UsageError):
+                    dt = None
+            if dt is None:
+                dt = step_arr[1] - step_arr[0] if step_arr.size > 1 else np.timedelta64(1, "D")
+            end = start + dt
+            return f"{format_plot_date(start)} until {format_plot_date(end)}"
+        except Exception:  # noqa: BLE001
+            return fallback
+    if value_arr.dtype.kind == "M" or hasattr(step_value, "calendar"):
+        return format_calendar_panel(step_value, calendar_bin_width(da, all_steps))
+    return f"{sdim}={format_step(step_value)}"
+
+
+def timeseries_axis(da, sdim):
+    """X coord and xlabel. Forecast ``step`` + scalar init → valid times."""
+    if sdim != "step" or "time" not in da.coords:
+        return da[sdim].values, sdim
+    time_coord = da["time"]
+    if getattr(time_coord, "ndim", 1) != 0:
+        return da[sdim].values, sdim
+    steps = np.asarray(da["step"].values)
+    if steps.dtype.kind != "m":
+        return da[sdim].values, sdim
+    init = np.asarray(time_coord.values)
+    if init.dtype.kind != "M":
+        return da[sdim].values, sdim
+    return (init + steps).astype("datetime64[ns]"), "Valid time"
+
 
 WIND_ROSE_SECTORS = 16
 WIND_SPEED_EDGES_MS = [0.0, 2.0, 4.0, 6.0, 8.0, 10.0, 12.0]
@@ -92,10 +611,10 @@ _LAYER_OPTION_KEYS = frozenset(
         "variable",
         "colormap",
         "index",
-        "u-variable",
-        "v-variable",
-        "quiver-scale",
-        "quiver-step",
+        "u_variable",
+        "v_variable",
+        "quiver_scale",
+        "quiver_step",
         "vmin",
         "vmax",
     }
@@ -137,19 +656,19 @@ def _parse_layer_options(blob):
             key, _, val = token.partition("=")
             key = key.strip()
             if not key:
-                raise ValueError(f"--layer option {token!r} has an empty key")
+                raise UsageError(f"--layer option {token!r} has an empty key")
             if key not in _LAYER_OPTION_KEYS:
-                raise ValueError(
+                raise UsageError(
                     f"unknown --layer option {key!r}; "
                     f"expected one of {', '.join(sorted(_LAYER_OPTION_KEYS))}"
                 )
             if key in options:
-                raise ValueError(f"--layer option {key!r} is given more than once")
+                raise UsageError(f"--layer option {key!r} is given more than once")
             current = key
             options[key] = val.strip()
         else:
             if current is None:
-                raise ValueError(f"--layer option {token!r} appears before any key=value")
+                raise UsageError(f"--layer option {token!r} appears before any key=value")
             options[current] = f"{options[current]},{token}"
     return options
 
@@ -326,18 +845,18 @@ def _discrete_flag_scale(da, colormap):
     return cmap, BoundaryNorm(bounds, cmap.N), values, labels
 
 
-def _heatmap_scale(da, colormap, *, stretch=False):
+def _heatmap_scale(da, colormap, *, stretch=False, registry=None):
     """Return ``(cmap, norm)``. ``norm`` is set for a discrete class scale.
 
     ``stretch=True`` (user ``--vmin`` / ``--vmax``) keeps the colors but drops
     ``BoundaryNorm`` so the colorbar can use arbitrary limits.
 
-    Names, comma lists, and ``style.colormap`` objects all go through
+    Names, comma lists, and ``theme.colormap`` objects all go through
     ``resolve_colorscale`` so a nested precip window, a CHC palette, a
     user-registry name, or a custom discrete ``{colors, bounds}`` object
     resolve the same way.
     """
-    scale = resolve_colorscale(da, colormap, stretch=stretch)
+    scale = resolve_colorscale(da, colormap, stretch=stretch, registry=registry)
     if scale.get("bounds") and not stretch:
         return mpl_cmap_norm(scale)
     colors = scale.get("colors")
@@ -500,9 +1019,9 @@ def _resolve_uv(ds, u_variable, v_variable):
     """Eastward/northward variable names from flags, CF attrs, or common names."""
     names = list(ds.data_vars)
     if u_variable and u_variable not in ds:
-        raise UsageError(f"--u-variable {u_variable!r} is not in the data (have {names})")
+        raise UsageError(f"--u_variable {u_variable!r} is not in the data (have {names})")
     if v_variable and v_variable not in ds:
-        raise UsageError(f"--v-variable {v_variable!r} is not in the data (have {names})")
+        raise UsageError(f"--v_variable {v_variable!r} is not in the data (have {names})")
     if u_variable and v_variable:
         return u_variable, v_variable
     if u_variable:
@@ -510,16 +1029,16 @@ def _resolve_uv(ds, u_variable, v_variable):
         if partner and partner in ds:
             return u_variable, partner
         raise UsageError(
-            f"--u-variable {u_variable!r} is set but no northward partner was found; "
-            "pass --v-variable"
+            f"--u_variable {u_variable!r} is set but no northward partner was found; "
+            "pass --v_variable"
         )
     if v_variable:
         partner = _infer_uv_partner(v_variable, want_v=False)
         if partner and partner in ds:
             return partner, v_variable
         raise UsageError(
-            f"--v-variable {v_variable!r} is set but no eastward partner was found; "
-            "pass --u-variable"
+            f"--v_variable {v_variable!r} is set but no eastward partner was found; "
+            "pass --u_variable"
         )
     u_cf, v_cf = [], []
     for name in names:
@@ -536,7 +1055,7 @@ def _resolve_uv(ds, u_variable, v_variable):
         return matches[0]
     raise UsageError(
         "u/v plot needs eastward (u) and northward (v) wind components; "
-        f"could not auto-detect them in {names}. Pass --u-variable and --v-variable."
+        f"could not auto-detect them in {names}. Pass --u_variable and --v_variable."
     )
 
 
@@ -611,7 +1130,7 @@ def _quiver_step(lat, lon, requested=None, target_spacing=QUIVER_TARGET_SPACING_
     """
     if requested is not None:
         if requested < 1:
-            raise UsageError("--quiver-step must be >= 1")
+            raise UsageError("--quiver_step must be >= 1")
         return int(requested)
     spacing = _native_spacing_deg(lat, lon)
     if spacing is None:
@@ -622,7 +1141,7 @@ def _quiver_step(lat, lon, requested=None, target_spacing=QUIVER_TARGET_SPACING_
 def _auto_quiver_scale(u, v, lon_span, spacing_deg, requested=None):
     """Matplotlib quiver ``scale`` (data units per axes-width).
 
-    Larger scale → shorter arrows. ``requested`` (``--quiver-scale``) wins.
+    Larger scale → shorter arrows. ``requested`` (``--quiver_scale``) wins.
     Otherwise size a typical (95th-percentile) wind to about
     ``QUIVER_ARROW_LEN_SPACING`` times the subsampled grid spacing, as a
     fraction of the map width, so 10 m/s basin winds and small anomalies
@@ -630,7 +1149,7 @@ def _auto_quiver_scale(u, v, lon_span, spacing_deg, requested=None):
     """
     if requested is not None:
         if requested <= 0:
-            raise UsageError("--quiver-scale must be > 0")
+            raise UsageError("--quiver_scale must be > 0")
         return float(requested)
     import numpy as np
 
@@ -794,7 +1313,7 @@ def _extent_from_points(da):
     ]
 
 
-def _prep_heatmap_layer(spec, bbox_nwse, region_polygon, extent):
+def _prep_heatmap_layer(spec, bbox_nwse, region_polygon, extent, *, registry=None):
     _ensure_layer_dataset(spec)
     ds = spec.ds
     variable = _layer_variable(ds, spec)
@@ -827,7 +1346,9 @@ def _prep_heatmap_layer(spec, bbox_nwse, region_polygon, extent):
         cmap, norm, flag_ticks, flag_labels = flag_scale
         vmin = vmax = None
     else:
-        cmap, norm = _heatmap_scale(da, spec.options.get("colormap"), stretch=user_vlim)
+        cmap, norm = _heatmap_scale(
+            da, spec.options.get("colormap"), stretch=user_vlim, registry=registry
+        )
         flag_ticks = flag_labels = None
         vmin, vmax, norm = _resolve_color_limits(da, user_vmin, user_vmax, norm=norm)
     return {
@@ -857,7 +1378,7 @@ def _prep_heatmap_layer(spec, bbox_nwse, region_polygon, extent):
     }
 
 
-def _prep_scatter_layer(spec, bbox_nwse, region_polygon):
+def _prep_scatter_layer(spec, bbox_nwse, region_polygon, *, registry=None):
     _ensure_layer_dataset(spec)
     ds = spec.ds
     point_dim = _point_dim(ds)
@@ -888,7 +1409,9 @@ def _prep_scatter_layer(spec, bbox_nwse, region_polygon):
     user_vmin = _layer_optional_float(spec, "vmin")
     user_vmax = _layer_optional_float(spec, "vmax")
     user_vlim = user_vmin is not None or user_vmax is not None
-    cmap, norm = _heatmap_scale(da, spec.options.get("colormap"), stretch=user_vlim)
+    cmap, norm = _heatmap_scale(
+        da, spec.options.get("colormap"), stretch=user_vlim, registry=registry
+    )
     vmin, vmax, norm = _resolve_color_limits(da, user_vmin, user_vmax, norm=norm)
     return {
         "kind": "scatter",
@@ -912,7 +1435,7 @@ def _prep_scatter_layer(spec, bbox_nwse, region_polygon):
 def _prep_quiver_layer(spec, bbox_nwse, region_polygon, extent):
     _ensure_layer_dataset(spec)
     ds = spec.ds
-    u_name, v_name = _resolve_uv(ds, spec.options.get("u-variable"), spec.options.get("v-variable"))
+    u_name, v_name = _resolve_uv(ds, spec.options.get("u_variable"), spec.options.get("v_variable"))
     ds = to_standard_units(ds, variables=[u_name, v_name])
     u_da = ds[u_name]
     v_da = ds[v_name]
@@ -953,8 +1476,8 @@ def _prep_quiver_layer(spec, bbox_nwse, region_polygon, extent):
         if spec.options.get("colormap")
         else QUIVER_CMAP
     )
-    qscale = spec.options.get("quiver-scale")
-    qstep = spec.options.get("quiver-step")
+    qscale = spec.options.get("quiver_scale")
+    qstep = spec.options.get("quiver_step")
     user_vmin = _layer_optional_float(spec, "vmin")
     user_vmax = _layer_optional_float(spec, "vmax")
     user_vlim = user_vmin is not None or user_vmax is not None
@@ -1249,6 +1772,7 @@ def _plot_layers(
     cbar_label=None,
     mpl_spec=None,
     template="weather_skills",
+    registry=None,
 ):
     """Stack ``--layer`` entries on shared Cartopy panels.
 
@@ -1258,7 +1782,7 @@ def _plot_layers(
     import cartopy.crs as ccrs
     import matplotlib.pyplot as plt
 
-    from weather_skills_core.plot.mpl import apply_style_then_rc
+    from weather_skills_core.plot.figure import apply_style_then_rc
 
     apply_style_then_rc(mpl_spec or {}, chart="map", fontsize=fontsize, template=template)
     import numpy as np
@@ -1277,14 +1801,14 @@ def _plot_layers(
             opts["colormap"] = colormap
         if "index" not in opts and index:
             opts["index"] = index
-        if "u-variable" not in opts and u_variable:
-            opts["u-variable"] = u_variable
-        if "v-variable" not in opts and v_variable:
-            opts["v-variable"] = v_variable
-        if "quiver-scale" not in opts and quiver_scale is not None:
-            opts["quiver-scale"] = str(quiver_scale)
-        if "quiver-step" not in opts and quiver_step is not None:
-            opts["quiver-step"] = str(quiver_step)
+        if "u_variable" not in opts and u_variable:
+            opts["u_variable"] = u_variable
+        if "v_variable" not in opts and v_variable:
+            opts["v_variable"] = v_variable
+        if "quiver_scale" not in opts and quiver_scale is not None:
+            opts["quiver_scale"] = str(quiver_scale)
+        if "quiver_step" not in opts and quiver_step is not None:
+            opts["quiver_step"] = str(quiver_step)
         if "vmin" not in opts and vmin is not None:
             opts["vmin"] = str(vmin)
         if "vmax" not in opts and vmax is not None:
@@ -1298,9 +1822,9 @@ def _plot_layers(
         if spec.kind == "mask":
             continue
         if spec.kind == "heatmap":
-            item = _prep_heatmap_layer(spec, bbox_nwse, region_polygon, extent)
+            item = _prep_heatmap_layer(spec, bbox_nwse, region_polygon, extent, registry=registry)
         elif spec.kind == "scatter":
-            item = _prep_scatter_layer(spec, bbox_nwse, region_polygon)
+            item = _prep_scatter_layer(spec, bbox_nwse, region_polygon, registry=registry)
         elif spec.kind == "quiver":
             item = _prep_quiver_layer(spec, bbox_nwse, region_polygon, extent)
         elif spec.kind == "outline":
@@ -1418,8 +1942,7 @@ def _plot_layers(
         layout="compressed",
     )
     axes = np.array(axes).reshape(nrows, ncols).flatten()
-    # What the renderer actually chose, for the resolved spec / sidecar.
-    fig._ws_map = {
+    drawn = {
         "rows": nrows,
         "columns": ncols,
         "n_panels": num_steps,
@@ -1558,7 +2081,7 @@ def _plot_layers(
             and "ticks" not in size_kw
         ):
             cbar.set_ticklabels(p["flag_labels"])
-    return fig
+    return fig, drawn
 
 
 def _contour_levels(vmin, vmax, n=10, norm=None):
@@ -1576,20 +2099,20 @@ def _contour_levels(vmin, vmax, n=10, norm=None):
     return np.linspace(vmin, vmax, n + 1)
 
 
-# A single-input map style is a one-layer figure: `--style heatmap` and
+# A single-input map kind is a one-layer figure: `--kind heatmap` and
 # `--layer heatmap:x.zarr` take the same path so they cannot drift apart.
-STYLE_TO_LAYER_KIND = {"heatmap": "heatmap", "contour": "heatmap", "quiver": "quiver"}
-MAP_STYLES = frozenset(STYLE_TO_LAYER_KIND) | {"layer"}
+KIND_TO_LAYER = {"heatmap": "heatmap", "contour": "heatmap", "quiver": "quiver"}
+MAP_STYLES = frozenset(KIND_TO_LAYER) | {"layer"}
 
 
 def layers_from_spec(spec: dict, datasets: dict) -> list:
     """Build the ``LayerSpec`` list a map spec describes.
 
-    An explicit ``layers`` list is used as given; otherwise ``traces[0].type``
+    An explicit ``layers`` list is used as given; otherwise ``traces[0].kind``
     is turned into the single layer that draws it.
     """
     trace = trace_at(spec)
-    style = trace.get("type") or "heatmap"
+    style = trace.get("kind") or "heatmap"
     inputs = [i for i in (spec.get("inputs") or []) if isinstance(i, dict)]
     by_id = {str(i.get("id")): i for i in inputs}
 
@@ -1620,19 +2143,21 @@ def layers_from_spec(spec: dict, datasets: dict) -> list:
             built.append(layer)
         return built
 
-    if style not in STYLE_TO_LAYER_KIND:
-        raise UsageError(f"{style!r} is not a map style; expected one of {sorted(MAP_STYLES)}")
+    if style not in KIND_TO_LAYER:
+        raise UsageError(f"{style!r} is not a map kind; expected one of {sorted(MAP_STYLES)}")
     input_id = str(trace.get("input") or (inputs[0].get("id") if inputs else "a"))
     spec_input = by_id.get(input_id, inputs[0] if inputs else {})
     options = {}
     for key, value in (
         ("variable", spec_input.get("variable")),
         ("index", spec_input.get("index")),
-        ("colormap", (spec.get("style") or {}).get("colormap") or spec_input.get("colormap")),
+        ("colormap", (spec.get("theme") or {}).get("colormap") or spec_input.get("colormap")),
         ("vmin", spec.get("vmin")),
         ("vmax", spec.get("vmax")),
-        ("u-variable", trace.get("u_variable")),
-        ("v-variable", trace.get("v_variable")),
+        ("u_variable", trace.get("u_variable")),
+        ("v_variable", trace.get("v_variable")),
+        ("quiver_scale", (trace.get("quiver") or {}).get("scale")),
+        ("quiver_step", trace.get("quiver_step")),
     ):
         if value is not None:
             options[key] = value
@@ -1643,7 +2168,7 @@ def layers_from_spec(spec: dict, datasets: dict) -> list:
     if trace.get("mesh") is not None:
         options["mesh"] = trace["mesh"]
     layer = LayerSpec(
-        STYLE_TO_LAYER_KIND[style],
+        KIND_TO_LAYER[style],
         spec_input.get("path") or "",
         options,
         f"{style}:{spec_input.get('path') or ''}",
@@ -1652,15 +2177,37 @@ def layers_from_spec(spec: dict, datasets: dict) -> list:
     return [layer]
 
 
-def compile_map_figure(spec: dict, datasets: dict, *, fontsize, template="weather_skills"):
-    """Compile any map spec (single style or layered) to a matplotlib Figure."""
+def compile_map(spec: dict, datasets: dict, *, fontsize, template="weather_skills", registry=None):
+    """Compile any map spec (single kind or layered) to a ``CompiledFigure``."""
+    from weather_skills_core.plot.figure import CompiledFigure
+
+    fig, drawn = compile_map_figure(
+        spec, datasets, fontsize=fontsize, template=template, registry=registry
+    )
+    layout = spec.get("layout") or {}
+    tight = layout.get("autosize", True) and layout.get("figsize") is None
+    return CompiledFigure(fig, spec, tight=tight, map_drawn=drawn)
+
+
+def compile_map_figure(
+    spec: dict, datasets: dict, *, fontsize, template="weather_skills", registry=None
+):
+    """Compile any map spec (single kind or layered) to a matplotlib Figure."""
     geo = spec.get("geo") or {}
     layout = spec.get("layout") or {}
     facet = layout.get("facet") or {}
     trace = trace_at(spec)
     shared = layout.get("shared_colorscale")
     bbox = geo.get("bbox")
-    return _plot_layers(
+    labels = []
+    by_id = {str(item.get("id")): item.get("label") for item in (spec.get("inputs") or [])}
+    raw_layers = spec.get("layers") or []
+    if raw_layers:
+        for item in raw_layers:
+            labels.append(by_id.get(str(item.get("input") or "")))
+    else:
+        labels = [item.get("label") for item in (spec.get("inputs") or [])]
+    fig, drawn = _plot_layers(
         layers_from_spec(spec, datasets),
         tuple(bbox) if bbox is not None else None,
         geo.get("mask_geojson"),
@@ -1676,10 +2223,11 @@ def compile_map_figure(spec: dict, datasets: dict, *, fontsize, template="weathe
         None,
         trace.get("u_variable"),
         trace.get("v_variable"),
-        None,
-        None,
+        (trace.get("quiver") or {}).get("scale"),
+        trace.get("quiver_step"),
         shared is True,
         shared is False,
+        layer_labels=labels or None,
         xlabel=spec.get("xlabel"),
         ylabel=spec.get("ylabel"),
         figsize=layout.get("figsize"),
@@ -1687,4 +2235,270 @@ def compile_map_figure(spec: dict, datasets: dict, *, fontsize, template="weathe
         cbar_label=spec.get("cbar_label"),
         mpl_spec=spec,
         template=template,
+        registry=registry,
     )
+    return fig, drawn
+
+
+HITS_COLORS = ["#d73027", "#f0f0f0", "#1a9850"]
+ERROR_DIVERGING_COLORS = [
+    "#053061",
+    "#2166ac",
+    "#4393c3",
+    "#92c5de",
+    "#d1e5f0",
+    "#ffffff",
+    "#fddbc7",
+    "#f4a582",
+    "#d6604d",
+    "#b2182b",
+    "#67001f",
+]
+MAE_FROM_WHITE_COLORS = [
+    "#ffffff",
+    "#fddbc7",
+    "#f4a582",
+    "#d6604d",
+    "#b2182b",
+    "#67001f",
+]
+
+
+def scale_from_da(da, colormap=None, *, stretch=False, label=None, vmin=None, vmax=None):
+    """``resolve_colorscale`` plus optional user limits and a colorbar label."""
+    parsed = parse_colormap_spec(colormap) if colormap is not None else {}
+    if parsed.get("bounds") and vmin is None and vmax is None:
+        stretch = False
+    scale = resolve_colorscale(
+        da, colormap, stretch=stretch or vmin is not None or vmax is not None
+    )
+    if vmin is not None:
+        scale["cmin"] = vmin
+    if vmax is not None:
+        scale["cmax"] = vmax
+    if label:
+        scale["label"] = label
+    return scale
+
+
+def hits_scale(*, label="event"):
+    return {
+        "name": "hits",
+        "colors": HITS_COLORS,
+        "bounds": [-1.5, -0.5, 0.5, 1.5],
+        "tickvals": [-1, 0, 1],
+        "ticktext": ["disagree", "below", "hit"],
+        "cmin": -1.5,
+        "cmax": 1.5,
+        "label": label,
+    }
+
+
+def error_scale(da, metric, *, label=None):
+    """Bias (diverging, white at 0) or MAE (white→warm) colormap."""
+    vals = np.asarray(da.values, dtype=float)
+    finite = vals[np.isfinite(vals)]
+    if metric == "bias":
+        if finite.size == 0:
+            lo, hi = -1.0, 1.0
+        else:
+            lo = float(np.nanmin(finite))
+            hi = float(np.nanmax(finite))
+            m = max(abs(lo), abs(hi), 1e-6)
+            lo, hi = -m, m
+        return {
+            "name": "verify_bias",
+            "colors": ERROR_DIVERGING_COLORS,
+            "cmin": lo,
+            "cmax": hi,
+            "label": label or "bias",
+        }
+    if finite.size == 0:
+        lo, hi = 0.0, 1.0
+    else:
+        lo = 0.0
+        hi = float(np.nanmax(finite)) or 1.0
+    return {
+        "name": "verify_mae",
+        "colors": MAE_FROM_WHITE_COLORS,
+        "cmin": lo,
+        "cmax": hi,
+        "label": label or "mae",
+    }
+
+
+def heatmap_cell(da, lat_dim, lon_dim, *, scale="field"):
+    slab = da.transpose(lat_dim, lon_dim)
+    return {
+        "kind": "heatmap",
+        "x": np.asarray(slab[lon_dim].values, dtype=float),
+        "y": np.asarray(slab[lat_dim].values, dtype=float),
+        "z": np.asarray(slab.values, dtype=float),
+        "scale": scale,
+    }
+
+
+def scatter_cell(lons, lats, values, *, scale="field"):
+    return {
+        "kind": "scatter",
+        "x": np.asarray(lons, dtype=float),
+        "y": np.asarray(lats, dtype=float),
+        "c": np.asarray(values, dtype=float),
+        "scale": scale,
+    }
+
+
+def blank_cell(text="n/a"):
+    return {"kind": "blank", "text": text}
+
+
+def compile_grid(
+    cells,
+    *,
+    extent,
+    title=None,
+    col_titles=None,
+    row_titles=None,
+    fontsize=DEFAULT_FONTSIZE,
+    figsize=None,
+    scales=None,
+    overlays=True,
+    xlabel="Longitude",
+    cell_notes=None,
+    template="weather_skills",
+    spec=None,
+):
+    """Compile a 2-D grid of heatmap/scatter/blank cells.
+
+    ``cells`` is a list of rows; each row is a list of dicts or None.
+    A cell dict is ``{"kind": "heatmap", "x", "y", "z", "scale"}`` or
+    ``{"kind": "scatter", "x", "y", "c", "scale"}`` or
+    ``{"kind": "blank", "text": "n/a"}``.
+    ``scales`` maps scale id → dict from ``resolve_colorscale``.
+    """
+    import matplotlib.pyplot as plt
+
+    apply_style_then_rc(spec or {}, chart="map", fontsize=fontsize, template=template)
+    trace = trace_at(spec)
+    nrows = len(cells)
+    ncols = max((len(row) for row in cells), default=1)
+    geo_layers = load_geo_overlays(extent) if overlays else []
+    sw, sh = (5.0, 4.0)
+    if extent is not None:
+        sw, sh = figsize_from_extent(*extent)
+    if figsize is not None:
+        fig_w, fig_h = float(figsize[0]), float(figsize[1])
+        tight = False
+    else:
+        fig_w, fig_h = max(sw * ncols, 6.0), max(sh * nrows, 4.0)
+        tight = True
+    fig, axes = plt.subplots(
+        nrows, ncols, figsize=(fig_w, fig_h), squeeze=False, layout="constrained"
+    )
+    mappables = {}
+    for r, row in enumerate(cells):
+        for c in range(ncols):
+            ax = axes[r, c]
+            cell = row[c] if c < len(row) else None
+            if cell is None:
+                cell = blank_cell()
+            kind = cell.get("kind") or "heatmap"
+            scale_id = cell.get("scale") or "field"
+            scale = scales.get(scale_id) or {}
+            cmap, norm = mpl_cmap_norm(scale) if scale else (None, None)
+            if extent is not None:
+                ax.set_xlim(extent[0], extent[1])
+                ax.set_ylim(extent[2], extent[3])
+                ax.set_aspect("equal", adjustable="box")
+            if r == 0 and col_titles and c < len(col_titles):
+                ax.set_title(col_titles[c])
+            if r == nrows - 1:
+                ax.set_xlabel(xlabel)
+            if c == 0 and row_titles and r < len(row_titles):
+                ax.set_ylabel(row_titles[r])
+            if kind == "blank":
+                ax.text(
+                    0.5,
+                    0.5,
+                    cell.get("text") or "n/a",
+                    transform=ax.transAxes,
+                    ha="center",
+                    va="center",
+                    color="#888888",
+                )
+            elif kind == "scatter":
+                sk = scatter_kwargs(trace.get("scatter") or {})
+                mappable = ax.scatter(
+                    cell["x"],
+                    cell["y"],
+                    **{
+                        "c": cell.get("c"),
+                        "cmap": cmap,
+                        "norm": norm,
+                        "s": 64,
+                        "edgecolors": "#333",
+                        "linewidths": 0.4,
+                        "zorder": 4,
+                        **sk,
+                    },
+                )
+                if scale_id not in mappables:
+                    mappables[scale_id] = mappable
+                draw_geo_overlays(ax, geo_layers)
+            else:
+                mk = mesh_kwargs(trace)
+                mappable = ax.pcolormesh(
+                    np.asarray(cell["x"], dtype=float),
+                    np.asarray(cell["y"], dtype=float),
+                    np.asarray(cell["z"], dtype=float),
+                    **{"cmap": cmap, "norm": norm, "shading": "nearest", **mk},
+                )
+                if scale_id not in mappables:
+                    mappables[scale_id] = mappable
+                draw_geo_overlays(ax, geo_layers)
+            note = None
+            if cell_notes and r < len(cell_notes) and c < len(cell_notes[r]):
+                note = cell_notes[r][c]
+            if note:
+                ax.text(
+                    0.03,
+                    0.97,
+                    note,
+                    transform=ax.transAxes,
+                    ha="left",
+                    va="top",
+                    fontsize=max(8, int(fontsize * 0.6)),
+                    color="#333333",
+                )
+
+    visible = [ax for ax in axes.ravel() if ax.get_visible()]
+    n_scales = len(mappables)
+    extra_cbar = colorbar_mpl_kwargs(spec or {})
+    for scale_id, mappable in mappables.items():
+        scale = scales.get(scale_id) or {}
+        cbar_kw = dict(extra_cbar)
+        location = cbar_kw.pop(
+            "location", "right" if n_scales > 1 or len(visible) <= 1 else "bottom"
+        )
+        ticks = cbar_kw.pop("ticks", None)
+        labels = cbar_kw.pop("labels", None)
+        if ticks is None:
+            ticks = scale.get("tickvals") or scale.get("bounds")
+        cbar = add_shared_colorbar(
+            fig,
+            mappable,
+            visible,
+            label=scale.get("label") or "",
+            location=location,
+            ticks=ticks,
+            labels=labels,
+            **cbar_kw,
+        )
+        if cbar is not None and labels is None and scale.get("ticktext"):
+            cbar.set_ticklabels(list(scale["ticktext"]))
+    if title:
+        fig.suptitle(title)
+    finish_figure(fig, spec or {}, axes)
+    from weather_skills_core.plot.figure import CompiledFigure
+
+    return CompiledFigure(fig, spec or {}, tight=tight)

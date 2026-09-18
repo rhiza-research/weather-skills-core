@@ -1,4 +1,4 @@
-"""Named colormaps, matplotlib cmap/norm, and user style-file overlays."""
+"""Named colormaps, matplotlib cmap/norm, and user theme-file overlays."""
 
 from __future__ import annotations
 
@@ -7,13 +7,13 @@ import os
 from pathlib import Path
 
 from weather_skills_core.errors import UsageError
-from weather_skills_core.plot.figure import DEFAULT_DPI, DEFAULT_FONTSIZE
 from weather_skills_core.units import (
     parse_aggregation_period,
     variable_units,
 )
 
-SPEC_VERSION = 1
+DEFAULT_FONTSIZE = 16
+DEFAULT_DPI = 150
 DEFAULT_MAX_COLUMNS = 4
 DEFAULT_TEMPLATE = "weather_skills"
 TEMPLATES = ("weather_skills", "colorblind")
@@ -52,26 +52,18 @@ PRECIP_SHORT_BOUNDS = [0.5, 1, 2, 3, 5, 8, 10, 15, 20, 30, 50, 75, 100, 150, 200
 PRECIP_LONG_MIN_DAYS = 5
 
 # Nested absolute-mm default: one color per millimetre class; colorbars crop
-# this master. Luminance falls with amount (green → teal → blue → indigo).
+# this master (same color = same millimetres on every window). Hues follow CHC
+# ``ppt_total`` — green, cyan, blue, purple, yellow, orange, red — so adjacent
+# classes stay distinct. 0–1 mm is a paler green than CHC's first class (CHC
+# paints 0–2 mm white, which hides trace rain). Overflow above 1000 mm is a
+# darker maroon than the last class, not CHC's pale pink.
 PRECIP_MASTER_BOUNDS = [0, 1, 2, 5, 10, 20, 30, 50, 75, 100, 150, 200, 400, 700, 1000]
 PRECIP_MASTER_COLORS = [
-    "#e4f6d0",
-    "#b4e66a",
-    "#7ad94a",
-    "#3fc45e",
-    "#22b08a",
-    "#2496c8",
-    "#1c7ab4",
-    "#1c6aa8",
-    "#1e5898",
-    "#254888",
-    "#2c3878",
-    "#302868",
-    "#2c1854",
-    "#1c0e3c",
+    "#e0ffd6",  # 0–1 mm
+    *PRECIP_COLORS[2:15],  # CHC light-green … dark-red
 ]
 PRECIP_UNDER = "#ffffff"
-PRECIP_OVER = "#100828"
+PRECIP_OVER = "#5a0000"
 PRECIP_WINDOW_ORDER = ("ppt_daily", "ppt_week", "ppt_month", "ppt_season")
 PRECIP_WINDOW_VMAX = {
     "ppt_daily": 50.0,
@@ -209,10 +201,10 @@ DISCRETE_PRECIP_NAMES = frozenset(
     }
 )
 
-_STYLE_ENV = "WEATHER_SKILLS_PLOT_STYLE"
+_THEME_ENV = "WEATHER_SKILLS_PLOT_THEME"
 _USER_STYLE_CANDIDATES = (
-    Path.home() / ".config" / "weather-skills" / "plot.toml",
-    Path.home() / ".config" / "weather-skills" / "plot.json",
+    Path.home() / ".config" / "weather-skills" / "theme.toml",
+    Path.home() / ".config" / "weather-skills" / "theme.json",
 )
 
 
@@ -324,8 +316,8 @@ def parse_band(value) -> tuple[float, float] | None:
     return (lo, hi)
 
 
-def default_style() -> dict:
-    """Built-in style: seaborn template, font, facet cap, colormap aliases."""
+def default_theme() -> dict:
+    """Built-in theme: seaborn template, font, facet cap, colormap aliases."""
     return {
         "template": DEFAULT_TEMPLATE,
         "palette": "deep",
@@ -362,7 +354,7 @@ def deep_merge(base: dict, overlay: dict) -> dict:
     return out
 
 
-def _load_style_file(path: Path) -> dict:
+def _load_theme_file(path: Path) -> dict:
     text = path.read_text(encoding="utf-8")
     suffix = path.suffix.lower()
     if suffix == ".toml":
@@ -372,39 +364,51 @@ def _load_style_file(path: Path) -> dict:
     else:
         data = json.loads(text)
     if not isinstance(data, dict):
-        raise UsageError(f"plot style file {path} must contain a JSON/TOML object")
-    return data.get("plot", data)
+        raise UsageError(f"plot theme file {path} must contain a JSON/TOML object")
+    return data.get("theme", data.get("plot", data))
 
 
-_active_style: dict | None = None
+THEME_FILE_KEYS = frozenset(
+    {"template", "palette", "fontsize", "max_columns", "dpi", "colormap", "colormaps"}
+)
 
 
-def load_user_style(path=None) -> dict:
-    """Merge built-in style with optional user file (later wins)."""
-    style = default_style()
+def _validate_theme_file(data: dict, *, loc: str) -> dict:
+    if not isinstance(data, dict):
+        raise UsageError(f"{loc} must be a JSON/TOML object")
+    unknown = [key for key in data if key not in THEME_FILE_KEYS]
+    if unknown:
+        raise UsageError(
+            f"{loc} unknown keys: {', '.join(sorted(unknown))}; "
+            f"allowed: {', '.join(sorted(THEME_FILE_KEYS))}"
+        )
+    return data
+
+
+def load_user_theme(path=None) -> dict:
+    """Merge built-in theme with optional user file (later wins)."""
+    theme = default_theme()
     if path is not None:
-        style = deep_merge(style, _load_style_file(Path(path)))
-        return style
-    env = os.environ.get(_STYLE_ENV)
+        overlay = _validate_theme_file(_load_theme_file(Path(path)), loc=str(path))
+        return deep_merge(theme, overlay)
+    env = os.environ.get(_THEME_ENV)
     if env:
-        return deep_merge(style, _load_style_file(Path(env)))
+        overlay = _validate_theme_file(_load_theme_file(Path(env)), loc=env)
+        return deep_merge(theme, overlay)
     for candidate in _USER_STYLE_CANDIDATES:
         if candidate.is_file():
-            return deep_merge(style, _load_style_file(candidate))
-    return style
-
-
-def set_active_style(style: dict | None) -> None:
-    """Use ``style`` as the colormap registry for this process (``--style-file``)."""
-    global _active_style
-    _active_style = style
+            overlay = _validate_theme_file(_load_theme_file(candidate), loc=str(candidate))
+            return deep_merge(theme, overlay)
+    return theme
 
 
 def colormap_palettes(registry: dict | None = None) -> dict:
-    """Built-in palettes, then the active/user style file, then ``registry``."""
-    palettes = dict(default_style()["colormaps"])
+    """Built-in palettes, then ``registry`` (from ``load_user_theme`` / ``--theme-file``)."""
+    palettes = dict(default_theme()["colormaps"])
     extra = (
-        registry if registry is not None else (_active_style or load_user_style()).get("colormaps")
+        registry.get("colormaps")
+        if isinstance(registry, dict) and "colormaps" in registry
+        else registry
     )
     if extra:
         palettes.update(extra)
@@ -562,8 +566,9 @@ def is_spi(da) -> bool:
 def named_precip_scale(da) -> tuple[str, list[str], list[float]]:
     """Return ``(name, colors, bounds)`` for the default precip palette.
 
-    Totals use a nested absolute-mm master cropped by ``aggregation_period``.
-    The CHC rainbow palettes remain available as ``ppt_total`` / ``ppt_short``.
+    Totals use a nested absolute-mm master cropped by ``aggregation_period``
+    (CHC ``ppt_total`` hues on the nested millimetre key). The historical CHC
+    rainbow palettes remain available as ``ppt_total`` / ``ppt_short``.
     """
     if is_spi(da):
         return "spi", list(SPI_COLORS), list(SPI_BOUNDS)
@@ -608,7 +613,7 @@ def _discrete_scale(name: str, registry: dict, *, stretch: bool) -> dict:
 COLORMAP_SPEC_KEYS = frozenset({"name", "colors", "bounds", "under", "over", "cmap"})
 
 
-def _check_color_bound_counts(colors, bounds, under=None, over=None, *, loc="style.colormap"):
+def _check_color_bound_counts(colors, bounds, under=None, over=None, *, loc="theme.colormap"):
     """``colors`` is one per class, or under+classes+over packed in one list."""
     n_bins = len(bounds) - 1
     if n_bins < 1:
@@ -629,7 +634,7 @@ def _check_color_bound_counts(colors, bounds, under=None, over=None, *, loc="sty
     )
 
 
-def _validate_colormap_object(spec: dict, *, loc="style.colormap") -> dict:
+def _validate_colormap_object(spec: dict, *, loc="theme.colormap") -> dict:
     unknown = [key for key in spec if key not in COLORMAP_SPEC_KEYS]
     if unknown:
         raise UsageError(
@@ -695,9 +700,9 @@ def parse_colormap_spec(spec) -> dict:
         try:
             data = json.loads(raw)
         except json.JSONDecodeError as exc:
-            raise UsageError(f"style.colormap JSON is invalid: {exc}") from exc
+            raise UsageError(f"theme.colormap JSON is invalid: {exc}") from exc
         if not isinstance(data, dict):
-            raise UsageError("style.colormap JSON must be an object")
+            raise UsageError("theme.colormap JSON must be an object")
         return _validate_colormap_object(data)
     if "," in raw:
         colors = [p.strip() for p in raw.split(",") if p.strip()]
@@ -733,7 +738,7 @@ def resolve_colorscale(
     ``colormap`` may be a matplotlib name, a comma-separated color list, or an
     object with ``colors`` / ``bounds`` / ``under`` / ``over``. Named palettes
     resolve against the built-in nested ``ppt_*`` windows and CHC aliases, then
-    the active ``--style-file`` / user registry (so a custom ``colormaps.drought``
+    ``registry`` / ``--theme-file`` (so a custom ``colormaps.drought``
     entry is not ignored).
     """
     parsed = parse_colormap_spec(colormap)
