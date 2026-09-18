@@ -139,8 +139,10 @@ resolve-time skill and pass the printed `--start-time`/`--end-time` or
 | Figure | Dataset input(s) + decorator `-o` | Path (write PNG yourself) |
 | Inspect | Dataset or Path input; `output=False` | anything (stdout) |
 
-Figure skills assemble a plot spec (or call `maps.compile_grid` /
-`charts.compile_lines` / `charts.compile_mediogram` after data prep) and then
+Figure skills keep CLI flags and fold them through `FLAG_TO_SPEC`. `--spec`
+is dump/edit/replot, not a replacement for `--title` / `--variable`. Assemble
+a spec from flags (or call `maps.compile_grid` / `charts.compile_lines` /
+`charts.compile_mediogram` after data prep) and then
 `export(compiled, output, datasets=…)`. Public names:
 `PlotSpec`, `load_spec`, `dump_spec`, `compile`, `export`. Matplotlib does
 not load on `import weather_skills_core.plot`. The spec must not open files.

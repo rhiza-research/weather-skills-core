@@ -597,9 +597,8 @@ def overlay_spec(base: dict, overlay: dict | None) -> dict:
     return deep_merge(base, overlay)
 
 
-# One knob name, one canonical spec path. overlay_flags / spec_from_flags use
-# this table to build JSON; figure skills no longer expose these as CLI flags.
-# An int segment indexes a list.
+# One CLI flag, one canonical spec path. overlay_flags / spec_from_flags use
+# this table so a set flag overlays --spec. An int segment indexes a list.
 FLAG_TO_SPEC = {
     "title": ("title",),
     "subplot_titles": ("subplot_titles",),
@@ -868,14 +867,16 @@ def spec_inputs_from_datasets(datasets) -> list[dict]:
 
 
 SPEC_ARGUMENT_HELP = (
-    "Plot spec JSON (path or inline). Figure options (title, kind, colormap, "
-    "layout, variable, …) belong here, not as CLI flags. A default run writes "
-    "sidecar *.plot.json; edit and pass back. Inputs listed in the spec are "
-    "opened for provenance; dataset flags are optional when the spec has paths."
+    "Plot spec JSON (path or inline). Same knobs as the CLI (--title, --kind, "
+    "--variable, --figsize, --mask-geojson, colormap, layout, …). A first run "
+    "can be flags only; --spec is dump/edit/replot. A set CLI flag overlays "
+    "the spec. A default run writes sidecar *.plot.json. Inputs listed in the "
+    "spec are opened for provenance; dataset flags are optional when the spec "
+    "has paths."
 )
 
-# Former figure CLI flags → canonical spec path. Used only to hint when an
-# agent still passes them as argparse unknowns.
+# CLI flag → canonical spec path. Hints argparse unknowns at the spec home;
+# skills still declare these flags and overlay them onto --spec.
 PLOT_CLI_TO_SPEC = {
     "--title": "title",
     "--subplot-title": "subplot_titles",
@@ -935,22 +936,29 @@ PLOT_CLI_TO_SPEC = {
 
 
 def hint_moved_plot_flags(message: str) -> str:
-    """Append spec-path hints when argparse rejected a former plotting flag."""
+    """Append spec-path hints when argparse rejected a plotting flag."""
     found = []
     for flag, path in PLOT_CLI_TO_SPEC.items():
         if re.search(rf"(?:^|[\s]){re.escape(flag)}(?:\s|=|$)", message):
             found.append((flag, path))
     if not found:
         return message
-    lines = [message.rstrip(), "Plotting options belong in --spec, not CLI flags:"]
+    lines = [
+        message.rstrip(),
+        "Those names are plot-spec keys. Use the matching CLI flag when the "
+        "skill declares it, or set the same path in --spec (CLI overlays spec):",
+    ]
     for flag, path in found:
         lines.append(f"  {flag} → {path}")
-    lines.append('Example: --spec \'{"title": "S2S precip", "layout": {"facet": {"columns": 4}}}\'')
+    lines.append(
+        'Example: --title "S2S precip" --columns 4   or   '
+        '--spec \'{"title": "S2S precip", "layout": {"facet": {"columns": 4}}}\''
+    )
     return "\n".join(lines)
 
 
 def patch_parser_for_spec_flags(parser):
-    """Make ``parser.error`` name the spec home of a former plotting flag."""
+    """Make ``parser.error`` name the spec home of a plotting flag."""
     orig = parser.error
 
     def error(message):
