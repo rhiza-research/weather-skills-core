@@ -331,8 +331,8 @@ def test_precip_default_colorscale_is_nested_week_window():
     assert scale["bounds"][0] == 0
     assert scale["bounds"][-1] == 200
     assert scale["colors"][0] == "#ffffff"
-    assert scale["colors"][1] == "#e0ffd6"
-    assert scale["colors"][5] == "#b4f0fa"
+    assert scale["colors"][1] == "#ffffff"
+    assert scale["colors"][5] == "#50a5f5"
     chc = resolve_colorscale(da, "ppt_total")
     assert chc["name"] == "ppt_total"
     assert chc["colors"][0] == "#ffffff"
@@ -355,7 +355,7 @@ def test_precip_nested_windows_keep_absolute_mm_colors():
     )
 
     assert len(PRECIP_MASTER_COLORS) == len(PRECIP_MASTER_BOUNDS) - 1
-    assert PRECIP_MASTER_COLORS[1:] == PRECIP_COLORS[2:15]
+    assert PRECIP_MASTER_COLORS == [*PRECIP_COLORS[1:5], *PRECIP_COLORS[6:16]]
 
     assert precip_window_name(None) == "ppt_week"
     assert precip_window_name(1) == "ppt_daily"
@@ -391,7 +391,7 @@ def test_precip_nested_windows_keep_absolute_mm_colors():
     assert sw["name"] == "ppt_week" and sw["bounds"][-1] == 200
     assert sm["name"] == "ppt_month" and sm["bounds"][-1] == 400
     assert ss["name"] == "ppt_season" and ss["bounds"][-1] == 1000
-    assert sd["colors"][5] == sw["colors"][5] == sm["colors"][5] == "#b4f0fa"
+    assert sd["colors"][5] == sw["colors"][5] == sm["colors"][5] == "#50a5f5"
     season = precip_nested_palette("ppt_season")
     assert season["colors"][0] == PRECIP_UNDER
     assert season["colors"][1:-1] == PRECIP_MASTER_COLORS

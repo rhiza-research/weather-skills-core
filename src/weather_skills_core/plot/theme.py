@@ -53,15 +53,12 @@ PRECIP_LONG_MIN_DAYS = 5
 
 # Nested absolute-mm default: one color per millimetre class; colorbars crop
 # this master (same color = same millimetres on every window). Hues follow CHC
-# ``ppt_total`` — green, cyan, blue, purple, yellow, orange, red — so adjacent
-# classes stay distinct. 0–1 mm is a paler green than CHC's first class (CHC
-# paints 0–2 mm white, which hides trace rain). Overflow above 1000 mm is a
-# darker maroon than the last class, not CHC's pale pink.
+# ``ppt_total`` — white, green, blue, purple, yellow, orange, red — so adjacent
+# classes stay distinct. 0–1 mm is white, matching CHC's 0–2 mm class. CHC's
+# pale cyan between dark green and sky blue is skipped. Overflow above 1000 mm
+# is a darker maroon than the last class, not CHC's pale pink.
 PRECIP_MASTER_BOUNDS = [0, 1, 2, 5, 10, 20, 30, 50, 75, 100, 150, 200, 400, 700, 1000]
-PRECIP_MASTER_COLORS = [
-    "#e0ffd6",  # 0–1 mm
-    *PRECIP_COLORS[2:15],  # CHC light-green … dark-red
-]
+PRECIP_MASTER_COLORS = [*PRECIP_COLORS[1:5], *PRECIP_COLORS[6:16]]  # skip pale cyan
 PRECIP_UNDER = "#ffffff"
 PRECIP_OVER = "#5a0000"
 PRECIP_WINDOW_ORDER = ("ppt_daily", "ppt_week", "ppt_month", "ppt_season")
