@@ -875,6 +875,12 @@ SPEC_ARGUMENT_HELP = (
     "has paths."
 )
 
+PATCH_ARGUMENT_HELP = (
+    "Partial spec JSON (file or inline) deep-merged onto --spec before CLI "
+    "flags overlay. Same knobs as --spec (title, axes, layout, theme, …). "
+    'Example: {"axes": {"xticks": ["2026-08-17", "2026-08-24"]}}.'
+)
+
 # CLI flag → canonical spec path. Hints argparse unknowns at the spec home;
 # skills still declare these flags and overlay them onto --spec.
 PLOT_CLI_TO_SPEC = {
@@ -982,6 +988,30 @@ def parse_plot_spec(value):
         return load_spec(value)
     except UsageError as exc:
         raise argparse.ArgumentTypeError(str(exc)) from None
+
+
+def parse_plot_patch(value):
+    """Argparse converter for a partial spec JSON object (inline or file)."""
+    import argparse
+
+    if value is None or not str(value).strip():
+        return None
+    raw = str(value).strip()
+    if raw[:1] not in "{[":
+        path = Path(raw)
+        try:
+            is_file = path.is_file()
+        except OSError:
+            is_file = False
+        if is_file:
+            raw = path.read_text(encoding="utf-8")
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise argparse.ArgumentTypeError(f"expected a JSON object: {exc}") from None
+    if not isinstance(data, dict):
+        raise argparse.ArgumentTypeError("--patch JSON must be an object")
+    return data
 
 
 def dump_spec_dest(value):

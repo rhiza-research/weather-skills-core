@@ -263,6 +263,18 @@ def test_parse_plot_spec_and_dump_dest(tmp_path):
     assert dump_spec_dest("-") == "-"
 
 
+def test_parse_plot_patch_inline_and_file(tmp_path):
+    from weather_skills_core.plot.spec import parse_plot_patch
+
+    assert parse_plot_patch('{"title": "Patched"}') == {"title": "Patched"}
+    path = tmp_path / "edit.json"
+    path.write_text('{"axes": {"xticks": ["2026-08-17"]}}\n')
+    assert parse_plot_patch(str(path)) == {"axes": {"xticks": ["2026-08-17"]}}
+    long_raw = json.dumps({"title": "x" * 220, "axes": {"xticks": ["2026-08-17"]}})
+    assert len(long_raw) > 255
+    assert parse_plot_patch(long_raw)["title"].startswith("x")
+
+
 def test_load_spec_accepts_long_inline_json():
     colors = [
         "#f7f5d8",
