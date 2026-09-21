@@ -222,6 +222,10 @@ def test_normalize_spec_colorbar_labels_need_ticks():
 
     with pytest.raises(UsageError, match="requires layout.colorbar.ticks"):
         normalize_spec({"layout": {"colorbar": {"labels": ["a"]}}})
+    with pytest.raises(UsageError, match="moved to layout.colorbar.labelpad"):
+        normalize_spec({"layout": {"colorbar": {"label_pad": 12}}})
+    padded = normalize_spec({"layout": {"colorbar": {"labelpad": 16}}})
+    assert padded["layout"]["colorbar"]["labelpad"] == 16
     with pytest.raises(UsageError, match="not a known key"):
         normalize_spec({"theme": {"colormap": {"colors": ["#fff", "#000"], "bogus": 1}}})
     ok = normalize_spec(
@@ -589,6 +593,51 @@ def test_compile_heatmap_facets_time():
     assert resolved["layout"]["facet"]["rows"] == 2
     assert resolved["layout"]["facet"]["n_panels"] == 5
     assert len(_quadmeshes(fig)) == 5
+
+
+def test_compile_rejects_unknown_colorbar_key():
+    pytest.importorskip("matplotlib")
+    from weather_skills_core import UsageError
+    from weather_skills_core.plot import compile
+
+    ds = make_gridded(n_time=1)
+    spec = spec_from_flags(variable="precip", kind="heatmap")
+    spec["layout"]["colorbar"] = {"not_a_knob": 1}
+    with pytest.raises(UsageError, match="not a known key"):
+        compile(spec, {"a": ds})
+
+
+def test_compile_heatmap_colorbar_labelpad_is_colorbar_only():
+    pytest.importorskip("matplotlib")
+    from weather_skills_core.plot import compile
+
+    ds = make_gridded(n_time=1)
+    ds["precip"].attrs["long_name"] = "Total precipitation"
+    spec = spec_from_flags(variable="precip", kind="heatmap", cbar_label="Rain (mm)")
+    fig_default = compile(spec, {"a": ds}).fig
+    spec["layout"]["colorbar"] = {"labelpad": 28}
+    compiled = compile(spec, {"a": ds})
+    fig_padded, resolved = compiled.fig, compiled.spec
+    assert resolved["layout"]["colorbar"]["labelpad"] == 28.0
+
+    def _cbar_ax(fig):
+        return next(a for a in fig.axes if a.get_label() == "<colorbar>")
+
+    def _cbar_label_gap(fig):
+        fig.canvas.draw()
+        renderer = fig.canvas.get_renderer()
+        ax = _cbar_ax(fig)
+        return ax.yaxis.label.get_window_extent(renderer).x0 - ax.bbox.x1
+
+    def _map_ylabel_x(fig):
+        fig.canvas.draw()
+        renderer = fig.canvas.get_renderer()
+        ax = next(a for a in fig.axes if a.get_label() != "<colorbar>")
+        return ax.yaxis.label.get_window_extent(renderer).x0
+
+    assert _cbar_ax(fig_padded).yaxis.labelpad == 28
+    assert _cbar_label_gap(fig_padded) > _cbar_label_gap(fig_default) + 10
+    assert abs(_map_ylabel_x(fig_padded) - _map_ylabel_x(fig_default)) < 8
 
 
 def test_compile_heatmap_colorbar_uses_variable_not_source_date():

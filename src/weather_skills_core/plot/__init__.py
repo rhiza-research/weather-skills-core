@@ -36,6 +36,7 @@ def compile(spec, datasets, *, theme_registry=None):
         MAP_KINDS,
         SPEC_VERSION,
         TRACE_KINDS,
+        normalize_spec,
         overlay_spec,
         trace_at,
     )
@@ -48,6 +49,7 @@ def compile(spec, datasets, *, theme_registry=None):
     if hasattr(spec, "data"):
         spec = spec.data
     spec = overlay_spec({"version": SPEC_VERSION, "layout": {}, "theme": {}, "geo": {}}, spec)
+    spec = normalize_spec(spec)
     traces = spec.get("traces") or [{"kind": "heatmap", "input": "a"}]
     trace0 = traces[0] if traces else {}
     kind = trace0.get("kind") or "heatmap"

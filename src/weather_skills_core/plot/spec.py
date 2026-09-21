@@ -94,6 +94,7 @@ COLORBAR_KEYS = frozenset(
         "thickness",
         "ticks",
         "labels",
+        "labelpad",
     }
 )
 THEME_KEYS = frozenset({"template", "colormap", "fontsize", "rc"})
@@ -167,6 +168,9 @@ RELOCATED = {
     "layout.hspace": "layout.facet.hspace",
     "horizontal_spacing": "layout.facet.wspace",
     "vertical_spacing": "layout.facet.hspace",
+    "labelpad": "layout.colorbar.labelpad",
+    "label_pad": "layout.colorbar.labelpad",
+    "layout.colorbar.label_pad": "layout.colorbar.labelpad",
     "layout.metric": "traces[].metric",
     "layout.leads": "traces[].leads",
     "style.dpi": "layout.dpi",
