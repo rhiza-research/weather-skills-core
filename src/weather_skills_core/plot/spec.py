@@ -77,7 +77,7 @@ LAYOUT_KEYS = frozenset(
         "bar_mode",
     }
 )
-FACET_KEYS = frozenset({"rows", "columns", "max_columns", "n_panels"})
+FACET_KEYS = frozenset({"rows", "columns", "max_columns", "n_panels", "wspace", "hspace"})
 COLORBAR_KEYS = frozenset(
     {
         "extend",
@@ -163,6 +163,10 @@ RELOCATED = {
     "layout.coloraxis": "layout.colorbar",
     "layout.rows": "layout.facet.rows",
     "layout.columns": "layout.facet.columns",
+    "layout.wspace": "layout.facet.wspace",
+    "layout.hspace": "layout.facet.hspace",
+    "horizontal_spacing": "layout.facet.wspace",
+    "vertical_spacing": "layout.facet.hspace",
     "layout.metric": "traces[].metric",
     "layout.leads": "traces[].leads",
     "style.dpi": "layout.dpi",
@@ -197,6 +201,36 @@ def _check_keys(obj, allowed, loc, *, relocated_prefix=""):
         )
 
 
+def _validate_facet_spacing(facet: dict) -> None:
+    """``layout.facet.wspace`` / ``hspace`` are GridSpec fractions (>= 0)."""
+    for key in ("wspace", "hspace"):
+        value = facet.get(key)
+        if value is None:
+            continue
+        try:
+            number = float(value)
+        except (TypeError, ValueError) as exc:
+            raise UsageError(
+                f"plot spec layout.facet.{key} must be a number; got {value!r}"
+            ) from exc
+        if number < 0:
+            raise UsageError(f"plot spec layout.facet.{key} must be >= 0; got {number}")
+
+
+def _panel_spacing_pair(value):
+    """Coerce ``--panel-spacing`` to ``(wspace, hspace)``."""
+    if isinstance(value, (list, tuple)):
+        parts = [float(item) for item in value]
+        if len(parts) == 1:
+            return parts[0], parts[0]
+        if len(parts) == 2:
+            return parts[0], parts[1]
+        raise UsageError("--panel-spacing must be W or W,H (e.g. 0.25 or 0.4,0.2)")
+    from weather_skills_core.plot.figure import parse_panel_spacing
+
+    return parse_panel_spacing(value)
+
+
 def normalize_spec(data: dict) -> dict:
     """Validate a spec against the canonical schema, returning it unchanged.
 
@@ -225,6 +259,7 @@ def normalize_spec(data: dict) -> dict:
     facet = (data.get("layout") or {}).get("facet")
     if facet is not None:
         _check_keys(facet, FACET_KEYS, "layout.facet")
+        _validate_facet_spacing(facet)
     colorbar = (data.get("layout") or {}).get("colorbar")
     if colorbar is not None:
         _check_keys(colorbar, COLORBAR_KEYS, "layout.colorbar")
@@ -592,6 +627,16 @@ def dump_spec(spec: dict | PlotSpec, path=None) -> str:
     return text
 
 
+def facet_with_spacing(spec: dict | None, **dims) -> dict:
+    """``rows`` / ``columns`` plus any ``wspace`` / ``hspace`` already on the spec."""
+    facet = {key: value for key, value in dims.items() if value is not None}
+    src = ((spec or {}).get("layout") or {}).get("facet") or {}
+    for key in ("wspace", "hspace"):
+        if src.get(key) is not None:
+            facet[key] = src[key]
+    return facet
+
+
 def overlay_spec(base: dict, overlay: dict | None) -> dict:
     """Deep-merge ``overlay`` onto ``base`` (overlay wins)."""
     if not overlay:
@@ -631,6 +676,8 @@ FLAG_TO_SPEC = {
     "rows": ("layout", "facet", "rows"),
     "columns": ("layout", "facet", "columns"),
     "max_columns": ("layout", "facet", "max_columns"),
+    "wspace": ("layout", "facet", "wspace"),
+    "hspace": ("layout", "facet", "hspace"),
     "shared_colorscale": ("layout", "shared_colorscale"),
     # plot-compare / plot-compare-forecasts name the panel-column count --panels.
     "panels": ("layout", "facet", "columns"),
@@ -686,6 +733,8 @@ _FLAG_COERCE = {
     "cbar_labels": lambda v: [str(x) for x in v],
     "lead": lambda v: [v] if isinstance(v, str) else list(v),
     "leads": lambda v: [v] if isinstance(v, str) else list(v),
+    "wspace": float,
+    "hspace": float,
     "align_day_of_year": lambda v: "dayofyear" if v else None,
     "quiver_step": int,
 }
@@ -746,6 +795,12 @@ def spec_set(spec: dict, flag: str, value) -> dict:
     ``theme.colormap`` object so a string name becomes
     ``{name, bounds, …}`` instead of crashing when the path walks into a string.
     """
+    if flag == "panel_spacing":
+        wspace, hspace = _panel_spacing_pair(value)
+        facet = spec.setdefault("layout", {}).setdefault("facet", {})
+        facet["wspace"] = wspace
+        facet["hspace"] = hspace
+        return spec
     if flag in _COLORMAP_FOLD:
         field = _COLORMAP_FOLD[flag]
         coerce = _FLAG_COERCE.get(flag)
@@ -783,6 +838,16 @@ def spec_set(spec: dict, flag: str, value) -> dict:
 
 def spec_get(spec: dict | None, flag: str, default=None):
     """Read ``flag`` from its canonical path in ``spec``."""
+    if flag == "panel_spacing":
+        wspace = spec_get(spec, "wspace")
+        hspace = spec_get(spec, "hspace")
+        if wspace is None and hspace is None:
+            return default
+        if wspace is None:
+            wspace = hspace
+        if hspace is None:
+            hspace = wspace
+        return (float(wspace), float(hspace))
     path = _flag_path(flag)
     holder = _dig(spec or {}, path, create=False)
     if holder is None:
@@ -909,6 +974,7 @@ PLOT_CLI_TO_SPEC = {
     "--rows": "layout.facet.rows",
     "--columns": "layout.facet.columns",
     "--panels": "layout.facet.columns",
+    "--panel-spacing": "layout.facet.wspace",
     "--subplots": "layout.subplots",
     "--bar-mode": "layout.bar_mode",
     "--extent": "geo.extent",
@@ -1080,9 +1146,7 @@ def resolve_bar_mode(spec: dict | None) -> str:
                 break
     mode = str(mode or "grouped").lower()
     if mode not in BAR_MODES:
-        raise UsageError(
-            f"layout.bar_mode {mode!r} must be one of {', '.join(sorted(BAR_MODES))}"
-        )
+        raise UsageError(f"layout.bar_mode {mode!r} must be one of {', '.join(sorted(BAR_MODES))}")
     return mode
 
 

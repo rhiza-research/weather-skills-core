@@ -322,6 +322,38 @@ def figsize_from_extent(lon_min, lon_max, lat_min, lat_max, base_height=5.0):
     return max(width, 2.0), height
 
 
+def _facet_spacing(wspace, hspace):
+    """Return ``(wspace, hspace)`` or ``None`` when neither gap is set."""
+    if wspace is None and hspace is None:
+        return None
+    return (
+        None if wspace is None else float(wspace),
+        None if hspace is None else float(hspace),
+    )
+
+
+def _figsize_with_spacing(size, nrows, ncols, spacing):
+    """Grow a default canvas so GridSpec gaps are reserved, not stolen from panels."""
+    if spacing is None:
+        return tuple(size)
+    width, height = float(size[0]), float(size[1])
+    wspace, hspace = spacing
+    if wspace and ncols > 1:
+        width *= 1.0 + wspace * (ncols - 1) / ncols
+    if hspace and nrows > 1:
+        height *= 1.0 + hspace * (nrows - 1) / nrows
+    return width, height
+
+
+def _apply_subplot_spacing(fig, spacing):
+    """Set GridSpec gaps. A missing side stays tight (0) rather than matplotlib 0.2."""
+    wspace, hspace = spacing
+    fig.subplots_adjust(
+        wspace=0.0 if wspace is None else wspace,
+        hspace=0.0 if hspace is None else hspace,
+    )
+
+
 def subset_spatial(da, lat_dim, lon_dim, bbox_nwse, region_polygon, extent_vals):
     if bbox_nwse is None and region_polygon is None:
         return da, extent_vals
@@ -1774,6 +1806,8 @@ def _plot_layers(
     mpl_spec=None,
     template="weather_skills",
     registry=None,
+    wspace=None,
+    hspace=None,
 ):
     """Stack ``--layer`` entries on shared Cartopy panels.
 
@@ -1933,20 +1967,28 @@ def _plot_layers(
     subplot_titles = _resolve_subplot_titles(subplot_titles, num_steps)
     nrows, ncols = panel_shape(num_steps, rows=rows, columns=columns)
     sw, sh = figsize_from_extent(*extent_vals)
+    spacing = _facet_spacing(wspace, hspace)
+    default_size = (sw * ncols, sh * nrows)
+    if spacing is not None and figsize is None:
+        default_size = _figsize_with_spacing(default_size, nrows, ncols, spacing)
     fig, axes = plt.subplots(
         nrows,
         ncols,
-        figsize=resolve_figsize(figsize, (sw * ncols, sh * nrows)),
+        figsize=resolve_figsize(figsize, default_size),
         sharex=True,
         sharey=True,
         subplot_kw={"projection": ccrs.PlateCarree()},
-        layout="compressed",
+        layout=None if spacing is not None else "compressed",
     )
+    if spacing is not None:
+        _apply_subplot_spacing(fig, spacing)
     axes = np.array(axes).reshape(nrows, ncols).flatten()
     drawn = {
         "rows": nrows,
         "columns": ncols,
         "n_panels": num_steps,
+        "wspace": None if spacing is None else spacing[0],
+        "hspace": None if spacing is None else spacing[1],
         "extent": list(extent_vals) if extent_vals is not None else None,
         "colormap": next(
             (getattr(p.get("cmap"), "name", None) for p in prepared if p.get("cmap") is not None),
@@ -2237,6 +2279,8 @@ def compile_map_figure(
         mpl_spec=spec,
         template=template,
         registry=registry,
+        wspace=facet.get("wspace"),
+        hspace=facet.get("hspace"),
     )
     return fig, drawn
 
@@ -2328,6 +2372,27 @@ def error_scale(da, metric, *, label=None):
     }
 
 
+def _colorbar_column_groups(axes, n_scales):
+    """Split a grid's columns into groups so bottom colorbars sit side by side."""
+    import numpy as np
+
+    grid = np.atleast_2d(axes)
+    ncols = grid.shape[1]
+    if n_scales <= 1 or ncols < n_scales:
+        visible = [ax for ax in grid.ravel() if ax.get_visible()]
+        return [visible]
+    sizes = [ncols // n_scales] * n_scales
+    for i in range(ncols % n_scales):
+        sizes[i] += 1
+    groups = []
+    start = 0
+    for size in sizes:
+        block = grid[:, start : start + size]
+        groups.append([ax for ax in block.ravel() if ax.get_visible()])
+        start += size
+    return groups
+
+
 def heatmap_cell(da, lat_dim, lon_dim, *, scale="field"):
     slab = da.transpose(lat_dim, lon_dim)
     return {
@@ -2387,15 +2452,25 @@ def compile_grid(
     sw, sh = (5.0, 4.0)
     if extent is not None:
         sw, sh = figsize_from_extent(*extent)
+    facet = ((spec or {}).get("layout") or {}).get("facet") or {}
+    spacing = _facet_spacing(facet.get("wspace"), facet.get("hspace"))
     if figsize is not None:
         fig_w, fig_h = float(figsize[0]), float(figsize[1])
         tight = False
     else:
         fig_w, fig_h = max(sw * ncols, 6.0), max(sh * nrows, 4.0)
+        if spacing is not None:
+            fig_w, fig_h = _figsize_with_spacing((fig_w, fig_h), nrows, ncols, spacing)
         tight = True
     fig, axes = plt.subplots(
-        nrows, ncols, figsize=(fig_w, fig_h), squeeze=False, layout="constrained"
+        nrows,
+        ncols,
+        figsize=(fig_w, fig_h),
+        squeeze=False,
+        layout=None if spacing is not None else "constrained",
     )
+    if spacing is not None:
+        _apply_subplot_spacing(fig, spacing)
     mappables = {}
     for r, row in enumerate(cells):
         for c in range(ncols):
@@ -2475,20 +2550,27 @@ def compile_grid(
     visible = [ax for ax in axes.ravel() if ax.get_visible()]
     n_scales = len(mappables)
     extra_cbar = colorbar_mpl_kwargs(spec or {})
-    for scale_id, mappable in mappables.items():
+    shared_location = extra_cbar.get(
+        "location", "right" if n_scales > 1 or len(visible) <= 1 else "bottom"
+    )
+    column_groups = (
+        _colorbar_column_groups(axes, n_scales)
+        if shared_location == "bottom" and n_scales > 1
+        else None
+    )
+    for i, (scale_id, mappable) in enumerate(mappables.items()):
         scale = scales.get(scale_id) or {}
         cbar_kw = dict(extra_cbar)
-        location = cbar_kw.pop(
-            "location", "right" if n_scales > 1 or len(visible) <= 1 else "bottom"
-        )
+        location = cbar_kw.pop("location", shared_location)
         ticks = cbar_kw.pop("ticks", None)
         labels = cbar_kw.pop("labels", None)
         if ticks is None:
             ticks = scale.get("tickvals") or scale.get("bounds")
+        targets = column_groups[i] if column_groups and i < len(column_groups) else visible
         cbar = add_shared_colorbar(
             fig,
             mappable,
-            visible,
+            targets,
             label=scale.get("label") or "",
             location=location,
             ticks=ticks,

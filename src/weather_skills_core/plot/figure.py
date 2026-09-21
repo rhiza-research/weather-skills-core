@@ -175,6 +175,35 @@ def parse_figsize(value):
     return (width, height)
 
 
+def parse_panel_spacing(value):
+    """Argparse converter for ``W`` or ``W,H`` (or ``WxH``) GridSpec fractions."""
+    if value is None:
+        return None
+    if isinstance(value, (list, tuple)):
+        parts = [str(item).strip() for item in value]
+    else:
+        raw = str(value).strip().lower().replace("×", "x")
+        if not raw:
+            raise argparse.ArgumentTypeError(
+                "--panel-spacing must be W or W,H (e.g. 0.25 or 0.4,0.2)"
+            )
+        sep = "x" if "x" in raw and "," not in raw else ","
+        parts = [item.strip() for item in raw.split(sep) if item.strip()]
+    if len(parts) == 1:
+        parts = [parts[0], parts[0]]
+    if len(parts) != 2:
+        raise argparse.ArgumentTypeError("--panel-spacing must be W or W,H (e.g. 0.25 or 0.4,0.2)")
+    try:
+        wspace, hspace = float(parts[0]), float(parts[1])
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            "--panel-spacing must be W or W,H (e.g. 0.25 or 0.4,0.2)"
+        ) from None
+    if wspace < 0 or hspace < 0:
+        raise argparse.ArgumentTypeError("--panel-spacing values must be >= 0")
+    return (wspace, hspace)
+
+
 def parse_number_list(value):
     """Argparse converter for comma-separated floats (bounds / colorbar ticks)."""
     if isinstance(value, (list, tuple)):

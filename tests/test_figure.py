@@ -12,6 +12,7 @@ from weather_skills_core.plot.figure import (
     format_plot_date,
     format_plot_date_range,
     parse_figsize,
+    parse_panel_spacing,
     resolve_axis_label,
     resolve_figsize,
     resolve_time_axis_label,
@@ -27,6 +28,17 @@ def test_parse_figsize():
         parse_figsize("wide")
     with pytest.raises(argparse.ArgumentTypeError, match="positive"):
         parse_figsize("0,4")
+
+
+def test_parse_panel_spacing():
+    assert parse_panel_spacing("0.25") == (0.25, 0.25)
+    assert parse_panel_spacing("0.4,0.2") == (0.4, 0.2)
+    assert parse_panel_spacing("0.4x0.2") == (0.4, 0.2)
+    assert parse_panel_spacing(None) is None
+    with pytest.raises(argparse.ArgumentTypeError, match="W or W,H"):
+        parse_panel_spacing("wide")
+    with pytest.raises(argparse.ArgumentTypeError, match=">= 0"):
+        parse_panel_spacing("-0.1")
 
 
 def test_resolve_figsize():

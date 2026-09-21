@@ -103,9 +103,11 @@ def compile(spec, datasets, *, theme_registry=None):
     }
     layout = resolved.setdefault("layout", {})
     layout.setdefault("shared_colorscale", True)
+    facet_in = layout.get("facet") or {}
     layout["facet"] = {
-        "max_columns": (layout.get("facet") or {}).get("max_columns", DEFAULT_MAX_COLUMNS),
+        "max_columns": facet_in.get("max_columns", DEFAULT_MAX_COLUMNS),
         **{k: drawn[k] for k in ("rows", "columns", "n_panels") if drawn.get(k) is not None},
+        **{k: facet_in[k] for k in ("wspace", "hspace") if facet_in.get(k) is not None},
     }
     if drawn.get("extent"):
         resolved.setdefault("geo", {})["extent"] = drawn["extent"]

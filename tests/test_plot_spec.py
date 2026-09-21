@@ -76,6 +76,8 @@ def test_normalize_spec_reports_where_a_relocated_key_moved():
         ({"band": [10, 90]}, r"traces\[\].band"),
         ({"along_color": "cycle"}, r"traces\[\].along_color"),
         ({"layout": {"title": "x"}}, "moved to title"),
+        ({"layout": {"wspace": 0.4}}, "moved to layout.facet.wspace"),
+        ({"layout": {"facet": {"horizontal_spacing": 0.25}}}, "moved to layout.facet.wspace"),
         ({"layout": {"axes": {}}}, "moved to axes"),
         ({"style": {"dpi": 200}}, "theme"),
         ({"traces": [{"type": "heatmap"}]}, r"traces\[0\].type moved to traces\[\].kind"),
@@ -117,6 +119,11 @@ def test_flag_table_writes_and_reads_one_canonical_path():
     assert FLAG_TO_SPEC["align_day_of_year"] == ("traces", 0, "align")
     assert FLAG_TO_SPEC["subplots"] == ("layout", "subplots")
     assert FLAG_TO_SPEC["bar_mode"] == ("layout", "bar_mode")
+    assert FLAG_TO_SPEC["wspace"] == ("layout", "facet", "wspace")
+    assert FLAG_TO_SPEC["hspace"] == ("layout", "facet", "hspace")
+    spaced = overlay_flags({}, panel_spacing=(0.4, 0.2))
+    assert spaced["layout"]["facet"] == {"wspace": 0.4, "hspace": 0.2}
+    assert spec_get(spaced, "panel_spacing") == (0.4, 0.2)
 
 
 def test_theme_file_rejects_unknown_keys(tmp_path):
@@ -504,6 +511,41 @@ def test_compile_heatmap_facets_time():
     assert len(_quadmeshes(fig)) == 5
 
 
+def _visible_map_axes(fig):
+    fig = _fig(fig)
+    return [ax for ax in fig.axes if ax.get_visible() and ax.get_label() != "<colorbar>"]
+
+
+def test_compile_heatmap_facet_spacing_separates_panels():
+    pytest.importorskip("matplotlib")
+    from weather_skills_core.plot import compile
+
+    ds = make_gridded(n_time=2)
+    spec = spec_from_flags(variable="precip", kind="heatmap", columns=2)
+    fig_tight = compile(spec, {"a": ds}).fig
+    fig_tight.canvas.draw()
+    left, right = _visible_map_axes(fig_tight)[:2]
+    gap_tight = right.get_position().x0 - left.get_position().x1
+
+    spec["layout"]["facet"]["wspace"] = 0.45
+    compiled = compile(spec, {"a": ds})
+    fig_spaced, resolved = compiled.fig, compiled.spec
+    fig_spaced.canvas.draw()
+    left_s, right_s = _visible_map_axes(fig_spaced)[:2]
+    gap_spaced = right_s.get_position().x0 - left_s.get_position().x1
+    assert resolved["layout"]["facet"]["wspace"] == 0.45
+    assert gap_spaced > gap_tight + 0.03
+    assert fig_spaced.get_layout_engine() is None
+
+
+def test_normalize_spec_rejects_negative_facet_spacing():
+    from weather_skills_core import UsageError
+    from weather_skills_core.plot.spec import normalize_spec
+
+    with pytest.raises(UsageError, match="layout.facet.wspace must be >= 0"):
+        normalize_spec({"layout": {"facet": {"wspace": -0.1}}})
+
+
 def test_compile_timeseries_forecast_valid_time():
     pytest.importorskip("matplotlib")
     from weather_skills_core.plot import compile
@@ -616,6 +658,66 @@ def test_compile_contour_uses_contour_collections():
     assert any(isinstance(c, QuadContourSet) for ax in fig.axes for c in ax.collections)
 
 
+def test_compile_grid_bottom_colorbars_side_by_side():
+    pytest.importorskip("matplotlib")
+    from weather_skills_core.plot.maps import blank_cell, compile_grid, heatmap_cell
+    from weather_skills_core.plot.theme import resolve_colorscale
+
+    ds = make_gridded(n_time=1)
+    da = ds["precip"].isel(time=0)
+    field = resolve_colorscale(da, None)
+    field["label"] = "precip"
+    verify = dict(field)
+    verify["label"] = "bias"
+    compiled = compile_grid(
+        [
+            [heatmap_cell(da, "latitude", "longitude"), heatmap_cell(da, "latitude", "longitude")],
+            [blank_cell(""), heatmap_cell(da, "latitude", "longitude", scale="verify")],
+        ],
+        extent=[9.5, 13.5, 0.5, 3.5],
+        scales={"field": field, "verify": verify},
+        spec={"layout": {"colorbar": {"location": "bottom"}}},
+        overlays=False,
+    )
+    fig = _fig(compiled)
+    cbars = [ax for ax in fig.axes if ax.get_label() == "<colorbar>"]
+    assert len(cbars) == 2
+    left, right = sorted(cbars, key=lambda ax: ax.get_position().x0)
+    assert left.get_position().x1 <= right.get_position().x0 + 0.02
+    assert left.get_position().y1 < 0.35
+    assert right.get_position().y1 < 0.35
+
+
+def test_compile_grid_facet_spacing_separates_columns():
+    pytest.importorskip("matplotlib")
+    from weather_skills_core.plot.maps import compile_grid, heatmap_cell
+    from weather_skills_core.plot.theme import resolve_colorscale
+
+    ds = make_gridded(n_time=1)
+    da = ds["precip"].isel(time=0)
+    field = resolve_colorscale(da, None)
+    cells = [[heatmap_cell(da, "latitude", "longitude"), heatmap_cell(da, "latitude", "longitude")]]
+    extent = [9.5, 13.5, 0.5, 3.5]
+    fig_tight = _fig(compile_grid(cells, extent=extent, scales={"field": field}, overlays=False))
+    fig_tight.canvas.draw()
+    left, right = _visible_map_axes(fig_tight)[:2]
+    gap_tight = right.get_position().x0 - left.get_position().x1
+    fig_spaced = _fig(
+        compile_grid(
+            cells,
+            extent=extent,
+            scales={"field": field},
+            overlays=False,
+            spec={"layout": {"facet": {"wspace": 0.45}}},
+        )
+    )
+    fig_spaced.canvas.draw()
+    left_s, right_s = _visible_map_axes(fig_spaced)[:2]
+    gap_spaced = right_s.get_position().x0 - left_s.get_position().x1
+    assert gap_spaced > gap_tight + 0.03
+    assert fig_spaced.get_layout_engine() is None
+
+
 def test_compile_heatmap_grid_blank_and_heatmap():
     pytest.importorskip("matplotlib")
     from weather_skills_core.plot.maps import blank_cell, compile_grid, heatmap_cell
@@ -651,26 +753,20 @@ def test_compile_bars_grouped_stacked_overlay():
     def rects(compiled):
         return [p for ax in _fig(compiled).axes for p in ax.patches if isinstance(p, Rectangle)]
 
-    grouped = compile_lines(
-        series, kinds=["bar", "bar"], spec={"layout": {"bar_mode": "grouped"}}
-    )
+    grouped = compile_lines(series, kinds=["bar", "bar"], spec={"layout": {"bar_mode": "grouped"}})
     g = rects(grouped)
     assert len(g) == 6
     assert g[0].get_x() < g[3].get_x()
     plt.close(_fig(grouped))
 
-    stacked = compile_lines(
-        series, kinds=["bar", "bar"], spec={"layout": {"bar_mode": "stacked"}}
-    )
+    stacked = compile_lines(series, kinds=["bar", "bar"], spec={"layout": {"bar_mode": "stacked"}})
     s = rects(stacked)
     assert s[0].get_y() == pytest.approx(0.0)
     assert s[3].get_y() == pytest.approx(1.0)
     assert s[0].get_x() == pytest.approx(s[3].get_x())
     plt.close(_fig(stacked))
 
-    overlay = compile_lines(
-        series, kinds=["bar", "bar"], spec={"layout": {"bar_mode": "overlay"}}
-    )
+    overlay = compile_lines(series, kinds=["bar", "bar"], spec={"layout": {"bar_mode": "overlay"}})
     o = rects(overlay)
     assert o[0].get_y() == pytest.approx(0.0)
     assert o[3].get_y() == pytest.approx(0.0)
