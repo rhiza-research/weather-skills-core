@@ -102,6 +102,17 @@ PRECIP_ANOMALY_COLORS = _rgb(
     (128, 112, 235),
 )
 PRECIP_ANOMALY_BOUNDS = [-500, -300, -200, -100, -50, -25, -10, 10, 25, 50, 100, 200, 300, 500]
+# Packed CHC list is under + 13 classes + over. Nested windows crop this master
+# the same way totals crop PRECIP_MASTER_* (same colour = same millimetres).
+PRECIP_ANOMALY_UNDER = PRECIP_ANOMALY_COLORS[0]
+PRECIP_ANOMALY_OVER = PRECIP_ANOMALY_COLORS[-1]
+PRECIP_ANOMALY_MASTER_COLORS = PRECIP_ANOMALY_COLORS[1:-1]
+PRECIP_ANOMALY_WINDOW_ORDER = (
+    "ppt_anom_daily",
+    "ppt_anom_week",
+    "ppt_anom_month",
+    "ppt_anom_season",
+)
 
 # CHC ``ppt_poa_cmap.pro`` (percent of normal). Missing gray is NaN, not a class.
 PRECIP_POA_COLORS = _rgb(
@@ -179,9 +190,26 @@ def precip_window_name(days: float | None) -> str:
     return "ppt_season"
 
 
+def precip_anomaly_window_name(days: float | None) -> str:
+    """Nested anomaly window matching ``precip_window_name`` (same day cuts)."""
+    return "ppt_anom_" + precip_window_name(days).removeprefix("ppt_")
+
+
 def widest_precip_window(*days: float | None) -> str:
     """Window that covers every aggregation in ``days`` (highest vmax)."""
     return max((precip_window_name(d) for d in days), key=PRECIP_WINDOW_ORDER.index)
+
+
+def widest_precip_anomaly_window(*days: float | None) -> str:
+    """Anomaly window that covers every aggregation in ``days``."""
+    return "ppt_anom_" + widest_precip_window(*days).removeprefix("ppt_")
+
+
+def default_precip_window(*days: float | None, anomaly: bool = False) -> str:
+    """Totals or anomaly nested window covering every aggregation in ``days``."""
+    if anomaly:
+        return widest_precip_anomaly_window(*days)
+    return widest_precip_window(*days)
 
 
 def precip_nested_palette(name: str) -> dict:
@@ -196,16 +224,40 @@ def precip_nested_palette(name: str) -> dict:
     return {"colors": [PRECIP_UNDER, *classes, over], "bounds": list(bounds)}
 
 
+def precip_nested_anomaly_palette(name: str) -> dict:
+    """Crop the CHC anomaly master to ± the matching totals window.
+
+    Same colour is always the same millimetres. Stops are the CHC edges whose
+    absolute value is ≤ the totals ``vmax`` (month 400 mm → ±300 mm; season
+    1000 mm → ±500 mm). Overflow uses the next master class.
+    """
+    if name not in PRECIP_ANOMALY_WINDOW_ORDER:
+        raise UsageError(f"unknown precip anomaly window {name!r}")
+    totals = "ppt_" + name.removeprefix("ppt_anom_")
+    vmax = PRECIP_WINDOW_VMAX[totals]
+    bounds = [b for b in PRECIP_ANOMALY_BOUNDS if abs(b) <= vmax]
+    if len(bounds) < 2:
+        raise UsageError(f"precip anomaly window {name!r} has no classes at ±{vmax:g} mm")
+    i0 = PRECIP_ANOMALY_BOUNDS.index(bounds[0])
+    i1 = PRECIP_ANOMALY_BOUNDS.index(bounds[-1])
+    classes = PRECIP_ANOMALY_MASTER_COLORS[i0:i1]
+    under = PRECIP_ANOMALY_MASTER_COLORS[i0 - 1] if i0 > 0 else PRECIP_ANOMALY_UNDER
+    over = (
+        PRECIP_ANOMALY_MASTER_COLORS[i1]
+        if i1 < len(PRECIP_ANOMALY_MASTER_COLORS)
+        else PRECIP_ANOMALY_OVER
+    )
+    return {"colors": [under, *classes, over], "bounds": list(bounds)}
+
+
 DISCRETE_PRECIP_NAMES = frozenset(
     {
         *PRECIP_WINDOW_ORDER,
+        *PRECIP_ANOMALY_WINDOW_ORDER,
         "chirps_total",
         "chirps_short",
-        "chirps_anom",
         "ppt_total",
         "ppt_short",
-        "ppt_anomaly",
-        "ppt_anom",
         "ppt_poa",
         "ppt_spp",
         "spi",
@@ -338,13 +390,11 @@ def default_theme() -> dict:
         "colormap": None,
         "colormaps": {
             **{name: precip_nested_palette(name) for name in PRECIP_WINDOW_ORDER},
+            **{name: precip_nested_anomaly_palette(name) for name in PRECIP_ANOMALY_WINDOW_ORDER},
             "chirps_total": {"colors": PRECIP_COLORS, "bounds": PRECIP_BOUNDS},
             "ppt_total": {"colors": PRECIP_COLORS, "bounds": PRECIP_BOUNDS},
             "chirps_short": {"colors": PRECIP_COLORS, "bounds": PRECIP_SHORT_BOUNDS},
             "ppt_short": {"colors": PRECIP_COLORS, "bounds": PRECIP_SHORT_BOUNDS},
-            "chirps_anom": {"colors": PRECIP_ANOMALY_COLORS, "bounds": PRECIP_ANOMALY_BOUNDS},
-            "ppt_anomaly": {"colors": PRECIP_ANOMALY_COLORS, "bounds": PRECIP_ANOMALY_BOUNDS},
-            "ppt_anom": {"colors": PRECIP_ANOMALY_COLORS, "bounds": PRECIP_ANOMALY_BOUNDS},
             "ppt_poa": {"colors": PRECIP_POA_COLORS, "bounds": PRECIP_POA_BOUNDS},
             "ppt_spp": {"colors": PRECIP_SPP_COLORS, "bounds": PRECIP_SPP_BOUNDS},
             "spi": {"colors": SPI_COLORS, "bounds": SPI_BOUNDS},
@@ -482,7 +532,7 @@ def resolve_mpl_cmap_name(name: str) -> str:
         return matches[0]
     raise UsageError(
         f"unknown colormap {raw!r}; use a matplotlib name (RdBu_r, coolwarm, YlGn), "
-        "a comma-separated color list, or a named palette (ppt_week, ppt_anomaly)"
+        "a comma-separated color list, or a named palette (ppt_week, ppt_anom_week)"
     )
 
 
@@ -621,16 +671,19 @@ def named_precip_scale(da) -> tuple[str, list[str], list[float]]:
     """Return ``(name, colors, bounds)`` for the default precip palette.
 
     Totals use a nested absolute-mm master cropped by ``aggregation_period``
-    (white / beige below 5 mm, then CHC ``ppt_total`` hues from green). The
-    historical CHC rainbow palettes remain available as ``ppt_total`` /
-    ``ppt_short``.
+    (white / beige below 5 mm, then CHC ``ppt_total`` hues from green).
+    Anomalies crop the CHC diverging master the same way (daily ±50 mm, week
+    ±200 mm, month ±300 mm, season ±500 mm). The historical CHC rainbow
+    palettes remain available as ``ppt_total`` / ``ppt_short``.
     """
     if is_spi(da):
         return "spi", list(SPI_COLORS), list(SPI_BOUNDS)
     if is_precip_poa(da):
         return "ppt_poa", list(PRECIP_POA_COLORS), list(PRECIP_POA_BOUNDS)
     if is_precip_anomaly(da):
-        return "chirps_anom", list(PRECIP_ANOMALY_COLORS), list(PRECIP_ANOMALY_BOUNDS)
+        name = precip_anomaly_window_name(aggregation_days(da))
+        entry = precip_nested_anomaly_palette(name)
+        return name, list(entry["colors"]), list(entry["bounds"])
     name = precip_window_name(aggregation_days(da))
     entry = precip_nested_palette(name)
     return name, list(entry["colors"]), list(entry["bounds"])

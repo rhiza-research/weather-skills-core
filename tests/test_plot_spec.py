@@ -424,8 +424,12 @@ def test_precip_nested_windows_keep_absolute_mm_colors():
         PRECIP_MASTER_COLORS,
         PRECIP_OVER,
         PRECIP_UNDER,
+        default_precip_window,
+        precip_anomaly_window_name,
+        precip_nested_anomaly_palette,
         precip_nested_palette,
         precip_window_name,
+        widest_precip_anomaly_window,
         widest_precip_window,
     )
 
@@ -452,6 +456,14 @@ def test_precip_nested_windows_keep_absolute_mm_colors():
     assert precip_window_name(40) == "ppt_season"
     assert widest_precip_window(1, 7, 90) == "ppt_season"
     assert widest_precip_window(1, None) == "ppt_week"
+    assert precip_anomaly_window_name(None) == "ppt_anom_week"
+    assert precip_anomaly_window_name(1) == "ppt_anom_daily"
+    assert widest_precip_anomaly_window(1, 7, 90) == "ppt_anom_season"
+    assert default_precip_window(1, 7, anomaly=True) == "ppt_anom_week"
+    week_anom = precip_nested_anomaly_palette("ppt_anom_week")
+    assert week_anom["bounds"][0] == -200
+    assert week_anom["bounds"][-1] == 200
+    assert week_anom["colors"][0] != week_anom["colors"][-1]
 
     daily = make_gridded()["precip"]
     daily.attrs.update(
@@ -489,14 +501,40 @@ def test_precip_nested_windows_keep_absolute_mm_colors():
 
 
 def test_precip_anomaly_and_poa_and_spi_colorscales():
+    from weather_skills_core.plot.theme import (
+        PRECIP_ANOMALY_BOUNDS,
+        precip_nested_anomaly_palette,
+    )
+
     da = make_gridded(fill=-20.0)["precip"]
     da.attrs["units"] = "mm"
     da.attrs["standard_name"] = "lwe_thickness_of_precipitation_amount"
     anom = resolve_colorscale(da, None)
-    assert anom["name"] == "chirps_anom"
-    assert anom["colors"][0] == "#c00000"
-    assert anom["colors"][3] == "#ffe878"
-    assert resolve_colorscale(da, "ppt_anomaly")["colors"] == anom["colors"]
+    week = precip_nested_anomaly_palette("ppt_anom_week")
+    assert anom["name"] == "ppt_anom_week"
+    assert anom["bounds"] == week["bounds"]
+    assert anom["bounds"][0] == -200
+    assert anom["bounds"][-1] == 200
+    assert anom["colors"] == week["colors"]
+
+    daily = da.copy()
+    daily.attrs["aggregation_period"] = "1 day"
+    sd = resolve_colorscale(daily, None)
+    assert sd["name"] == "ppt_anom_daily"
+    assert sd["bounds"][0] == -50
+    assert sd["bounds"][-1] == 50
+    monthly = da.copy()
+    monthly.attrs["aggregation_period"] = "10 day"
+    sm = resolve_colorscale(monthly, None)
+    assert sm["name"] == "ppt_anom_month"
+    assert sm["bounds"][0] == -300
+    assert sm["bounds"][-1] == 300
+    seasonal = da.copy()
+    seasonal.attrs["aggregation_period"] = "90 day"
+    ss = resolve_colorscale(seasonal, None)
+    assert ss["name"] == "ppt_anom_season"
+    assert ss["bounds"] == list(PRECIP_ANOMALY_BOUNDS)
+    assert sd["colors"][3] == sm["colors"][6] == ss["colors"][7] == "#ffffff"
 
     poa = make_gridded(fill=80.0)["precip"]
     poa.attrs.update(
