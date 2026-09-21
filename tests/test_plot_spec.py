@@ -359,6 +359,9 @@ def test_precip_default_colorscale_is_nested_week_window():
     assert scale["bounds"][-1] == 200
     assert scale["colors"][0] == "#ffffff"
     assert scale["colors"][1] == "#ffffff"
+    assert scale["colors"][2] == "#f6e8c3"
+    assert scale["colors"][3] == "#dfc27d"
+    assert scale["colors"][4] == "#1eb41e"
     assert scale["colors"][5] == "#50a5f5"
     chc = resolve_colorscale(da, "ppt_total")
     assert chc["name"] == "ppt_total"
@@ -383,7 +386,10 @@ def test_precip_nested_windows_keep_absolute_mm_colors():
 
     assert len(PRECIP_MASTER_COLORS) == len(PRECIP_MASTER_BOUNDS) - 1
     assert PRECIP_MASTER_COLORS == [
-        *PRECIP_COLORS[1:5],
+        PRECIP_COLORS[1],
+        "#f6e8c3",
+        "#dfc27d",
+        PRECIP_COLORS[4],
         *PRECIP_COLORS[6:8],
         *PRECIP_COLORS[9:16],
         "#7a0000",
