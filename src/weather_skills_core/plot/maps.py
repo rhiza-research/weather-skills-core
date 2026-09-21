@@ -30,7 +30,13 @@ from weather_skills_core.plot.figure import (
     resolve_figsize,
     scatter_kwargs,
 )
-from weather_skills_core.plot.spec import apply_index, panel_shape, parse_index, trace_at
+from weather_skills_core.plot.spec import (
+    apply_index,
+    fold_layer_options,
+    panel_shape,
+    parse_index,
+    trace_at,
+)
 from weather_skills_core.plot.theme import (
     DEFAULT_FONTSIZE,
     DISCRETE_PRECIP_NAMES,
@@ -1540,6 +1546,8 @@ def _prep_quiver_layer(spec, bbox_nwse, region_polygon, extent):
         "quiver_step": int(qstep) if qstep is not None else None,
         "zorder": _KIND_ZORDER["quiver"],
         "draw_mesh": False,
+        "quiver": spec.options.get("quiver"),
+        "mesh": spec.options.get("mesh"),
     }
 
 
@@ -1693,7 +1701,9 @@ def _draw_quiver_on_ax(ax, prepared, transform, scale, step, mpl_spec=None):
             vmax=prepared["vmax"],
             transform=transform,
             zorder=1.0,
-            **mesh_kwargs(trace_at(mpl_spec)),
+            **mesh_kwargs(
+                {"mesh": prepared["mesh"]} if prepared.get("mesh") is not None else trace_at(mpl_spec)
+            ),
         )
     lon_q, lat_q, u_q, v_q = _subsample_quiver(
         u_slab[lon_dim].values,
@@ -1712,7 +1722,11 @@ def _draw_quiver_on_ax(ax, prepared, transform, scale, step, mpl_spec=None):
             "scale": scale,
             "color": "k",
             "zorder": prepared["zorder"],
-            **quiver_kwargs(trace_at(mpl_spec)),
+            **quiver_kwargs(
+                {"quiver": prepared["quiver"]}
+                if prepared.get("quiver") is not None
+                else trace_at(mpl_spec)
+            ),
         },
     )
     return mesh, quiv
@@ -2202,7 +2216,7 @@ def layers_from_spec(spec: dict, datasets: dict) -> list:
             if not kind or not path:
                 raise UsageError("spec layers[] entries need kind and path")
             spec_input = by_id.get(str(item.get("input") or ""), {})
-            options = _inherit_layer_options(dict(item.get("options") or {}), spec, spec_input)
+            options = _inherit_layer_options(fold_layer_options(item), spec, spec_input)
             layer = LayerSpec(kind, path, options, f"{kind}:{path}")
             if kind in _ZARR_LAYER_KINDS:
                 layer.ds = dataset_for(item.get("input"), path)

@@ -12,6 +12,7 @@ from weather_skills_core.plot.spec import (
     PlotSpec,
     dump_spec,
     load_spec,
+    merge_layer_lists,
     overlay_spec,
     panel_shape,
     parse_index,
@@ -331,6 +332,50 @@ def test_maybe_emit_spec_writes_json_and_signals_skip(tmp_path):
     assert dumped["traces"][0]["kind"] == "heatmap"
     assert maybe_emit_spec(spec, None) is False
     assert maybe_emit_spec(spec, "none") is False
+
+
+def test_overlay_spec_merges_layers_by_id():
+    base = {
+        "title": "SST",
+        "layers": [
+            {"id": "a", "kind": "heatmap", "path": "sst.zarr", "colormap": "rocket"},
+            {"id": "b", "kind": "quiver", "path": "wind.zarr"},
+        ],
+    }
+    out = overlay_spec(
+        base, {"layers": [{"id": "a", "colormap": "RdBu_r", "vmin": -1.5, "mesh": {"alpha": 0.8}}]}
+    )
+    assert out["title"] == "SST"
+    assert len(out["layers"]) == 2
+    assert out["layers"][0]["colormap"] == "RdBu_r"
+    assert out["layers"][0]["vmin"] == -1.5
+    assert out["layers"][0]["mesh"] == {"alpha": 0.8}
+    assert out["layers"][1]["kind"] == "quiver"
+    assert out["layers"][1]["path"] == "wind.zarr"
+
+
+def test_overlay_spec_empty_layer_patch_is_noop():
+    base = {"layers": [{"id": "a", "kind": "heatmap", "path": "sst.zarr"}]}
+    assert overlay_spec(base, {"layers": []})["layers"][0]["kind"] == "heatmap"
+
+
+def test_overlay_spec_keeps_pending_layers_when_base_has_none():
+    out = overlay_spec({}, {"layers": [{"id": "a", "colormap": "RdBu_r"}]})
+    assert out["layers"] == [{"id": "a", "colormap": "RdBu_r"}]
+
+
+def test_merge_layer_lists_index_fallback_and_unknown_id():
+    from weather_skills_core import UsageError
+
+    base = [
+        {"id": "a", "kind": "heatmap", "path": "sst.zarr"},
+        {"id": "b", "kind": "quiver", "path": "wind.zarr"},
+    ]
+    by_index = merge_layer_lists(base, [{"colormap": "RdBu_r"}])
+    assert by_index[0]["colormap"] == "RdBu_r"
+    assert by_index[1]["kind"] == "quiver"
+    with pytest.raises(UsageError, match="does not match"):
+        merge_layer_lists(base, [{"id": "z", "colormap": "RdBu_r"}])
 
 
 def test_parse_plot_patch_inline_and_file(tmp_path):
@@ -739,6 +784,35 @@ def test_compile_layer_heatmap_inherits_figure_colormap_and_vlim():
         "vmin": -1.5,
         "vmax": 1.5,
     }
+    meshes = _quadmeshes(compile(spec, {"a": ds}).fig)
+    assert meshes
+    assert meshes[0].cmap.name == "RdBu_r"
+    assert meshes[0].norm.vmin == -1.5
+    assert meshes[0].norm.vmax == 1.5
+
+
+def test_compile_layer_patch_colormap_by_id():
+    pytest.importorskip("matplotlib")
+    from weather_skills_core.plot import compile
+
+    ds = make_gridded(name="sst", units="degree_Celsius", fill=0.4)
+    spec = overlay_spec(
+        {
+            "version": 2,
+            "inputs": [{"id": "a", "path": "sst.zarr"}],
+            "traces": [{"kind": "layer"}],
+            "layers": [
+                {
+                    "id": "a",
+                    "kind": "heatmap",
+                    "path": "sst.zarr",
+                    "input": "a",
+                    "variable": "sst",
+                }
+            ],
+        },
+        {"layers": [{"id": "a", "colormap": "RdBu_r", "vmin": -1.5, "vmax": 1.5}]},
+    )
     meshes = _quadmeshes(compile(spec, {"a": ds}).fig)
     assert meshes
     assert meshes[0].cmap.name == "RdBu_r"

@@ -130,7 +130,22 @@ TRACE_KEYS = (
     )
     | ARTIST_BLOCKS
 )
-LAYER_KEYS = frozenset({"kind", "path", "options", "input", "raw"})
+LAYER_SCALE_KEYS = frozenset(
+    {
+        "variable",
+        "index",
+        "colormap",
+        "vmin",
+        "vmax",
+        "u_variable",
+        "v_variable",
+        "quiver_scale",
+        "quiver_step",
+    }
+)
+LAYER_KEYS = (
+    frozenset({"id", "kind", "path", "options", "input", "raw"}) | LAYER_SCALE_KEYS | ARTIST_BLOCKS
+)
 BAR_MODES = frozenset({"grouped", "stacked", "overlay"})
 
 _SECTIONS = {
@@ -329,6 +344,11 @@ def normalize_spec(data: dict) -> dict:
             if not isinstance(item, dict):
                 raise UsageError(f"plot spec layers[{i}] must be an object")
             _check_keys(item, LAYER_KEYS, f"layers[{i}]")
+            if isinstance(item.get("colormap"), dict):
+                parse_colormap_spec(item["colormap"])
+            if isinstance((item.get("options") or {}).get("colormap"), dict):
+                parse_colormap_spec(item["options"]["colormap"])
+            _validate_artist_blocks(item, f"layers[{i}]")
     _validate_axes_annotations(data)
     return data
 
@@ -658,11 +678,128 @@ def facet_with_spacing(spec: dict | None, **dims) -> dict:
     return facet
 
 
+def _layer_id(item: dict | None) -> str | None:
+    """Stable layer id: explicit ``id``, else ``input``."""
+    if not isinstance(item, dict):
+        return None
+    for key in ("id", "input"):
+        raw = item.get(key)
+        if raw is not None and str(raw).strip() != "":
+            return str(raw)
+    return None
+
+
+def fold_layer_options(item: dict) -> dict:
+    """Renderer bag: ``options`` plus lifted scale knobs and artist blocks.
+
+    Top-level keys win so a ``--patch`` ``colormap`` / ``mesh`` replaces a
+    leftover ``options`` bag from an older dump.
+    """
+    out = dict(item.get("options") or {})
+    for key in LAYER_SCALE_KEYS | ARTIST_BLOCKS:
+        if item.get(key) is not None:
+            out[key] = item[key]
+    return out
+
+
+def layer_item_from_parts(kind, path, options=None, *, layer_id=None, raw=None, input_id=None) -> dict:
+    """Build a ``layers[]`` object with scale knobs at the top level."""
+    opts = dict(options or {})
+    entry = {
+        "kind": kind,
+        "path": str(path),
+    }
+    if layer_id is not None:
+        entry["id"] = str(layer_id)
+    if input_id is not None:
+        entry["input"] = str(input_id)
+    if raw:
+        entry["raw"] = raw
+    leftover = {}
+    for key, value in opts.items():
+        if key in LAYER_SCALE_KEYS or key in ARTIST_BLOCKS:
+            entry[key] = value
+        else:
+            leftover[key] = value
+    if leftover:
+        entry["options"] = leftover
+    return entry
+
+
+def merge_layer_lists(base, overlay) -> list:
+    """Merge ``overlay`` layer objects onto ``base`` by ``id``, else by index.
+
+    Overlay keys win. Unknown ``id`` values error (they do not append a
+    half-built layer). An empty overlay leaves ``base`` unchanged so
+    ``--patch '{"layers": []}'`` cannot wipe the figure.
+    """
+    if overlay is None:
+        return copy.deepcopy(list(base or []))
+    if not isinstance(overlay, list):
+        raise UsageError("plot spec layers must be a list of objects")
+    if not overlay:
+        return copy.deepcopy(list(base or []))
+    out = [copy.deepcopy(item) if isinstance(item, dict) else item for item in (base or [])]
+    used_indexes: set[int] = set()
+
+    def ids_on(layers):
+        found = []
+        for item in layers:
+            lid = _layer_id(item) if isinstance(item, dict) else None
+            if lid is not None:
+                found.append(lid)
+        return found
+
+    for item in overlay:
+        if not isinstance(item, dict):
+            raise UsageError("plot spec layers[] entries must be objects")
+        lid = _layer_id(item)
+        idx = None
+        if lid is not None:
+            matches = [
+                i
+                for i, layer in enumerate(out)
+                if isinstance(layer, dict) and _layer_id(layer) == lid
+            ]
+            if len(matches) > 1:
+                raise UsageError(f"layers[] id {lid!r} is not unique")
+            if matches:
+                idx = matches[0]
+            else:
+                known = ids_on(out)
+                have = ", ".join(known) if known else "none"
+                raise UsageError(f"--patch layers[] id {lid!r} does not match a layer (have {have})")
+        else:
+            idx = next((i for i in range(len(out)) if i not in used_indexes), None)
+            if idx is None:
+                raise UsageError("--patch layers[] has more items than the figure")
+        used_indexes.add(idx)
+        current = out[idx] if isinstance(out[idx], dict) else {}
+        out[idx] = deep_merge(current, item)
+    return out
+
+
 def overlay_spec(base: dict, overlay: dict | None) -> dict:
-    """Deep-merge ``overlay`` onto ``base`` (overlay wins)."""
+    """Deep-merge ``overlay`` onto ``base`` (overlay wins).
+
+    ``layers[]`` merges by ``id`` (then by index) so a partial
+    ``--patch '{"layers": [{"id": "a", "colormap": "RdBu_r"}]}'`` cannot
+    replace the whole list.
+    """
     if not overlay:
         return copy.deepcopy(base)
-    return deep_merge(base, overlay)
+    if not base:
+        base = {}
+    overlay = dict(overlay)
+    layer_patch = overlay.pop("layers", None)
+    out = deep_merge(base, overlay)
+    if layer_patch is not None:
+        existing = out.get("layers") or []
+        if existing:
+            out["layers"] = merge_layer_lists(existing, layer_patch)
+        else:
+            out["layers"] = list(layer_patch)
+    return out
 
 
 # One CLI flag, one canonical spec path. overlay_flags / spec_from_flags use
@@ -967,6 +1104,8 @@ SPEC_ARGUMENT_HELP = (
 PATCH_ARGUMENT_HELP = (
     "Partial spec JSON (file or inline) deep-merged onto --spec before CLI "
     "flags overlay. Same knobs as --spec (title, axes, layout, theme, …). "
+    'layers[] merges by id (else index), so '
+    '{"layers": [{"id": "a", "colormap": "RdBu_r"}]} edits one overlay. '
     'Example: {"axes": {"xticks": ["2026-08-17", "2026-08-24"]}}.'
 )
 
