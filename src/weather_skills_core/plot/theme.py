@@ -53,20 +53,22 @@ PRECIP_LONG_MIN_DAYS = 5
 
 # Nested absolute-mm default: one color per millimetre class; colorbars crop
 # this master (same color = same millimetres on every window). Hues follow CHC
-# ``ppt_total`` — white, beige, green, blue, purple, yellow, orange, red — so
-# adjacent classes stay distinct. 0–1 mm is white, matching CHC's 0–2 mm class;
-# 1–2 and 2–5 mm are beige so green starts at 5 mm. CHC's pale cyan and pale
-# lavender are skipped. Overflow above 1000 mm is a darker maroon than the last
-# class, not CHC's pale pink.
+# ``ppt_total`` — white, beige, light / mid / dark green, blue, purple,
+# yellow, orange, red — so adjacent classes stay distinct. 0–1 mm is white,
+# matching CHC's 0–2 mm class; 1–2 and 2–5 mm are beige so green starts at
+# 5 mm. CHC's pale cyan and pale lavender are skipped. Overflow above 1000 mm
+# is a darker maroon than the last class, not CHC's pale pink.
 PRECIP_BEIGE_TRACE = "#f6e8c3"  # 1–2 mm
-PRECIP_BEIGE_LIGHT = "#dfc27d"  # 2–5 mm
-PRECIP_MASTER_BOUNDS = [0, 1, 2, 5, 10, 20, 30, 50, 75, 100, 150, 200, 400, 700, 1000]
+PRECIP_BEIGE_LIGHT = "#e8d4a0"  # 2–5 mm
+PRECIP_MASTER_BOUNDS = [0, 1, 2, 5, 10, 15, 20, 25, 30, 50, 75, 100, 150, 200, 400, 700, 1000]
 PRECIP_MASTER_COLORS = [
     PRECIP_COLORS[1],      # 0–1 mm white
     PRECIP_BEIGE_TRACE,    # 1–2 mm pale beige
     PRECIP_BEIGE_LIGHT,    # 2–5 mm tan beige
-    PRECIP_COLORS[4],      # 5–10 mm dark green (green starts here)
-    *PRECIP_COLORS[6:8],   # sky, blue (skip pale cyan)
+    PRECIP_COLORS[2],      # 5–10 mm light green
+    PRECIP_COLORS[3],      # 10–15 mm mid green
+    PRECIP_COLORS[4],      # 15–20 mm dark green
+    *PRECIP_COLORS[6:8],   # 20–30 mm sky, blue (skip pale cyan)
     *PRECIP_COLORS[9:16],  # purple … salmon (skip pale lavender)
     "#7a0000",             # 700–1000 mm
 ]
