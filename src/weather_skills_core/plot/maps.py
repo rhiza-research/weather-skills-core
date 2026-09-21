@@ -62,8 +62,9 @@ ADMIN1_MAX_SPAN_DEG = 20.0
 HIRES_MAX_SPAN_DEG = 45.0
 MIDRES_MAX_SPAN_DEG = 90.0
 
-# KMD-style water fill (Lake Victoria, Turkana, …) drawn on top of the heatmap.
-LAKE_FACECOLOR = "#4da6ff"
+# Slate water fill (Lake Victoria, Turkana, …). Saturated CHC precip blues
+# (#50a5f5 / #1e6eeb) look like rainfall; this grey-blue does not.
+LAKE_FACECOLOR = "#708090"
 ADMIN1_STYLE = {"facecolor": "none", "edgecolor": "0.45", "linewidth": 0.4, "zorder": 3}
 LAKES_STYLE = {
     "facecolor": LAKE_FACECOLOR,
