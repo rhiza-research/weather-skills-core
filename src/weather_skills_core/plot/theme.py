@@ -60,7 +60,7 @@ PRECIP_LONG_MIN_DAYS = 5
 # is a darker maroon than the last class, not CHC's pale pink.
 PRECIP_BEIGE_TRACE = "#f6e8c3"  # 1–2 mm
 PRECIP_BEIGE_LIGHT = "#e8d4a0"  # 2–5 mm
-PRECIP_MASTER_BOUNDS = [0, 1, 2, 5, 10, 15, 20, 25, 30, 50, 75, 100, 150, 200, 400, 700, 1000]
+PRECIP_MASTER_BOUNDS = [0, 1, 2, 5, 10, 15, 20, 30, 40, 50, 75, 100, 150, 200, 400, 700, 1000]
 PRECIP_MASTER_COLORS = [
     PRECIP_COLORS[1],      # 0–1 mm white
     PRECIP_BEIGE_TRACE,    # 1–2 mm pale beige
@@ -68,8 +68,9 @@ PRECIP_MASTER_COLORS = [
     PRECIP_COLORS[2],      # 5–10 mm light green
     PRECIP_COLORS[3],      # 10–15 mm mid green
     PRECIP_COLORS[4],      # 15–20 mm dark green
-    *PRECIP_COLORS[6:8],   # 20–30 mm sky, blue (skip pale cyan)
-    *PRECIP_COLORS[9:16],  # purple … salmon (skip pale lavender)
+    PRECIP_COLORS[6],      # 20–30 mm sky blue
+    PRECIP_COLORS[7],      # 30–40 mm blue
+    *PRECIP_COLORS[9:16],  # 40–700 mm purple … salmon (skip pale lavender)
     "#7a0000",             # 700–1000 mm
 ]
 PRECIP_UNDER = "#ffffff"
