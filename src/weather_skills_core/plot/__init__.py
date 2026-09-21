@@ -11,6 +11,7 @@ Module                 Role
 :mod:`.figure`         Dates, colorbar, artist allowlists, PNG save
 :mod:`.maps`           Lon/lat figures (heatmap, quiver, layers, grids)
 :mod:`.charts`         1-D / categorical figures (lines, xy, windrose, mediogram)
+:mod:`.qa`             Pixel hash + finite-data report printed by ``export()``
 =====================  ========================================================
 """
 
@@ -141,6 +142,10 @@ def export(compiled, output, *, datasets=None, dump_spec_path=None, spec=None):
     Figure skills dump with ``maybe_emit_spec`` *before* compile and skip this
     function. ``dump_spec_path`` is ``None``/``False`` (skip), ``"-"`` (stdout),
     or a path. No ``*.plot.json`` sidecar is written by default.
+
+    After the PNG is written, stdout gets a pixel ``plot hash`` and a ``data:``
+    line (``not null`` or ``NULL``) unless ``dump_spec_path`` is ``"-"`` (that
+    path owns stdout).
     """
     import json
     import sys
@@ -162,6 +167,10 @@ def export(compiled, output, *, datasets=None, dump_spec_path=None, spec=None):
     if layout.get("figsize"):
         tight = False
     export_png(compiled.fig, output, tight=tight)
+    if str(dump_spec_path) != "-":
+        from weather_skills_core.plot.qa import report_figure
+
+        report_figure(output, datasets)
 
     spec_out = attach_figure_spec(resolved_spec, spec)
     if datasets:

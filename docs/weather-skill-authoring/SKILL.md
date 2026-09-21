@@ -144,7 +144,9 @@ dumps the assembled spec as JSON and skips the PNG (`-o` is not required);
 `--patch` submits edits. `--spec` is an optional full JSON object, not a
 replacement for `--title` / `--variable`. Call `maybe_emit_spec` after
 assembling the spec and return before `compile`/`export` when it is True.
-`export()` writes the PNG only. Assemble a spec from flags (or call
+`export()` writes the PNG and prints a pixel `plot hash` plus `data: not null`
+or `data: NULL` so an agent can see whether the figure changed and whether the
+plotted arrays are finite. Assemble a spec from flags (or call
 `maps.compile_grid` / `charts.compile_lines` / `charts.compile_mediogram`
 after data prep) and then `export(compiled, output, datasets=…)`. Public names:
 `PlotSpec`, `load_spec`, `dump_spec`, `compile`, `export`. Matplotlib does
