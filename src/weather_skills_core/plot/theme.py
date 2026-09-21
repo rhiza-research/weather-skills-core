@@ -423,6 +423,19 @@ def colormap_palettes(registry: dict | None = None) -> dict:
     return palettes
 
 
+def _palette_entry(palettes: dict, name: str | None):
+    """Return ``(entry, canonical_name)``; palette keys match case-insensitively."""
+    if not name:
+        return None, name
+    if name in palettes:
+        return palettes[name], name
+    key = name.lower()
+    for existing, entry in palettes.items():
+        if str(existing).lower() == key:
+            return entry, existing
+    return None, name
+
+
 def mpl_color(color):
     """Map grayscale numbers / names to a matplotlib color."""
     if color is None:
@@ -440,12 +453,42 @@ def mpl_color(color):
     return raw
 
 
+_SEABORN_CMAPS = frozenset({"rocket", "mako", "flare", "crest"})
+
+
+def resolve_mpl_cmap_name(name: str) -> str:
+    """Canonical matplotlib/seaborn colormap name. Case-insensitive.
+
+    ColorBrewer names are mixed-case (``RdBu_r``, ``YlGn``). Callers used to
+    lowercase before ``get_cmap``, so ``--colormap RdBu_r`` became ``rdbu_r``
+    and matplotlib rejected it.
+    """
+    raw = str(name or SEABORN_SEQUENTIAL).strip() or SEABORN_SEQUENTIAL
+    key = raw.lower()
+    if key in _SEABORN_CMAPS:
+        return key
+    try:
+        import matplotlib.pyplot as plt
+    except ImportError:
+        return raw
+    names = list(plt.colormaps())
+    if raw in names:
+        return raw
+    matches = [item for item in names if item.lower() == key]
+    if matches:
+        return matches[0]
+    raise UsageError(
+        f"unknown colormap {raw!r}; use a matplotlib name (RdBu_r, coolwarm, YlGn), "
+        "a comma-separated color list, or a named palette (ppt_week, ppt_anomaly)"
+    )
+
+
 def _named_mpl_cmap(name: str):
-    """A matplotlib/seaborn colormap by name."""
+    """A matplotlib/seaborn colormap by name (case-insensitive)."""
     import matplotlib.pyplot as plt
 
-    key = str(name or SEABORN_SEQUENTIAL).lower()
-    if key in ("rocket", "mako", "flare", "crest"):
+    key = resolve_mpl_cmap_name(name)
+    if key in _SEABORN_CMAPS:
         try:
             import seaborn as sns
 
@@ -745,8 +788,9 @@ def resolve_colorscale(
     """Pick a colormap dict: name, colors and/or cmap, optional bounds.
 
     ``colormap`` may be a matplotlib name, a comma-separated color list, or an
-    object with ``colors`` / ``bounds`` / ``under`` / ``over``. Named palettes
-    resolve against the built-in nested ``ppt_*`` windows and CHC aliases, then
+    object with ``colors`` / ``bounds`` / ``under`` / ``over``. Matplotlib names
+    are case-insensitive (``RdBu_r`` / ``rdbu_r``). Named palettes resolve
+    against the built-in nested ``ppt_*`` windows and CHC aliases, then
     ``registry`` / ``--theme-file`` (so a custom ``colormaps.drought``
     entry is not ignored).
     """
@@ -777,16 +821,17 @@ def resolve_colorscale(
             **extras,
         }
     named = parsed.get("name")
-    entry = palettes.get(named) if named else None
+    entry, named = _palette_entry(palettes, named)
     if entry and entry.get("colors") and entry.get("bounds"):
         return _scale_with_overrides(
             _discrete_scale(named, entry, stretch=stretch), parsed, stretch=stretch
         )
     if named or parsed.get("cmap"):
         cmap_name = parsed.get("cmap") or (entry or {}).get("cmap") or named
+        canonical = resolve_mpl_cmap_name(cmap_name)
         scale = {
-            "name": named or cmap_name,
-            "cmap": str(cmap_name).lower(),
+            "name": named or canonical,
+            "cmap": canonical,
             "bounds": None,
         }
         return _scale_with_overrides(scale, parsed, stretch=stretch)

@@ -180,6 +180,23 @@ def test_colormap_bounds_fold_into_theme_colormap():
     assert named_bounds["bounds"] == [0, 10, 50]
 
 
+def test_matplotlib_colormap_names_are_case_insensitive():
+    pytest.importorskip("matplotlib")
+    from weather_skills_core import UsageError
+    from weather_skills_core.plot.theme import resolve_mpl_cmap_name
+
+    assert resolve_mpl_cmap_name("RdBu_r") == "RdBu_r"
+    assert resolve_mpl_cmap_name("rdbu_r") == "RdBu_r"
+    assert resolve_mpl_cmap_name("YlGn") == "YlGn"
+    assert resolve_mpl_cmap_name("ylgn") == "YlGn"
+    assert resolve_mpl_cmap_name("coolwarm") == "coolwarm"
+    da = make_gridded()["precip"]
+    assert resolve_colorscale(da, "RdBu_r")["cmap"] == "RdBu_r"
+    assert resolve_colorscale(da, "rdbu_r")["cmap"] == "RdBu_r"
+    with pytest.raises(UsageError, match="unknown colormap"):
+        resolve_mpl_cmap_name("not_a_real_cmap")
+
+
 def test_normalize_spec_colorbar_labels_need_ticks():
     from weather_skills_core import UsageError
     from weather_skills_core.plot.spec import normalize_spec
@@ -509,6 +526,21 @@ def test_compile_heatmap_facets_time():
     assert resolved["layout"]["facet"]["rows"] == 2
     assert resolved["layout"]["facet"]["n_panels"] == 5
     assert len(_quadmeshes(fig)) == 5
+
+
+def test_compile_heatmap_mixed_case_colormap_with_vlim():
+    pytest.importorskip("matplotlib")
+    from weather_skills_core.plot import compile
+
+    ds = make_gridded(name="sst", units="degree_Celsius")
+    spec = spec_from_flags(variable="sst", kind="heatmap", colormap="RdBu_r", vmin=-3, vmax=3)
+    meshes = _quadmeshes(compile(spec, {"a": ds}).fig)
+    assert meshes
+    assert meshes[0].cmap.name == "RdBu_r"
+
+    spec_lower = spec_from_flags(variable="sst", kind="heatmap", colormap="rdbu_r", vmin=-3, vmax=3)
+    meshes_lower = _quadmeshes(compile(spec_lower, {"a": ds}).fig)
+    assert meshes_lower[0].cmap.name == "RdBu_r"
 
 
 def _visible_map_axes(fig):

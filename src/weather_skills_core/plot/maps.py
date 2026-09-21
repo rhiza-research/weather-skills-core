@@ -38,6 +38,7 @@ from weather_skills_core.plot.theme import (
     mpl_cmap_norm,
     parse_colormap_spec,
     resolve_colorscale,
+    resolve_mpl_cmap_name,
 )
 from weather_skills_core.standard_utils import (
     ensure_normalized_longitude,
@@ -829,7 +830,7 @@ def _parse_colormap(spec):
         from matplotlib.colors import LinearSegmentedColormap
 
         return LinearSegmentedColormap.from_list(parsed.get("name") or "custom", parsed["colors"])
-    return parsed.get("cmap") or parsed.get("name") or spec
+    return resolve_mpl_cmap_name(parsed.get("cmap") or parsed.get("name") or spec)
 
 
 def _flag_values(da):
@@ -905,7 +906,7 @@ def _heatmap_scale(da, colormap, *, stretch=False, registry=None):
         if extras:
             cmap = cmap.with_extremes(**extras)
         return cmap, None
-    return scale.get("cmap") or scale.get("name") or "rocket", None
+    return resolve_mpl_cmap_name(scale.get("cmap") or scale.get("name") or "rocket"), None
 
 
 def _layer_optional_float(spec, key):
