@@ -226,6 +226,10 @@ def test_normalize_spec_colorbar_labels_need_ticks():
         normalize_spec({"layout": {"colorbar": {"label_pad": 12}}})
     padded = normalize_spec({"layout": {"colorbar": {"labelpad": 16}}})
     assert padded["layout"]["colorbar"]["labelpad"] == 16
+    with pytest.raises(UsageError, match="moved to layout.colorbar.labelsize"):
+        normalize_spec({"layout": {"colorbar": {"fontsize": 28}}})
+    sized = normalize_spec({"layout": {"colorbar": {"labelsize": 28}}})
+    assert sized["layout"]["colorbar"]["labelsize"] == 28
     with pytest.raises(UsageError, match="not a known key"):
         normalize_spec({"theme": {"colormap": {"colors": ["#fff", "#000"], "bogus": 1}}})
     ok = normalize_spec(
@@ -638,6 +642,24 @@ def test_compile_heatmap_colorbar_labelpad_is_colorbar_only():
     assert _cbar_ax(fig_padded).yaxis.labelpad == 28
     assert _cbar_label_gap(fig_padded) > _cbar_label_gap(fig_default) + 10
     assert abs(_map_ylabel_x(fig_padded) - _map_ylabel_x(fig_default)) < 8
+
+
+def test_compile_heatmap_colorbar_labelsize_is_colorbar_only():
+    pytest.importorskip("matplotlib")
+    from weather_skills_core.plot import compile
+    from weather_skills_core.plot.figure import DEFAULT_FONTSIZE
+
+    ds = make_gridded(n_time=1)
+    spec = spec_from_flags(variable="precip", kind="heatmap", cbar_label="Rain (mm)")
+    spec["layout"]["colorbar"] = {"labelsize": 28}
+    compiled = compile(spec, {"a": ds})
+    fig, resolved = compiled.fig, compiled.spec
+    assert resolved["layout"]["colorbar"]["labelsize"] == 28.0
+    cbar_ax = next(a for a in fig.axes if a.get_label() == "<colorbar>")
+    map_ax = next(a for a in fig.axes if a.get_label() != "<colorbar>")
+    assert cbar_ax.yaxis.label.get_size() == 28
+    assert map_ax.yaxis.label.get_size() == DEFAULT_FONTSIZE
+    assert map_ax.xaxis.label.get_size() == DEFAULT_FONTSIZE
 
 
 def test_compile_heatmap_colorbar_uses_variable_not_source_date():

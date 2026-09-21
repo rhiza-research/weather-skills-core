@@ -428,6 +428,7 @@ def add_shared_colorbar(fig, mappable, axes, label="", *, location=None, **kwarg
     if "location" in kwargs:
         location = kwargs.pop("location")
     labelpad = kwargs.pop("labelpad", None)
+    labelsize = kwargs.pop("labelsize", None)
     cbar = fig.colorbar(
         mappable,
         ax=axes,
@@ -438,12 +439,13 @@ def add_shared_colorbar(fig, mappable, axes, label="", *, location=None, **kwarg
     )
     if label:
         cbar.set_label(label)
+    label_axis = (
+        cbar.ax.xaxis if getattr(cbar, "orientation", "vertical") == "horizontal" else cbar.ax.yaxis
+    )
     if labelpad is not None:
-        pad = float(labelpad)
-        if getattr(cbar, "orientation", "vertical") == "horizontal":
-            cbar.ax.xaxis.labelpad = pad
-        else:
-            cbar.ax.yaxis.labelpad = pad
+        label_axis.labelpad = float(labelpad)
+    if labelsize is not None:
+        label_axis.label.set_size(float(labelsize))
     if tick_list is not None:
         cbar.set_ticks(tick_list)
         if labels is not None:
@@ -1376,6 +1378,8 @@ def colorbar_mpl_kwargs(spec: dict | None) -> dict:
         kw["labels"] = list(cbar["labels"])
     if cbar.get("labelpad") is not None:
         kw["labelpad"] = float(cbar["labelpad"])
+    if cbar.get("labelsize") is not None:
+        kw["labelsize"] = float(cbar["labelsize"])
     return kw
 
 

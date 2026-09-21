@@ -95,6 +95,7 @@ COLORBAR_KEYS = frozenset(
         "ticks",
         "labels",
         "labelpad",
+        "labelsize",
     }
 )
 THEME_KEYS = frozenset({"template", "colormap", "fontsize", "rc"})
@@ -171,6 +172,9 @@ RELOCATED = {
     "labelpad": "layout.colorbar.labelpad",
     "label_pad": "layout.colorbar.labelpad",
     "layout.colorbar.label_pad": "layout.colorbar.labelpad",
+    "label_size": "layout.colorbar.labelsize",
+    "layout.colorbar.label_size": "layout.colorbar.labelsize",
+    "layout.colorbar.fontsize": "layout.colorbar.labelsize",
     "layout.metric": "traces[].metric",
     "layout.leads": "traces[].leads",
     "style.dpi": "layout.dpi",
@@ -276,7 +280,7 @@ def normalize_spec(data: dict) -> dict:
         _validate_facet_spacing(facet)
     colorbar = (data.get("layout") or {}).get("colorbar")
     if colorbar is not None:
-        _check_keys(colorbar, COLORBAR_KEYS, "layout.colorbar")
+        _check_keys(colorbar, COLORBAR_KEYS, "layout.colorbar", relocated_prefix="layout.colorbar.")
         ticks, labels = colorbar.get("ticks"), colorbar.get("labels")
         if labels is not None and ticks is None:
             raise UsageError("plot spec layout.colorbar.labels requires layout.colorbar.ticks")
