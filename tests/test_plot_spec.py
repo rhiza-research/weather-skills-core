@@ -534,6 +534,22 @@ def test_compile_heatmap_facets_time():
     assert len(_quadmeshes(fig)) == 5
 
 
+def test_compile_heatmap_colorbar_uses_variable_not_source_date():
+    pytest.importorskip("matplotlib")
+    from weather_skills_core.plot import compile
+
+    ds = make_gridded(n_time=1)
+    ds.attrs["weather_skills_source"] = "chirps:2026-09-20"
+    ds["precip"].attrs["long_name"] = "Total precipitation"
+    spec = spec_from_flags(variable="precip", kind="heatmap")
+    fig = compile(spec, {"a": ds}).fig
+    cbar_ax = next(ax for ax in fig.axes if ax.get_label() == "<colorbar>")
+    label = cbar_ax.get_ylabel() or cbar_ax.get_xlabel()
+    assert "Total precipitation" in label
+    assert "2026" not in label
+    assert "Sept" not in label
+
+
 def test_compile_heatmap_mixed_case_colormap_with_vlim():
     pytest.importorskip("matplotlib")
     from weather_skills_core.plot import compile

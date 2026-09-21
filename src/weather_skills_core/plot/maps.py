@@ -15,7 +15,7 @@ from pathlib import Path
 import numpy as np
 
 from weather_skills_core.cf import auto_variable, cf_dim
-from weather_skills_core.display_labels import dataset_display_label, resolve_input_labels
+from weather_skills_core.display_labels import resolve_input_labels
 from weather_skills_core.errors import UsageError
 from weather_skills_core.plot.figure import (
     add_shared_colorbar,
@@ -1872,8 +1872,6 @@ def _plot_layers(
             item["cbar_label"] = label_override
         elif cbar_label:
             item["cbar_label"] = cbar_label
-        elif spec.ds is not None and spec.kind in {"heatmap", "scatter", "quiver"}:
-            item["cbar_label"] = dataset_display_label(spec.ds, item.get("cbar_label") or spec.path)
         item["zorder"] = item["zorder"] + i * 0.01
         prepared.append(item)
 
