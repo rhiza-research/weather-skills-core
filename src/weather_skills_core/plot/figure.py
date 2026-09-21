@@ -429,6 +429,7 @@ def add_shared_colorbar(fig, mappable, axes, label="", *, location=None, **kwarg
         location = kwargs.pop("location")
     labelpad = kwargs.pop("labelpad", None)
     labelsize = kwargs.pop("labelsize", None)
+    ticksize = kwargs.pop("ticksize", None)
     cbar = fig.colorbar(
         mappable,
         ax=axes,
@@ -446,6 +447,8 @@ def add_shared_colorbar(fig, mappable, axes, label="", *, location=None, **kwarg
         label_axis.labelpad = float(labelpad)
     if labelsize is not None:
         label_axis.label.set_size(float(labelsize))
+    if ticksize is not None:
+        cbar.ax.tick_params(labelsize=float(ticksize))
     if tick_list is not None:
         cbar.set_ticks(tick_list)
         if labels is not None:
@@ -1380,6 +1383,8 @@ def colorbar_mpl_kwargs(spec: dict | None) -> dict:
         kw["labelpad"] = float(cbar["labelpad"])
     if cbar.get("labelsize") is not None:
         kw["labelsize"] = float(cbar["labelsize"])
+    if cbar.get("ticksize") is not None:
+        kw["ticksize"] = float(cbar["ticksize"])
     return kw
 
 

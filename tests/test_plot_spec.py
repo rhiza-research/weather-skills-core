@@ -230,6 +230,10 @@ def test_normalize_spec_colorbar_labels_need_ticks():
         normalize_spec({"layout": {"colorbar": {"fontsize": 28}}})
     sized = normalize_spec({"layout": {"colorbar": {"labelsize": 28}}})
     assert sized["layout"]["colorbar"]["labelsize"] == 28
+    with pytest.raises(UsageError, match="moved to layout.colorbar.ticksize"):
+        normalize_spec({"layout": {"colorbar": {"tick_size": 15}}})
+    ticksized = normalize_spec({"layout": {"colorbar": {"ticksize": 15}}})
+    assert ticksized["layout"]["colorbar"]["ticksize"] == 15
     with pytest.raises(UsageError, match="not a known key"):
         normalize_spec({"theme": {"colormap": {"colors": ["#fff", "#000"], "bogus": 1}}})
     ok = normalize_spec(
@@ -660,6 +664,27 @@ def test_compile_heatmap_colorbar_labelsize_is_colorbar_only():
     assert cbar_ax.yaxis.label.get_size() == 28
     assert map_ax.yaxis.label.get_size() == DEFAULT_FONTSIZE
     assert map_ax.xaxis.label.get_size() == DEFAULT_FONTSIZE
+
+
+def test_compile_heatmap_colorbar_ticksize_is_colorbar_only():
+    pytest.importorskip("matplotlib")
+    from weather_skills_core.plot import compile
+    from weather_skills_core.plot.figure import DEFAULT_FONTSIZE
+
+    ds = make_gridded(n_time=1)
+    spec = spec_from_flags(variable="precip", kind="heatmap", cbar_label="Rain (mm)")
+    spec["layout"]["colorbar"] = {"ticksize": 15}
+    compiled = compile(spec, {"a": ds})
+    fig, resolved = compiled.fig, compiled.spec
+    assert resolved["layout"]["colorbar"]["ticksize"] == 15.0
+    cbar_ax = next(a for a in fig.axes if a.get_label() == "<colorbar>")
+    map_ax = next(a for a in fig.axes if a.get_label() != "<colorbar>")
+    fig.canvas.draw()
+    cbar_ticks = [t.get_fontsize() for t in cbar_ax.get_yticklabels() if t.get_text()]
+    map_ticks = [t.get_fontsize() for t in map_ax.get_yticklabels() if t.get_text()]
+    assert cbar_ticks and all(size == 15 for size in cbar_ticks)
+    default_tick = max(8, int(round(DEFAULT_FONTSIZE * 0.85)))
+    assert map_ticks and all(size == default_tick for size in map_ticks)
 
 
 def test_compile_heatmap_colorbar_uses_variable_not_source_date():

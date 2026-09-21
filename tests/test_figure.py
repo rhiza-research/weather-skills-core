@@ -144,7 +144,7 @@ def test_add_shared_colorbar_labelpad():
 
     fig, ax = plt.subplots(figsize=(4, 3))
     mesh = ax.pcolormesh(np.arange(4).reshape(2, 2))
-    cbar = add_shared_colorbar(fig, mesh, ax, "value", labelpad=20, labelsize=22)
+    cbar = add_shared_colorbar(fig, mesh, ax, "value", labelpad=20, labelsize=22, ticksize=15)
     fig.canvas.draw()
     axis = (
         cbar.ax.yaxis if getattr(cbar, "orientation", "vertical") == "vertical" else cbar.ax.xaxis
@@ -152,6 +152,8 @@ def test_add_shared_colorbar_labelpad():
     assert axis.get_label_text() == "value"
     assert axis.labelpad == 20
     assert axis.label.get_size() == 22
+    tick_sizes = [t.get_fontsize() for t in axis.get_ticklabels() if t.get_text()]
+    assert tick_sizes and all(size == 15 for size in tick_sizes)
     plt.close(fig)
 
 
