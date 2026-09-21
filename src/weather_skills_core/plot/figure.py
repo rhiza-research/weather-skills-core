@@ -232,6 +232,61 @@ def resolve_figsize(requested, default):
     return tuple(requested) if requested is not None else tuple(default)
 
 
+# theme.rc keys documented for --patch. Any other matplotlib rcParam is also
+# accepted (except backend / interactive). These have no separate CLI flag.
+BASIC_THEME_RC = frozenset(
+    {
+        "font.size",
+        "font.family",
+        "font.weight",
+        "axes.titlesize",
+        "axes.titleweight",
+        "axes.titlepad",
+        "axes.labelsize",
+        "axes.labelweight",
+        "axes.labelpad",
+        "figure.titlesize",
+        "figure.titleweight",
+        "xtick.labelsize",
+        "ytick.labelsize",
+        "xtick.major.pad",
+        "ytick.major.pad",
+        "legend.fontsize",
+        "legend.title_fontsize",
+        "lines.linewidth",
+        "axes.linewidth",
+    }
+)
+
+
+def fontsize_rc(fontsize=DEFAULT_FONTSIZE) -> dict:
+    """RcParams ``--fontsize`` writes. Dumped as ``theme.rc`` so a spec dump
+    names ``axes.titlesize`` (panel titles) and ``figure.titlesize``.
+    """
+    fs = int(fontsize)
+    tick = max(8, int(round(fs * 0.85)))
+    legend = max(8, int(round(fs * 0.9)))
+    return {
+        "font.size": fs,
+        "axes.titlesize": fs,
+        "axes.labelsize": fs,
+        "xtick.labelsize": tick,
+        "ytick.labelsize": tick,
+        "legend.fontsize": legend,
+        "figure.titlesize": fs,
+    }
+
+
+def resolved_theme_rc(spec: dict | None) -> dict:
+    """``theme.rc`` after ``--fontsize``, with any user rc on top."""
+    theme = (spec or {}).get("theme") or {}
+    fontsize = theme.get("fontsize")
+    if fontsize is None:
+        fontsize = DEFAULT_FONTSIZE
+    user = theme.get("rc") if isinstance(theme.get("rc"), dict) else {}
+    return {**fontsize_rc(fontsize), **user}
+
+
 def apply_style(fontsize=DEFAULT_FONTSIZE, *, template="weather_skills", chart="line"):
     """Seaborn chrome plus a single ``--fontsize``.
 
@@ -252,20 +307,7 @@ def apply_style(fontsize=DEFAULT_FONTSIZE, *, template="weather_skills", chart="
         sns.set_theme(style=style, palette=palette, context="notebook")
         if chart == "map":
             mpl.rcParams["axes.grid"] = False
-    fs = int(fontsize)
-    tick = max(8, int(round(fs * 0.85)))
-    legend = max(8, int(round(fs * 0.9)))
-    mpl.rcParams.update(
-        {
-            "font.size": fs,
-            "axes.titlesize": fs,
-            "axes.labelsize": fs,
-            "xtick.labelsize": tick,
-            "ytick.labelsize": tick,
-            "legend.fontsize": legend,
-            "figure.titlesize": fs,
-        }
-    )
+    mpl.rcParams.update(fontsize_rc(fontsize))
 
 
 def _format_cbar_tick(value):
@@ -1404,8 +1446,9 @@ def resolve_axes_block(spec: dict | None) -> dict | list:
 def attach_figure_spec(resolved: dict, spec: dict | None = None) -> dict:
     """Fill matplotlib layout knobs on a dumped spec (axes, annotations, shapes).
 
-    Sidecars dump only the axes keys that were set. The full editable catalog is
-    ``AXES_TEMPLATE``.
+    Sidecars dump only the axes keys that were set. ``theme.rc`` always includes
+    the font sizes ``--fontsize`` applied so a dump names ``axes.titlesize``.
+    The full axes catalog is ``AXES_TEMPLATE``.
     """
     src = spec or {}
     out = dict(resolved)
@@ -1424,9 +1467,16 @@ def attach_figure_spec(resolved: dict, spec: dict | None = None) -> dict:
             layout[key] = spec_layout[key]
     out["layout"] = layout
     theme = dict(out.get("theme") or {})
-    rc = (src.get("theme") or {}).get("rc")
-    if rc:
-        theme["rc"] = rc
+    src_theme = src.get("theme") or {}
+    if theme.get("fontsize") is None and src_theme.get("fontsize") is not None:
+        theme["fontsize"] = src_theme["fontsize"]
+    user_rc = {}
+    if isinstance(theme.get("rc"), dict):
+        user_rc.update(theme["rc"])
+    if isinstance(src_theme.get("rc"), dict):
+        user_rc.update(src_theme["rc"])
+    theme["rc"] = user_rc
+    theme["rc"] = resolved_theme_rc({"theme": theme})
     out["theme"] = theme
     return out
 

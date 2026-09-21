@@ -80,6 +80,11 @@ def test_normalize_spec_reports_where_a_relocated_key_moved():
         ({"layout": {"facet": {"horizontal_spacing": 0.25}}}, "moved to layout.facet.wspace"),
         ({"layout": {"axes": {}}}, "moved to axes"),
         ({"style": {"dpi": 200}}, "theme"),
+        ({"theme": {"subplot_title_fontsize": 10}}, "theme.rc.axes.titlesize"),
+        ({"theme": {"label_fontsize": 12}}, "theme.rc.axes.labelsize"),
+        ({"theme": {"tick_fontsize": 8}}, "theme.rc.xtick.labelsize"),
+        ({"theme": {"legend_fontsize": 11}}, "theme.rc.legend.fontsize"),
+        ({"theme": {"title_fontsize": 18}}, "theme.rc.figure.titlesize"),
         ({"traces": [{"type": "heatmap"}]}, r"traces\[0\].type moved to traces\[\].kind"),
         (
             {"traces": [{"kind": "heatmap", "style": "line"}]},
@@ -91,6 +96,20 @@ def test_normalize_spec_reports_where_a_relocated_key_moved():
             normalize_spec(bad)
     with pytest.raises(UsageError, match="not a known key"):
         normalize_spec({"bogus": 1})
+
+
+def test_dumped_spec_includes_resolved_title_sizes():
+    from weather_skills_core.plot.figure import attach_figure_spec
+
+    dumped = attach_figure_spec({"theme": {"fontsize": 9}}, {"theme": {"fontsize": 9}})
+    assert dumped["theme"]["rc"]["axes.titlesize"] == 9
+    assert dumped["theme"]["rc"]["figure.titlesize"] == 9
+    patched = attach_figure_spec(
+        {"theme": {"fontsize": 16, "rc": {"axes.titlesize": 10}}},
+        {"theme": {"fontsize": 16, "rc": {"axes.titlesize": 10}}},
+    )
+    assert patched["theme"]["rc"]["axes.titlesize"] == 10
+    assert patched["theme"]["rc"]["figure.titlesize"] == 16
 
 
 def test_flag_table_writes_and_reads_one_canonical_path():
@@ -1152,10 +1171,44 @@ def test_apply_rc_sets_and_rejects_backend():
     import matplotlib as mpl
 
     from weather_skills_core import UsageError
-    from weather_skills_core.plot.figure import apply_rc
+    from weather_skills_core.plot.figure import BASIC_THEME_RC, apply_rc, apply_style_then_rc
 
-    apply_rc({"axes.grid": False, "lines.linewidth": 3.0})
-    assert mpl.rcParams["lines.linewidth"] == 3.0
+    samples = {
+        "font.size": 11,
+        "font.family": "DejaVu Sans",
+        "font.weight": "bold",
+        "axes.titlesize": 10,
+        "axes.titleweight": "bold",
+        "axes.titlepad": 4.0,
+        "axes.labelsize": 12,
+        "axes.labelweight": "bold",
+        "axes.labelpad": 3.0,
+        "figure.titlesize": 18,
+        "figure.titleweight": "bold",
+        "xtick.labelsize": 8,
+        "ytick.labelsize": 8,
+        "xtick.major.pad": 2.0,
+        "ytick.major.pad": 2.0,
+        "legend.fontsize": 9,
+        "legend.title_fontsize": 10,
+        "lines.linewidth": 2.5,
+        "axes.linewidth": 1.2,
+    }
+    assert BASIC_THEME_RC == frozenset(samples)
+    apply_rc(samples)
+    assert mpl.rcParams["axes.titlesize"] == 10
+    assert mpl.rcParams["lines.linewidth"] == 2.5
+    assert mpl.rcParams["xtick.labelsize"] == 8
+    apply_style_then_rc(
+        {"theme": {"rc": {"axes.titlesize": 10, "xtick.labelsize": 8, "lines.linewidth": 2.5}}},
+        chart="map",
+        fontsize=16,
+        template="weather_skills",
+    )
+    assert mpl.rcParams["axes.titlesize"] == 10
+    assert mpl.rcParams["figure.titlesize"] == 16
+    assert mpl.rcParams["xtick.labelsize"] == 8
+    assert mpl.rcParams["lines.linewidth"] == 2.5
     with pytest.raises(UsageError, match="backend"):
         apply_rc({"backend": "TkAgg"})
     with pytest.raises(UsageError, match="unknown matplotlib rcParam"):
