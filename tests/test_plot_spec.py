@@ -718,6 +718,61 @@ def test_compile_heatmap_mixed_case_colormap_with_vlim():
     assert meshes_lower[0].cmap.name == "RdBu_r"
 
 
+def test_compile_layer_heatmap_inherits_figure_colormap_and_vlim():
+    pytest.importorskip("matplotlib")
+    from weather_skills_core.plot import compile
+
+    ds = make_gridded(name="sst", units="degree_Celsius", fill=0.4)
+    spec = {
+        "version": 2,
+        "inputs": [{"id": "a", "path": "sst.zarr"}],
+        "traces": [{"kind": "layer"}],
+        "layers": [
+            {
+                "kind": "heatmap",
+                "path": "sst.zarr",
+                "input": "a",
+                "options": {"variable": "sst"},
+            }
+        ],
+        "theme": {"colormap": "RdBu_r"},
+        "vmin": -1.5,
+        "vmax": 1.5,
+    }
+    meshes = _quadmeshes(compile(spec, {"a": ds}).fig)
+    assert meshes
+    assert meshes[0].cmap.name == "RdBu_r"
+    assert meshes[0].norm.vmin == -1.5
+    assert meshes[0].norm.vmax == 1.5
+
+
+def test_compile_layer_option_colormap_wins_over_figure():
+    pytest.importorskip("matplotlib")
+    from weather_skills_core.plot import compile
+
+    ds = make_gridded(name="sst", units="degree_Celsius", fill=0.4)
+    spec = {
+        "version": 2,
+        "inputs": [{"id": "a", "path": "sst.zarr"}],
+        "traces": [{"kind": "layer"}],
+        "layers": [
+            {
+                "kind": "heatmap",
+                "path": "sst.zarr",
+                "input": "a",
+                "options": {"variable": "sst", "colormap": "coolwarm", "vmin": -3, "vmax": 3},
+            }
+        ],
+        "theme": {"colormap": "RdBu_r"},
+        "vmin": -1.5,
+        "vmax": 1.5,
+    }
+    meshes = _quadmeshes(compile(spec, {"a": ds}).fig)
+    assert meshes[0].cmap.name == "coolwarm"
+    assert meshes[0].norm.vmin == -3
+    assert meshes[0].norm.vmax == 3
+
+
 def _visible_map_axes(fig):
     fig = _fig(fig)
     return [ax for ax in fig.axes if ax.get_visible() and ax.get_label() != "<colorbar>"]

@@ -2147,6 +2147,28 @@ KIND_TO_LAYER = {"heatmap": "heatmap", "contour": "heatmap", "quiver": "quiver"}
 MAP_STYLES = frozenset(KIND_TO_LAYER) | {"layer"}
 
 
+def _inherit_layer_options(options: dict, spec: dict, spec_input: dict | None = None) -> dict:
+    """Fill omitted layer knobs from figure-level ``theme.colormap`` / vmin / vmax.
+
+    A ``::colormap=`` / ``::vmin=`` suffix on ``--layer`` still wins. Same
+    defaults a single-input ``--kind heatmap`` already copies onto its
+    synthetic layer — without this, ``--layer heatmap:… --colormap RdBu_r``
+    dropped the palette and fell through to ``rocket``.
+    """
+    spec_input = spec_input or {}
+    out = dict(options)
+    for key, value in (
+        ("variable", spec_input.get("variable")),
+        ("index", spec_input.get("index")),
+        ("colormap", (spec.get("theme") or {}).get("colormap") or spec_input.get("colormap")),
+        ("vmin", spec.get("vmin")),
+        ("vmax", spec.get("vmax")),
+    ):
+        if value is not None and key not in out:
+            out[key] = value
+    return out
+
+
 def layers_from_spec(spec: dict, datasets: dict) -> list:
     """Build the ``LayerSpec`` list a map spec describes.
 
@@ -2179,7 +2201,9 @@ def layers_from_spec(spec: dict, datasets: dict) -> list:
             path = item.get("path")
             if not kind or not path:
                 raise UsageError("spec layers[] entries need kind and path")
-            layer = LayerSpec(kind, path, dict(item.get("options") or {}), f"{kind}:{path}")
+            spec_input = by_id.get(str(item.get("input") or ""), {})
+            options = _inherit_layer_options(dict(item.get("options") or {}), spec, spec_input)
+            layer = LayerSpec(kind, path, options, f"{kind}:{path}")
             if kind in _ZARR_LAYER_KINDS:
                 layer.ds = dataset_for(item.get("input"), path)
             built.append(layer)
@@ -2189,13 +2213,8 @@ def layers_from_spec(spec: dict, datasets: dict) -> list:
         raise UsageError(f"{style!r} is not a map kind; expected one of {sorted(MAP_STYLES)}")
     input_id = str(trace.get("input") or (inputs[0].get("id") if inputs else "a"))
     spec_input = by_id.get(input_id, inputs[0] if inputs else {})
-    options = {}
+    options = _inherit_layer_options({}, spec, spec_input)
     for key, value in (
-        ("variable", spec_input.get("variable")),
-        ("index", spec_input.get("index")),
-        ("colormap", (spec.get("theme") or {}).get("colormap") or spec_input.get("colormap")),
-        ("vmin", spec.get("vmin")),
-        ("vmax", spec.get("vmax")),
         ("u_variable", trace.get("u_variable")),
         ("v_variable", trace.get("v_variable")),
         ("quiver_scale", (trace.get("quiver") or {}).get("scale")),
@@ -2249,6 +2268,8 @@ def compile_map_figure(
             labels.append(by_id.get(str(item.get("input") or "")))
     else:
         labels = [item.get("label") for item in (spec.get("inputs") or [])]
+    theme = spec.get("theme") or {}
+    first_input = (spec.get("inputs") or [{}])[0] if spec.get("inputs") else {}
     fig, drawn = _plot_layers(
         layers_from_spec(spec, datasets),
         tuple(bbox) if bbox is not None else None,
@@ -2260,9 +2281,9 @@ def compile_map_figure(
         geo.get("draw_boxes"),
         facet.get("rows"),
         facet.get("columns"),
-        None,
-        None,
-        None,
+        first_input.get("variable"),
+        theme.get("colormap") or first_input.get("colormap"),
+        first_input.get("index"),
         trace.get("u_variable"),
         trace.get("v_variable"),
         (trace.get("quiver") or {}).get("scale"),
@@ -2273,6 +2294,8 @@ def compile_map_figure(
         xlabel=spec.get("xlabel"),
         ylabel=spec.get("ylabel"),
         figsize=layout.get("figsize"),
+        vmin=spec.get("vmin"),
+        vmax=spec.get("vmax"),
         subplot_titles=spec.get("subplot_titles"),
         cbar_label=spec.get("cbar_label"),
         mpl_spec=spec,
