@@ -73,8 +73,15 @@ class Argument:
         return flag.lstrip("-").replace("-", "_")
 
 
-def build_history(name, version, args, params, input_paths, upstream, strip_dests):
-    """Append this skill's provenance entry to the first input's history."""
+def build_history(name, version, args, params, input_paths, upstream, strip_dests, revision=None):
+    """Record this skill as a node on the provenance DAG.
+
+    A fetcher (no inputs) or a single-input transform stays a path: the
+    parent's history plus this entry. A multi-input skill is a join: the
+    top-level array is only this entry, and every parent's full subgraph is
+    nested on that entry's ``input`` list. ``revision`` is the git identity
+    of the skill that ran (commit / repo / dirty).
+    """
     entry_args = {k: v for k, v in vars(args).items() if k not in strip_dests}
     for dest in ("date", "start_time", "end_time"):
         if dest in params and params[dest] is not None:
@@ -85,19 +92,18 @@ def build_history(name, version, args, params, input_paths, upstream, strip_dest
         input_field, base_history = None, []
     elif len(input_paths) == 1:
         input_field = provenance_mod.input_ref(input_paths[0])
-        base_history = upstream[0]
+        base_history = list(upstream[0])
     else:
         input_field = [
-            {
-                "basename": path.name,
-                "hash": provenance_mod.hash_zarr(path),
-                "history": hist,
-            }
+            provenance_mod.input_ref(path, hist)
             for path, hist in zip(input_paths, upstream, strict=True)
         ]
-        base_history = upstream[0]
+        # Join node: do not flatten the first parent into a linear spine.
+        base_history = []
 
-    return base_history + [provenance_mod.build_entry(name, version, entry_args, input_field)]
+    return base_history + [
+        provenance_mod.build_entry(name, version, entry_args, input_field, revision=revision)
+    ]
 
 
 def prepare_dataset_output(ds, *, first_ds=None):
@@ -399,7 +405,14 @@ def weather_skill(
                     )
 
                 history = build_history(
-                    name, version, args, params, input_paths, upstream, strip_dests
+                    name,
+                    version,
+                    args,
+                    params,
+                    input_paths,
+                    upstream,
+                    strip_dests,
+                    revision=provenance_mod.resolve_skill_revision(fn),
                 )
                 for value, out_path in zip(results, output_paths, strict=True):
                     write_output(value, out_path, history, first_ds)

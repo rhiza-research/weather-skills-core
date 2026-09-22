@@ -160,10 +160,12 @@ exception is `convert-to-totals` / `rate_to_total`, which multiply a rate by
 
 ## Provenance
 
-The decorator appends a `weather_skills_history` entry (skill name, version,
-args, input basename+hash). Path write targets and Dataset path strings are
-omitted from the args blob. PNG/JPEG figures with an intact chain get a corner
-mark.
+The decorator records a `weather_skills_history` node (skill name, version,
+git commit of the running skill, args, input basename+hash). A single-input
+skill appends to the parent's path; a multi-input skill is a join whose
+entry nests every parent's subgraph. Path write targets and Dataset path
+strings are omitted from the args blob. PNG/JPEG figures with an intact
+chain get a corner mark.
 
 ## Layout
 

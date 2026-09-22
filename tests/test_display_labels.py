@@ -14,6 +14,32 @@ def test_dataset_display_label_from_history():
     assert dl.dataset_display_label(ds, "fallback") == "CHIRPS"
 
 
+def test_dataset_display_label_from_join_history():
+    ds = make_gridded()
+    ds.attrs["weather_skills_history"] = json.dumps(
+        [
+            {
+                "skill": "concat",
+                "version": "0.1.0",
+                "args": {},
+                "input": [
+                    {
+                        "basename": "a.zarr",
+                        "hash": "aa",
+                        "history": [{"skill": "chirps-fetch"}],
+                    },
+                    {
+                        "basename": "b.zarr",
+                        "hash": "bb",
+                        "history": [{"skill": "dynamical-fetch"}],
+                    },
+                ],
+            }
+        ]
+    )
+    assert dl.dataset_display_label(ds, "fallback") == "CHIRPS"
+
+
 def test_dataset_display_label_from_source_token():
     ds = make_gridded()
     ds.attrs["weather_skills_source"] = "ecmwf-s2s"

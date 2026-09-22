@@ -11,7 +11,12 @@ from PIL import Image
 
 from weather_skills_core import Dataset
 from weather_skills_core.decorator import argv_has_option, weather_skill
-from weather_skills_core.provenance import HISTORY_ATTR, load_figure_history, load_history
+from weather_skills_core.provenance import (
+    HISTORY_ATTR,
+    load_figure_history,
+    load_history,
+    stamp_zarr,
+)
 from weather_skills_core.standard_args import rewrite_bbox_argv
 
 
@@ -421,6 +426,55 @@ def test_run_loop_variadic_inputs(tmp_path):
     argv = [token for p in paths for token in ("-i", str(p))] + ["-o", str(out)]
     cat(argv)
     assert seen["n"] == 3
+
+
+def test_run_loop_multi_input_records_join_dag_and_commit(tmp_path):
+    from weather_skills_core.decorator import build_history
+    from weather_skills_core.provenance import origin_skill
+
+    a = tmp_path / "a.zarr"
+    b = tmp_path / "b.zarr"
+    out = tmp_path / "out.zarr"
+    a_hist = [{"skill": "chirps-fetch", "version": "0.1.0", "args": {}, "input": None}]
+    b_hist = [{"skill": "dynamical-fetch", "version": "0.1.0", "args": {}, "input": None}]
+    ds_a = make_gridded(fill=1.0)
+    stamp_zarr(ds_a, a_hist)
+    ds_a.to_zarr(a, mode="w", consolidated=True)
+    ds_b = make_gridded(fill=2.0)
+    stamp_zarr(ds_b, b_hist)
+    ds_b.to_zarr(b, mode="w", consolidated=True)
+
+    @weather_skill(name="cat", version="0.1.0")
+    @weather_skill.argument("-i", "--input", type=Dataset("any"), action="append", required=True)
+    def cat(ds, output, **kwargs):
+        return ds[0]
+
+    cat(["-i", str(a), "-i", str(b), "-o", str(out)])
+    history = load_history(out)
+    assert [step["skill"] for step in history] == ["cat"]
+    parents = history[0]["input"]
+    assert [p["basename"] for p in parents] == ["a.zarr", "b.zarr"]
+    assert parents[0]["history"] == a_hist
+    assert parents[1]["history"] == b_hist
+    assert origin_skill(history) == "chirps-fetch"
+    assert isinstance(history[0].get("commit"), str) and history[0]["commit"]
+
+    # Direct helper: a join must not prepend the first parent as a linear spine.
+    class _Args:
+        extra = True
+
+    joined = build_history(
+        "cat",
+        "0.1.0",
+        _Args(),
+        {},
+        [a, b],
+        [a_hist, b_hist],
+        {"output"},
+        revision={"commit": "deadbeef"},
+    )
+    assert [step["skill"] for step in joined] == ["cat"]
+    assert joined[0]["commit"] == "deadbeef"
 
 
 def test_run_loop_negative_bbox_latitude(tmp_path):

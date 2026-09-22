@@ -101,18 +101,26 @@ the number of `--output` paths.
 
 ## Provenance
 
-Every writing skill appends one step to `weather_skills_history`.
+Every writing skill records one node on the `weather_skills_history` DAG.
 
 | Attr | Who sets it | Meaning |
 | --- | --- | --- |
 | `weather_skills_source` | fetchers (optional) | Where the data came from, e.g. `chirps` or `dynamical:<catalog-id>`. Plots prettify this token for the short product name, so pick something that title-cases cleanly. |
-| `weather_skills_history` | every writing skill | JSON list of `{skill, version, args, input}` |
+| `weather_skills_history` | every writing skill | JSON list of `{skill, version, args, input, commit?}` nodes |
 
-`input` is `{basename, hash}` of the upstream Zarr. Path write targets
-and Dataset path strings are omitted from `args`. Plots store the same
-JSON in file metadata. When the chain is intact, PNG/JPEG figures also
-get a corner `weather-skills provenance verified` mark; HTML figures
-get metadata only.
+A single-input path stays oldest-first: the parent's nodes, then this
+skill. A multi-input skill is a join — the top-level list is only this
+skill's entry, and every parent subgraph is nested on that entry as
+`input: [{basename, hash, history}, …]`. Do not flatten the first
+parent into a linear spine.
+
+`input` is `{basename, hash}` of one upstream Zarr, or a list of those
+objects (each may carry `history`). `commit` is the git SHA of the skill
+that ran (`repo` and `dirty` are recorded when known), so a reproduction
+can pin `uvx --from git+<repo>@<commit>`. Path write targets and Dataset
+path strings are omitted from `args`. Plots store the same JSON in file
+metadata. When the chain is intact, PNG/JPEG figures also get a corner
+`weather-skills provenance verified` mark; HTML figures get metadata only.
 
 ## Writing Zarr
 

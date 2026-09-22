@@ -7,6 +7,7 @@ import re
 from pathlib import Path
 
 from weather_skills_core.errors import UsageError
+from weather_skills_core.provenance import origin_skill
 
 _DATE_TAIL = re.compile(r"[_-]\d{4}-\d{2}-\d{2}(?:[_-]\d{2}-\d{2}-\d{2})?$")
 _VAR_TAIL = re.compile(r"[_-](?:precip|tp)$", re.I)
@@ -54,12 +55,9 @@ def label_from_history(ds) -> str | None:
         history = json.loads(raw) if isinstance(raw, str) else list(raw)
     except (TypeError, ValueError, json.JSONDecodeError):
         return None
-    if not history or not isinstance(history[0], dict):
+    skill = origin_skill(history)
+    if skill is None:
         return None
-    skill = history[0].get("skill")
-    if not isinstance(skill, str) or not skill.strip():
-        return None
-    skill = skill.strip()
     if skill.endswith("-fetch"):
         return _prettify_token(skill[: -len("-fetch")])
     return _prettify_token(skill)

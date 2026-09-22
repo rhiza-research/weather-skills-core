@@ -1,13 +1,18 @@
-"""Provenance chain handling for weather-skill artifacts.
+"""Provenance graph handling for weather-skill artifacts.
 
-``weather_skills_history`` is a JSON-encoded append-only array of entries
-(oldest first). Each entry has ``skill``, ``version``, ``args``, and ``input``.
+``weather_skills_history`` is a JSON-encoded array of entries. A single-input
+path stays oldest-first (a path DAG). A multi-input skill records a join: the
+top-level array is just that skill's entry, and every parent subgraph lives
+under ``input[].history``. Each new entry also records the git ``commit``
+(and optional ``repo`` / ``dirty``) of the skill that ran.
 """
 
 import hashlib
 import html
+import inspect
 import json
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -63,8 +68,11 @@ def coerce_chain(raw: str, label: str) -> list | None:
     return chain
 
 
-_ENTRY_KNOWN_KEYS = {"skill", "version", "args", "input"}
+_ENTRY_KNOWN_KEYS = {"skill", "version", "args", "input", "commit", "repo", "dirty"}
 _INPUT_ITEM_KNOWN_KEYS = {"basename", "hash", "history"}
+_GIT_TIMEOUT_SECONDS = 2
+_SSH_GITHUB_RE = re.compile(r"^git@github\.com:([^/]+)/(.+?)(?:\.git)?$")
+_HTTPS_GITHUB_RE = re.compile(r"^https://github\.com/([^/]+)/(.+?)(?:\.git)?(?:/)?$")
 
 
 def _validate_input(value, loc: str, violations: list, notes: list) -> None:
@@ -126,6 +134,14 @@ def _validate_chain(chain, loc: str, violations: list, notes: list) -> None:
             violations.append(f"{eloc}: missing required key 'input'")
         else:
             _validate_input(entry["input"], f"{eloc}.input", violations, notes)
+        if "commit" in entry:
+            if not isinstance(entry["commit"], str) or not entry["commit"]:
+                violations.append(f"{eloc}.commit: must be a non-empty string")
+        if "repo" in entry:
+            if not isinstance(entry["repo"], str) or not entry["repo"]:
+                violations.append(f"{eloc}.repo: must be a non-empty string")
+        if "dirty" in entry and not isinstance(entry["dirty"], bool):
+            violations.append(f"{eloc}.dirty: must be a boolean")
         for key in entry:
             if key not in _ENTRY_KNOWN_KEYS:
                 notes.append(f"{eloc}: unknown key {key!r}")
@@ -231,15 +247,193 @@ def load_history(zarr_path: Path) -> list:
     return [] if parsed is None else parsed
 
 
-def input_ref(path: Path) -> dict:
-    """Single-input ``input`` value: ``{basename, hash}``."""
+def input_ref(path: Path, history=None) -> dict:
+    """One parent ``input`` value: ``{basename, hash}`` plus optional ``history``."""
     path = Path(path)
-    return {"basename": path.name, "hash": hash_zarr(path)}
+    ref = {"basename": path.name, "hash": hash_zarr(path)}
+    if history is not None:
+        ref["history"] = list(history)
+    return ref
 
 
-def build_entry(skill: str, version: str, args: dict, input) -> dict:
-    """Assemble a provenance entry."""
-    return {"skill": skill, "version": version, "args": args, "input": input}
+def input_items(entry) -> list:
+    """Normalize an entry's ``input`` to a list of parent objects."""
+    if not isinstance(entry, dict):
+        return []
+    value = entry.get("input")
+    if value is None:
+        return []
+    if isinstance(value, dict):
+        return [value]
+    if isinstance(value, list):
+        return [item for item in value if isinstance(item, dict)]
+    return []
+
+
+def parent_histories(entry) -> list[tuple[str, list]]:
+    """``(basename, nested history)`` for every parent that recorded a subgraph."""
+    out = []
+    for item in input_items(entry):
+        history = item.get("history")
+        if isinstance(history, list):
+            out.append((item.get("basename") or "?", history))
+    return out
+
+
+def origin_skill(history) -> str | None:
+    """Oldest skill name, walking into the first nested parent of a join."""
+    if not isinstance(history, list) or not history or not isinstance(history[0], dict):
+        return None
+    first = history[0]
+    if len(history) == 1:
+        for _name, nested in parent_histories(first):
+            found = origin_skill(nested)
+            if found:
+                return found
+    skill = first.get("skill")
+    if isinstance(skill, str) and skill.strip():
+        return skill.strip()
+    return None
+
+
+def normalize_repo_url(url: str) -> str:
+    """Turn a git remote into an https clone URL when we recognize GitHub."""
+    text = url.strip()
+    ssh = _SSH_GITHUB_RE.match(text)
+    if ssh:
+        return f"https://github.com/{ssh[1]}/{ssh[2].removesuffix('.git')}"
+    https = _HTTPS_GITHUB_RE.match(text)
+    if https:
+        return f"https://github.com/{https[1]}/{https[2].removesuffix('.git')}"
+    return text.removesuffix(".git")
+
+
+def _git(args: list[str], cwd: Path) -> str | None:
+    try:
+        proc = subprocess.run(
+            ["git", *args],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=_GIT_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if proc.returncode != 0:
+        return None
+    return proc.stdout.strip() or None
+
+
+def _direct_url_payload(dist) -> dict | None:
+    info_dir = getattr(dist, "_path", None)
+    if info_dir is not None:
+        candidate = Path(info_dir) / "direct_url.json"
+        if candidate.is_file():
+            try:
+                payload = json.loads(candidate.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                payload = None
+            else:
+                if isinstance(payload, dict):
+                    return payload
+    for file in getattr(dist, "files", None) or []:
+        if Path(str(file)).name != "direct_url.json":
+            continue
+        try:
+            payload = json.loads(Path(file.locate()).read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, ValueError):
+            return None
+        return payload if isinstance(payload, dict) else None
+    return None
+
+
+def _revision_from_direct_url(source_file: Path) -> dict | None:
+    """Read PEP 610 ``direct_url.json`` for the installed dist that owns ``source_file``."""
+    try:
+        from importlib.metadata import distributions
+    except ImportError:
+        return None
+    source_file = source_file.resolve()
+    for dist in distributions():
+        owned = False
+        for file in getattr(dist, "files", None) or []:
+            try:
+                if Path(file.locate()).resolve() == source_file:
+                    owned = True
+                    break
+            except (OSError, ValueError):
+                continue
+        if not owned:
+            continue
+        payload = _direct_url_payload(dist)
+        if payload is None:
+            continue
+        vcs = payload.get("vcs_info") if isinstance(payload.get("vcs_info"), dict) else {}
+        commit = vcs.get("commit_id")
+        if not isinstance(commit, str) or not commit:
+            continue
+        revision = {"commit": commit}
+        url = payload.get("url")
+        if isinstance(url, str) and url:
+            revision["repo"] = normalize_repo_url(url)
+        return revision
+    return None
+
+
+def resolve_skill_revision(source=None) -> dict | None:
+    """Git identity of the skill that is running.
+
+    ``source`` may be a skill function or a filesystem path. Prefers the git
+    checkout that contains the file; falls back to the installed package's
+    ``direct_url.json`` (``uvx --from git+…@sha``). Returns ``None`` when
+    neither is available. Untracked files do not count as dirty.
+    """
+    path = None
+    if source is not None and not isinstance(source, (str, Path)):
+        try:
+            path = Path(inspect.getfile(source))
+        except (OSError, TypeError):
+            path = None
+    elif source is not None:
+        path = Path(source)
+    if path is None:
+        return None
+    try:
+        path = path.resolve()
+    except OSError:
+        return None
+    cwd = path.parent if path.is_file() else path
+    root = _git(["rev-parse", "--show-toplevel"], cwd)
+    if not root:
+        return _revision_from_direct_url(path) if path.is_file() else None
+    root = Path(root)
+    commit = _git(["rev-parse", "HEAD"], root)
+    if not commit:
+        return None
+    revision = {"commit": commit}
+    remote = _git(["config", "--get", "remote.origin.url"], root)
+    if remote:
+        revision["repo"] = normalize_repo_url(remote)
+    porcelain = _git(["status", "--porcelain", "-uno"], root)
+    if porcelain:
+        revision["dirty"] = True
+    return revision
+
+
+def build_entry(skill: str, version: str, args: dict, input, revision=None) -> dict:
+    """Assemble a provenance entry, attaching git identity when known."""
+    entry = {"skill": skill, "version": version, "args": args, "input": input}
+    if isinstance(revision, dict):
+        commit = revision.get("commit")
+        if isinstance(commit, str) and commit:
+            entry["commit"] = commit
+        repo = revision.get("repo")
+        if isinstance(repo, str) and repo:
+            entry["repo"] = repo
+        if revision.get("dirty") is True:
+            entry["dirty"] = True
+    return entry
 
 
 def stamp_zarr(ds, history: list, *, source: str | None = None) -> None:

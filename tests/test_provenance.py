@@ -1,5 +1,7 @@
 """Provenance helpers: history load/stamp and figure metadata."""
 
+from pathlib import Path
+
 from conftest import make_gridded
 from PIL import Image
 
@@ -41,6 +43,96 @@ def test_stamp_and_load_hash_stable(tmp_path):
 def test_stamp_and_load_build_entry():
     e = provenance.build_entry("s", "1.0.0", {"k": "v"}, None)
     assert e == {"skill": "s", "version": "1.0.0", "args": {"k": "v"}, "input": None}
+
+
+def test_build_entry_records_revision():
+    e = provenance.build_entry(
+        "s",
+        "1.0.0",
+        {"k": "v"},
+        None,
+        revision={
+            "commit": "abc123def456",
+            "repo": "https://github.com/rhiza-research/weather-skills",
+            "dirty": True,
+        },
+    )
+    assert e["commit"] == "abc123def456"
+    assert e["repo"] == "https://github.com/rhiza-research/weather-skills"
+    assert e["dirty"] is True
+
+
+def test_chain_validation_accepts_commit():
+    e = entry(commit="abc123", repo="https://github.com/org/repo", dirty=False)
+    violations, notes = provenance.validate_chain([e], "h")
+    assert violations == []
+    assert notes == []
+
+
+def test_chain_validation_rejects_empty_commit():
+    violations, _ = provenance.validate_chain([entry(commit="")], "h")
+    assert any("commit" in v for v in violations)
+
+
+def test_origin_skill_walks_join():
+    history = [
+        {
+            "skill": "concat",
+            "version": "0.1.0",
+            "args": {},
+            "input": [
+                {
+                    "basename": "a.zarr",
+                    "hash": "aa",
+                    "history": [entry(skill="chirps-fetch")],
+                },
+                {
+                    "basename": "b.zarr",
+                    "hash": "bb",
+                    "history": [entry(skill="dynamical-fetch")],
+                },
+            ],
+        }
+    ]
+    assert provenance.origin_skill(history) == "chirps-fetch"
+
+
+def test_normalize_repo_url_github_ssh():
+    assert (
+        provenance.normalize_repo_url("git@github.com:rhiza-research/weather-skills.git")
+        == "https://github.com/rhiza-research/weather-skills"
+    )
+
+
+def test_resolve_skill_revision_from_this_checkout():
+    revision = provenance.resolve_skill_revision(Path(__file__))
+    assert revision is not None
+    assert len(revision["commit"]) >= 7
+    assert revision["repo"] == "https://github.com/rhiza-research/weather-skills-core"
+
+
+def test_resolve_skill_revision_marks_dirty(monkeypatch, tmp_path):
+    script = tmp_path / "clip.py"
+    script.write_text("x = 1\n", encoding="utf-8")
+
+    def fake_git(args, cwd):
+        if args[:2] == ["rev-parse", "--show-toplevel"]:
+            return str(tmp_path)
+        if args[:2] == ["rev-parse", "HEAD"]:
+            return "abc123def456"
+        if args[:3] == ["config", "--get", "remote.origin.url"]:
+            return "git@github.com:example/skills.git"
+        if args[0] == "status":
+            return " M clip.py"
+        return None
+
+    monkeypatch.setattr(provenance, "_git", fake_git)
+    revision = provenance.resolve_skill_revision(script)
+    assert revision == {
+        "commit": "abc123def456",
+        "repo": "https://github.com/example/skills",
+        "dirty": True,
+    }
 
 
 def test_chain_validation_ok():
