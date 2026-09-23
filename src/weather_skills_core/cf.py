@@ -118,6 +118,31 @@ def auto_variable(ds):
     return (multidim or candidates)[0]
 
 
+def resolve_input_variable(inputs, ds, *, id=None, index=None):
+    """This input's own ``variable``, else ``inputs[0].variable``, else auto-detect on ``ds``.
+
+    Match the input by ``id`` (preferred) or list ``index``. This is the one
+    place "which variable does this dataset use" is resolved, so every
+    plot-* skill treats a per-input override, and the ``inputs[0]`` fallback,
+    the same way — a spec key set on one dataset never leaks onto another
+    dataset that has its own name for the same field.
+    """
+    items = [item for item in (inputs or []) if isinstance(item, dict)]
+    own = None
+    if id is not None:
+        own = next(
+            (item.get("variable") for item in items if str(item.get("id")) == str(id)), None
+        )
+    elif index is not None and index < len(items):
+        own = items[index].get("variable")
+    if own:
+        return own
+    fallback = items[0].get("variable") if items else None
+    if fallback:
+        return fallback
+    return auto_variable(ds)
+
+
 def stamp_cf_dsg(ds, var_attrs: dict, *, station_id_long_name: str, name_long_name: str):
     """Stamp CF timeSeries DSG attrs for station/point_obs data. Returns ``ds``.
 
