@@ -469,6 +469,150 @@ def add_shared_colorbar(fig, mappable, axes, label="", *, location=None, **kwarg
     return cbar
 
 
+def facet_figure(
+    nrows,
+    ncols,
+    *,
+    figsize,
+    sharex=False,
+    sharey=False,
+    subplot_kws=None,
+    wspace=None,
+    hspace=None,
+    despine=True,
+):
+    """Build a panel grid with seaborn ``FacetGrid``.
+
+    Map panels pass a Cartopy projection through ``subplot_kws``. ``wspace`` /
+    ``hspace`` are GridSpec fractions (``--panel-spacing``). FacetGrid's
+    ``tight_layout`` overwrites those fractions, so they are applied again
+    afterwards. Returns ``(fig, axes)`` with ``axes`` shaped ``(nrows, ncols)``.
+    """
+    import numpy as np
+    import pandas as pd
+    import seaborn as sns
+
+    nrows, ncols = int(nrows), int(ncols)
+    if nrows < 1 or ncols < 1:
+        raise ValueError("facet_figure needs at least one row and one column")
+    data = pd.DataFrame(
+        {
+            "row": np.repeat(np.arange(nrows), ncols),
+            "col": np.tile(np.arange(ncols), nrows),
+        }
+    )
+    height = float(figsize[1]) / nrows
+    aspect = (float(figsize[0]) / ncols) / height if height else 1.0
+    gridspec_kws = {}
+    if wspace is not None:
+        gridspec_kws["wspace"] = float(wspace)
+    if hspace is not None:
+        gridspec_kws["hspace"] = float(hspace)
+    grid = sns.FacetGrid(
+        data,
+        row="row",
+        col="col",
+        row_order=list(range(nrows)),
+        col_order=list(range(ncols)),
+        sharex=sharex,
+        sharey=sharey,
+        height=height,
+        aspect=aspect,
+        subplot_kws=subplot_kws,
+        gridspec_kws=gridspec_kws or None,
+        despine=despine,
+        legend_out=False,
+    )
+    fig = grid.fig
+    fig.set_size_inches(float(figsize[0]), float(figsize[1]), forward=True)
+    axes = np.asarray(grid.axes).reshape(nrows, ncols)
+    for ax in axes.flat:
+        ax.set_title("")
+    fig._ws_facet_spacing = (
+        None if wspace is None else float(wspace),
+        None if hspace is None else float(hspace),
+    )
+    _reapply_facet_spacing(fig)
+    return fig, axes
+
+
+def _reapply_facet_spacing(fig):
+    spacing = getattr(fig, "_ws_facet_spacing", None)
+    if not spacing or (spacing[0] is None and spacing[1] is None):
+        return
+    wspace, hspace = spacing
+    fig.subplots_adjust(
+        wspace=0.0 if wspace is None else wspace,
+        hspace=0.0 if hspace is None else hspace,
+    )
+
+
+def wrap_axes_title(ax, text):
+    """Wrap ``text`` so a panel title stays inside its axes. Keep existing breaks."""
+    import textwrap
+
+    if text is None:
+        return text
+    raw = str(text)
+    if not raw.strip() or "\n" in raw:
+        return raw
+    width_in = max(float(ax.get_position().width) * float(ax.figure.get_figwidth() or 1.0), 0.8)
+    try:
+        size = float(ax.title.get_fontsize())
+    except (TypeError, ValueError):
+        size = float(DEFAULT_FONTSIZE)
+    char_in = max(size / 72.0 * 0.52, 0.06)
+    return textwrap.fill(raw, width=max(12, int(width_in / char_in)))
+
+
+def _ticklabels(axis):
+    return [tick for tick in axis.get_ticklabels() if tick.get_visible() and tick.get_text()]
+
+
+def _ticklabels_overlap(labels, renderer):
+    boxes = [tick.get_window_extent(renderer) for tick in labels]
+    if len(boxes) < 2:
+        return False
+    return any(boxes[i].x1 > boxes[i + 1].x0 + 1.0 for i in range(len(boxes) - 1))
+
+
+def relax_colorbar_ticklabels(fig):
+    """Rotate horizontal colorbar labels when neighbors collide. Every tick stays."""
+    fig.canvas.draw()
+    renderer = fig.canvas.get_renderer()
+    for ax in fig.axes:
+        if ax.get_label() != "<colorbar>":
+            continue
+        labels = _ticklabels(ax.xaxis)
+        if len(labels) < 2 or not _ticklabels_overlap(labels, renderer):
+            continue
+        ax.tick_params(axis="x", labelrotation=45)
+        for tick in ax.get_xticklabels():
+            tick.set_ha("right")
+            tick.set_rotation_mode("anchor")
+
+
+def _tight_layout_safe(fig) -> bool:
+    """Cartopy and polar axes ignore ``tight_layout`` and it pulls the colorbar onto the map."""
+    for ax in fig.axes:
+        if ax.get_label() == "<colorbar>":
+            continue
+        if getattr(ax, "name", None) == "polar":
+            return False
+        projection = getattr(ax, "projection", None)
+        if projection is not None and type(ax).__name__ == "GeoAxes":
+            return False
+    return True
+
+
+def settle_figure(fig):
+    """Reserve title and label space with seaborn's tight layout, then keep facet gaps."""
+    if _tight_layout_safe(fig):
+        fig.tight_layout()
+        _reapply_facet_spacing(fig)
+    relax_colorbar_ticklabels(fig)
+
+
 def save_figure(fig, path, *, pad_inches=None, tight=True, dpi=None):
     """Write a PNG. Default tight-crops chrome; ``tight=False`` keeps ``figsize``."""
     import matplotlib.pyplot as plt

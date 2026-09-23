@@ -215,3 +215,51 @@ def test_save_figure_keeps_canvas_when_not_tight(tmp_path):
     img = mpimg.imread(out)
     assert img.shape[1] == 7 * 150
     assert img.shape[0] == 5 * 150
+
+
+def test_facet_panel_titles_do_not_overlap():
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    from weather_skills_core.plot.figure import (
+        apply_suptitle,
+        facet_figure,
+        settle_figure,
+        wrap_axes_title,
+    )
+
+    fig, axes = facet_figure(1, 2, figsize=(8, 4), despine=True)
+    caption = "ECMWF ENS mean (init 2026-08-01), IRPS interpolated"
+    for ax in axes.flat:
+        ax.set_title(wrap_axes_title(ax, caption))
+    apply_suptitle(fig, "Ghana August 2026 total precipitation")
+    settle_figure(fig)
+    renderer = fig.canvas.get_renderer()
+    left, right = (ax.title.get_window_extent(renderer) for ax in axes.flat)
+    assert left.x1 <= right.x0 + 1.0
+    sup = fig._suptitle.get_window_extent(renderer)
+    assert sup.ymin >= max(left.ymax, right.ymax) - 2.0
+    plt.close(fig)
+
+
+def test_crowded_colorbar_labels_rotate_without_dropping_ticks():
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    from weather_skills_core.plot.figure import facet_figure, settle_figure
+
+    bounds = [0, 1, 2, 5, 10, 15, 20, 30, 40, 50, 75, 100, 500, 2000]
+    fig, axes = facet_figure(1, 2, figsize=(5, 3), despine=True)
+    mesh = axes[0, 0].pcolormesh(np.arange(4).reshape(2, 2))
+    add_shared_colorbar(fig, mesh, axes.ravel(), "precip", ticks=bounds, location="bottom")
+    settle_figure(fig)
+    cbar = next(ax for ax in fig.axes if ax.get_label() == "<colorbar>")
+    labels = [tick for tick in cbar.get_xticklabels() if tick.get_text()]
+    assert [tick.get_text() for tick in labels] == [str(b) for b in bounds]
+    assert all(tick.get_rotation() == 45 for tick in labels)
+    plt.close(fig)

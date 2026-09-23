@@ -16,13 +16,16 @@ from weather_skills_core.plot.figure import (
     axis_label,
     bar_kwargs,
     box_kwargs,
+    facet_figure,
     fill_kwargs,
     finish_figure,
     line_kwargs,
     pick,
     resolve_axis_label,
     resolve_figsize,
+    settle_figure,
     windrose_kwargs,
+    wrap_axes_title,
 )
 from weather_skills_core.plot.maps import (
     _SAMPLE_DIM_NAMES,
@@ -86,6 +89,148 @@ def _bar_unit_width(xnum):
     return float(np.median(diffs)) if diffs.size else 1.0
 
 
+def _relative_bar_width(data_width, x):
+    """Seaborn ``barplot`` width is a fraction of the native x spacing."""
+    unit = _bar_unit_width(x)
+    if unit <= 0:
+        return 0.8
+    return float(data_width) / unit
+
+
+def _sns_line(ax, x, y, **kwargs):
+    """One line via ``sns.lineplot``, without aggregation or a confidence band."""
+    import seaborn as sns
+
+    sns.lineplot(
+        x=np.asarray(x),
+        y=np.asarray(y, dtype=float),
+        ax=ax,
+        estimator=None,
+        errorbar=None,
+        sort=False,
+        legend=False,
+        **kwargs,
+    )
+
+
+def _sns_scatter(ax, x, y, **kwargs):
+    import seaborn as sns
+
+    sns.scatterplot(
+        x=np.asarray(x, dtype=float),
+        y=np.asarray(y, dtype=float),
+        ax=ax,
+        legend=False,
+        **kwargs,
+    )
+
+
+def _sns_bars(ax, x, y, *, bottom=None, **kwargs):
+    """Bars via seaborn. Stacked bars use ``seaborn.objects.Bar`` baselines."""
+    import seaborn as sns
+    from matplotlib.patches import Rectangle
+
+    label = kwargs.pop("label", None)
+    alpha = kwargs.pop("alpha", None)
+    color = kwargs.pop("color", None)
+    width = float(kwargs.pop("width", 0.8))
+    zorder = kwargs.pop("zorder", None)
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    n_before = len(ax.patches)
+    if bottom is None:
+        sns.barplot(
+            x=x,
+            y=y,
+            ax=ax,
+            color=color,
+            width=_relative_bar_width(width, x),
+            native_scale=True,
+            errorbar=None,
+            saturation=1,
+            legend=False,
+            **kwargs,
+        )
+    else:
+        import pandas as pd
+        import seaborn.objects as so
+
+        base = np.asarray(bottom, dtype=float)
+        frame = pd.DataFrame(
+            {
+                "x": x,
+                "y": base + np.nan_to_num(y, nan=0.0),
+                "base": base,
+            }
+        )
+        mark = {"width": width}
+        if color is not None:
+            mark["color"] = color
+        if alpha is not None:
+            mark["alpha"] = alpha
+        so.Plot(frame, x="x", y="y").add(so.Bar(**mark), baseline="base").on(ax).plot()
+    new = [p for p in ax.patches[n_before:] if isinstance(p, Rectangle)]
+    if label and new:
+        new[0].set_label(label)
+    if alpha is not None:
+        for patch in new:
+            patch.set_alpha(alpha)
+    if zorder is not None:
+        for patch in new:
+            patch.set_zorder(zorder)
+    for key, value in kwargs.items():
+        setter_name = f"set_{key}"
+        for patch in new:
+            setter = getattr(patch, setter_name, None)
+            if setter is not None:
+                setter(value)
+    return new
+
+
+def _style_box_patches(patches, style):
+    for patch in patches:
+        if style.get("facecolor") is not None:
+            patch.set_facecolor(style["facecolor"])
+        if style.get("edgecolor") is not None:
+            patch.set_edgecolor(style["edgecolor"])
+        if style.get("linewidth") is not None:
+            patch.set_linewidth(style["linewidth"])
+        if style.get("alpha") is not None:
+            patch.set_alpha(style["alpha"])
+        if style.get("linestyle") is not None:
+            patch.set_linestyle(style["linestyle"])
+        if style.get("hatch") is not None:
+            patch.set_hatch(style["hatch"])
+        if style.get("zorder") is not None:
+            patch.set_zorder(style["zorder"])
+
+
+def _sns_boxes(ax, samples, positions, *, width, color):
+    """One ``sns.boxplot`` series at numeric ``positions`` (already offset)."""
+    import pandas as pd
+    import seaborn as sns
+
+    rows_x = []
+    rows_y = []
+    for pos, column in zip(positions, samples, strict=True):
+        values = np.asarray(column, dtype=float)
+        rows_x.extend([float(pos)] * len(values))
+        rows_y.extend(values.tolist())
+    n_before = len(ax.patches)
+    sns.boxplot(
+        data=pd.DataFrame({"x": rows_x, "y": rows_y}),
+        x="x",
+        y="y",
+        ax=ax,
+        color=color,
+        width=float(width),
+        native_scale=True,
+        saturation=1,
+        legend=False,
+    )
+    return list(ax.patches[n_before:])
+
+
 def leftover_dims(da, time_dim, *, along=None, reduce=None):
     """Dims that remain after ``reduce`` / ``along`` besides the time axis."""
     reduce_req = reduce or []
@@ -126,8 +271,6 @@ def compile_lines(
     spec=None,
 ):
     """``series`` is a list of ``(x, y, label)``. ``y`` may be 1-D or 2-D (along)."""
-    import matplotlib.pyplot as plt
-
     apply_style_then_rc(spec or {}, chart="line", fontsize=fontsize, template=template)
     n = len(series)
     kinds = kinds or ["line"] * n
@@ -135,20 +278,16 @@ def compile_lines(
     ylabels = ylabels or [""] * n
     if figsize is not None:
         fig_w, fig_h = float(figsize[0]), float(figsize[1])
-        tight = False
     elif subplots:
         fig_w, fig_h = 10.0, max(2.8 * n, 4.0)
-        tight = True
     else:
         fig_w, fig_h = 10.0, 6.0
-        tight = True
     if subplots:
-        fig, axes = plt.subplots(
-            n, 1, sharex=True, figsize=(fig_w, fig_h), squeeze=False, layout="constrained"
+        fig, axes = facet_figure(
+            n, 1, figsize=(fig_w, fig_h), sharex=True, despine=True
         )
     else:
-        fig, ax = plt.subplots(figsize=(fig_w, fig_h), layout="constrained")
-        axes = np.array([[ax]])
+        fig, axes = facet_figure(1, 1, figsize=(fig_w, fig_h), despine=True)
     along_modes = [
         parse_along_color(
             style.get("along_color") or (trace_at(spec, i).get("along_color") if spec else None)
@@ -214,7 +353,8 @@ def compile_lines(
                 zorder=float(style.get("zorder") or 1),
                 label="_nolegend_",
             )
-            plot_ax.plot(
+            _sns_line(
+                plot_ax,
                 xplot,
                 mean,
                 **{
@@ -258,15 +398,16 @@ def compile_lines(
                         bottom = stack_bottom.get(ax_i)
                         if bottom is None or len(bottom) != len(yy):
                             bottom = np.zeros(len(yy), dtype=float)
-                        plot_ax.bar(
+                        _sns_bars(
+                            plot_ax,
                             xnum,
                             yy,
+                            bottom=bottom,
                             **{
                                 "color": member_color,
                                 "label": name,
                                 "alpha": alpha,
                                 "width": width,
-                                "bottom": bottom,
                                 **bar_kw,
                             },
                         )
@@ -280,7 +421,8 @@ def compile_lines(
                             else (0.8 * unit) / n_bar
                         )
                         offset = (slot - (n_bar - 1) / 2.0) * width
-                        plot_ax.bar(
+                        _sns_bars(
+                            plot_ax,
                             xnum + offset,
                             yy,
                             **{
@@ -293,7 +435,8 @@ def compile_lines(
                         )
                     else:
                         width = float(user_width) if user_width is not None else 0.8 * unit
-                        plot_ax.bar(
+                        _sns_bars(
+                            plot_ax,
                             xnum,
                             yy,
                             **{
@@ -305,7 +448,8 @@ def compile_lines(
                             },
                         )
                 else:
-                    plot_ax.plot(
+                    _sns_line(
+                        plot_ax,
                         xplot,
                         yy,
                         **{
@@ -338,9 +482,10 @@ def compile_lines(
         )
     apply_suptitle(fig, title, spec)
     finish_figure(fig, spec or {}, axes)
+    settle_figure(fig)
     from weather_skills_core.plot.figure import CompiledFigure
 
-    return CompiledFigure(fig, spec or {}, tight=tight)
+    return CompiledFigure(fig, spec or {}, tight=False)
 
 
 def compile_mediogram(
@@ -357,71 +502,47 @@ def compile_mediogram(
     spec=None,
 ):
     """ECMWF-style two-layer boxes: forecast (cyan) vs m-climate (red)."""
-    import matplotlib.pyplot as plt
-
     apply_style_then_rc(spec or {}, chart="line", fontsize=fontsize, template=template)
     opts = trace_at(spec).get("mediogram") or {}
     n_steps = fc.shape[1]
     if figsize is not None:
         fig_w, fig_h = float(figsize[0]), float(figsize[1])
-        tight = False
     else:
         fig_w, fig_h = 10.0, 5.0
-        tight = True
-    fig, ax = plt.subplots(figsize=(fig_w, fig_h), layout="constrained")
+    fig, axes = facet_figure(1, 1, figsize=(fig_w, fig_h), despine=True)
+    ax = axes[0, 0]
     width = float(opts.get("width", 0.35))
     positions = np.arange(n_steps)
-    bp_fc = ax.boxplot(
-        [np.asarray(fc[:, i], dtype=float) for i in range(n_steps)],
-        positions=positions - width / 2,
-        widths=width * 0.9,
-        patch_artist=True,
-        manage_ticks=False,
-    )
-    bp_mc = ax.boxplot(
-        [np.asarray(mc[:, i], dtype=float) for i in range(n_steps)],
-        positions=positions + width / 2,
-        widths=width * 0.9,
-        patch_artist=True,
-        manage_ticks=False,
-    )
     fc_style = {"facecolor": "cyan", "edgecolor": "black", **box_kwargs(opts.get("forecast") or {})}
     mc_style = {"facecolor": "red", "edgecolor": "black", **box_kwargs(opts.get("mclimate") or {})}
-    for patch in bp_fc["boxes"]:
-        patch.set_facecolor(fc_style.get("facecolor", "cyan"))
-        patch.set_edgecolor(fc_style.get("edgecolor", "black"))
-        if fc_style.get("linewidth") is not None:
-            patch.set_linewidth(fc_style["linewidth"])
-        if fc_style.get("alpha") is not None:
-            patch.set_alpha(fc_style["alpha"])
-        if fc_style.get("linestyle") is not None:
-            patch.set_linestyle(fc_style["linestyle"])
-        if fc_style.get("hatch") is not None:
-            patch.set_hatch(fc_style["hatch"])
-        if fc_style.get("zorder") is not None:
-            patch.set_zorder(fc_style["zorder"])
-    for patch in bp_mc["boxes"]:
-        patch.set_facecolor(mc_style.get("facecolor", "red"))
-        patch.set_edgecolor(mc_style.get("edgecolor", "black"))
-        if mc_style.get("linewidth") is not None:
-            patch.set_linewidth(mc_style["linewidth"])
-        if mc_style.get("alpha") is not None:
-            patch.set_alpha(mc_style["alpha"])
-        if mc_style.get("linestyle") is not None:
-            patch.set_linestyle(mc_style["linestyle"])
-        if mc_style.get("hatch") is not None:
-            patch.set_hatch(mc_style["hatch"])
-        if mc_style.get("zorder") is not None:
-            patch.set_zorder(mc_style["zorder"])
-    bp_fc["boxes"][0].set_label("forecast")
-    bp_mc["boxes"][0].set_label("m-climate")
+    box_width = width * 0.9
+    fc_patches = _sns_boxes(
+        ax,
+        [np.asarray(fc[:, i], dtype=float) for i in range(n_steps)],
+        positions - width / 2,
+        width=box_width,
+        color=fc_style.get("facecolor", "cyan"),
+    )
+    mc_patches = _sns_boxes(
+        ax,
+        [np.asarray(mc[:, i], dtype=float) for i in range(n_steps)],
+        positions + width / 2,
+        width=box_width,
+        color=mc_style.get("facecolor", "red"),
+    )
+    _style_box_patches(fc_patches, fc_style)
+    _style_box_patches(mc_patches, mc_style)
+    if fc_patches:
+        fc_patches[0].set_label("forecast")
+    if mc_patches:
+        mc_patches[0].set_label("m-climate")
     mean_kw = {
         "color": "black",
         "linewidth": 1.5,
         "label": "forecast mean",
         **line_kwargs(opts.get("mean") or {}, loc="mediogram.mean"),
     }
-    ax.plot(positions, np.mean(fc, axis=0), **mean_kw)
+    _sns_line(ax, positions, np.mean(fc, axis=0), **mean_kw)
     ax.set_xticks(positions)
     ax.set_xticklabels(list(tick_labels), rotation=30, ha="right")
     ax.set_xlabel(xlabel)
@@ -442,9 +563,10 @@ def compile_mediogram(
         ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.18), ncol=3)
     apply_suptitle(fig, title, spec)
     finish_figure(fig, spec or {}, ax)
+    settle_figure(fig)
     from weather_skills_core.plot.figure import CompiledFigure
 
-    return CompiledFigure(fig, spec or {}, tight=tight)
+    return CompiledFigure(fig, spec or {}, tight=False)
 
 
 def _prepare_field(ds, spec_input: dict, geo: dict, style: str):
@@ -550,8 +672,6 @@ def as_plot_x(values):
 
 
 def _compile_timeseries(prepared, spec, fontsize, *, template="weather_skills"):
-    import matplotlib.pyplot as plt
-
     apply_style_then_rc(spec, chart="line", fontsize=fontsize, template=template)
     da = prepared["da"]
     sdim = prepared["sdim"]
@@ -581,7 +701,8 @@ def _compile_timeseries(prepared, spec, fontsize, *, template="weather_skills"):
         xlabel = resolve_axis_label(xlabel, default_xlabel)
     ylabel = resolve_axis_label(spec.get("ylabel"), variable_label_for_display(da))
     figsize = spec.get("layout", {}).get("figsize") or (10.0, 5.0)
-    fig, ax = plt.subplots(figsize=tuple(figsize), layout="constrained")
+    fig, axes = facet_figure(1, 1, figsize=tuple(figsize), despine=True)
+    ax = axes[0, 0]
     xplot = as_plot_x(xvals)
     yarr = np.asarray(da.values, dtype=float)
     band = parse_band(prepared.get("band"))
@@ -607,7 +728,7 @@ def _compile_timeseries(prepared, spec, fontsize, *, template="weather_skills"):
         high = np.nanpercentile(yarr, band[1], axis=1)
         mean = np.nanmean(yarr, axis=1)
         ax.fill_between(xplot, low, high, **fill_kw)
-        ax.plot(xplot, mean, **{"color": color, "linewidth": 2, "label": qty, "zorder": 3, **lk})
+        _sns_line(ax, xplot, mean, **{"color": color, "linewidth": 2, "label": qty, "zorder": 3, **lk})
     elif yarr.ndim == 2:
         for j in range(yarr.shape[1]):
             member = along_labels[j] if j < len(along_labels) else str(j)
@@ -621,9 +742,10 @@ def _compile_timeseries(prepared, spec, fontsize, *, template="weather_skills"):
                 line_kw["color"] = f"C{j % 10}"
             else:
                 line_kw["color"] = color
-            ax.plot(xplot, yarr[:, j], **line_kw)
+            _sns_line(ax, xplot, yarr[:, j], **line_kw)
     else:
-        ax.plot(
+        _sns_line(
+            ax,
             xplot,
             yarr,
             **{
@@ -646,13 +768,10 @@ def _compile_timeseries(prepared, spec, fontsize, *, template="weather_skills"):
         loc = legend if isinstance(legend, str) else None
         ax.legend(**({"loc": loc} if loc and loc not in ("on", "true", "yes") else {}))
     apply_suptitle(fig, spec.get("title") or f"{qty} (timeseries)", spec)
-    tight = (
-        spec.get("layout", {}).get("autosize", True)
-        and spec.get("layout", {}).get("figsize") is None
-    )
+    settle_figure(fig)
     from weather_skills_core.plot.figure import CompiledFigure
 
-    return CompiledFigure(fig, spec, tight=tight)
+    return CompiledFigure(fig, spec, tight=False)
 
 
 def compile_timeseries(spec: dict, datasets: dict, *, fontsize, template="weather_skills"):
@@ -796,9 +915,6 @@ def _plot_xy(
     figsize=None,
 ):
     """Scatter --x against --y after reducing each input to 1D and pairing samples."""
-    import matplotlib.pyplot as plt
-    import numpy as np
-
     region_polygon = polygon_from_geojson(mask_geojson) if mask_geojson else None
     x_da, x_axis, x_raw = _xy_1d(x_ds, x_variable, overrides, bbox_nwse, region_polygon, "--x")
     y_da, y_axis, y_raw = _xy_1d(y_ds, y_variable, overrides, bbox_nwse, region_polygon, "--y")
@@ -809,11 +925,11 @@ def _plot_xy(
     if x_vals.size == 0:
         raise UsageError("xy scatter has no finite paired samples to plot.")
 
-    fig, ax = plt.subplots(
-        figsize=resolve_figsize(figsize, (8, 6)),
-        layout="constrained",
+    fig, axes = facet_figure(
+        1, 1, figsize=resolve_figsize(figsize, (8, 6)), despine=True
     )
-    ax.scatter(x_vals, y_vals, s=36, zorder=3)
+    ax = axes[0, 0]
+    _sns_scatter(ax, x_vals, y_vals, s=36, zorder=3)
     if pair_on == "year" or (pair_on == "time" and x_vals.size <= 25):
         for xv, yv, key in zip(x_vals, y_vals, keys, strict=True):
             ax.annotate(
@@ -827,8 +943,9 @@ def _plot_xy(
     ax.set_ylabel(resolve_axis_label(ylabel, _variable_label(y_da)))
     x_qty = variable_label_for_display(x_da, include_units=False)
     y_qty = variable_label_for_display(y_da, include_units=False)
-    ax.set_title(title or f"{y_qty} vs {x_qty}")
+    ax.set_title(wrap_axes_title(ax, title or f"{y_qty} vs {x_qty}"))
     ax.grid(True, alpha=0.3)
+    settle_figure(fig)
     return fig
 
 
@@ -933,8 +1050,6 @@ def _windrose(
     mpl_spec=None,
 ):
     """Polar stacked-bar wind rose; radial axis is frequency percent."""
-    import matplotlib.pyplot as plt
-    import numpy as np
     from matplotlib.patches import Patch
 
     wr = windrose_kwargs(trace_at(mpl_spec))
@@ -959,8 +1074,14 @@ def _windrose(
     legend_labels = [f"{lab}{unit_suffix}" for lab in _speed_bin_labels(speed_edges)]
     width = 2.0 * np.pi / nsector
     theta = np.arange(nsector) * width
-    fig = plt.figure(figsize=resolve_figsize(figsize, (8.5, 7.0)), layout="constrained")
-    ax = fig.add_subplot(111, projection="polar")
+    fig, axes = facet_figure(
+        1,
+        1,
+        figsize=resolve_figsize(figsize, (8.5, 7.0)),
+        subplot_kws={"projection": "polar"},
+        despine=False,
+    )
+    ax = axes[0, 0]
     ax.set_theta_zero_location(str(theta_zero))
     ax.set_theta_direction(theta_dir)
     bottom = np.zeros(nsector)
@@ -989,6 +1110,7 @@ def _windrose(
     ]
     _place_legend(ax, legend, default="outside right", handles=handles, title="Wind speed")
     apply_suptitle(fig, title, mpl_spec)
+    settle_figure(fig)
     return fig
 
 
@@ -1133,9 +1255,7 @@ def compile_xy(spec: dict, datasets: dict, *, fontsize, template="weather_skills
         fontsize,
         figsize=(spec.get("layout") or {}).get("figsize"),
     )
-    layout = spec.get("layout") or {}
-    tight = layout.get("autosize", True) and layout.get("figsize") is None
-    return CompiledFigure(fig, spec, tight=tight)
+    return CompiledFigure(fig, spec, tight=False)
 
 
 def compile_windrose(spec: dict, datasets: dict, *, fontsize, template="weather_skills"):
@@ -1179,6 +1299,4 @@ def compile_windrose(spec: dict, datasets: dict, *, fontsize, template="weather_
         ylabel=spec.get("ylabel"),
         mpl_spec=spec,
     )
-    layout = spec.get("layout") or {}
-    tight = layout.get("autosize", True) and layout.get("figsize") is None
-    return CompiledFigure(fig, spec, tight=tight)
+    return CompiledFigure(fig, spec, tight=False)

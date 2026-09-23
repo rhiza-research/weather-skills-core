@@ -22,6 +22,7 @@ from weather_skills_core.plot.figure import (
     apply_style_then_rc,
     apply_suptitle,
     colorbar_mpl_kwargs,
+    facet_figure,
     finish_figure,
     format_plot_date,
     format_plot_date_range,
@@ -30,6 +31,8 @@ from weather_skills_core.plot.figure import (
     resolve_axis_label,
     resolve_figsize,
     scatter_kwargs,
+    settle_figure,
+    wrap_axes_title,
 )
 from weather_skills_core.plot.spec import (
     apply_index,
@@ -351,15 +354,6 @@ def _figsize_with_spacing(size, nrows, ncols, spacing):
     if hspace and nrows > 1:
         height *= 1.0 + hspace * (nrows - 1) / nrows
     return width, height
-
-
-def _apply_subplot_spacing(fig, spacing):
-    """Set GridSpec gaps. A missing side stays tight (0) rather than matplotlib 0.2."""
-    wspace, hspace = spacing
-    fig.subplots_adjust(
-        wspace=0.0 if wspace is None else wspace,
-        hspace=0.0 if hspace is None else hspace,
-    )
 
 
 def subset_spatial(da, lat_dim, lon_dim, bbox_nwse, region_polygon, extent_vals):
@@ -1006,10 +1000,9 @@ def _resolve_subplot_titles(overrides, n_panels):
 
 def _set_panel_title(ax, index, auto, subplot_titles):
     """Apply ``--subplot-title`` when given for this panel; otherwise ``auto``."""
-    if index < len(subplot_titles):
-        ax.set_title(subplot_titles[index])
-    elif auto:
-        ax.set_title(auto)
+    text = subplot_titles[index] if index < len(subplot_titles) else auto
+    if text:
+        ax.set_title(wrap_axes_title(ax, text))
 
 
 def _apply_geo_axis_labels(ax, xlabel, ylabel, *, xlabel_on=True, ylabel_on=True):
@@ -1831,7 +1824,6 @@ def _plot_layers(
     line-chart theme by mistake.
     """
     import cartopy.crs as ccrs
-    import matplotlib.pyplot as plt
 
     from weather_skills_core.plot.figure import apply_style_then_rc
 
@@ -1985,17 +1977,17 @@ def _plot_layers(
     default_size = (sw * ncols, sh * nrows)
     if spacing is not None and figsize is None:
         default_size = _figsize_with_spacing(default_size, nrows, ncols, spacing)
-    fig, axes = plt.subplots(
+    fig, axes = facet_figure(
         nrows,
         ncols,
         figsize=resolve_figsize(figsize, default_size),
         sharex=True,
         sharey=True,
-        subplot_kw={"projection": ccrs.PlateCarree()},
-        layout=None if spacing is not None else "compressed",
+        subplot_kws={"projection": ccrs.PlateCarree()},
+        wspace=None if spacing is None else spacing[0],
+        hspace=None if spacing is None else spacing[1],
+        despine=False,
     )
-    if spacing is not None:
-        _apply_subplot_spacing(fig, spacing)
     axes = np.array(axes).reshape(nrows, ncols).flatten()
     drawn = {
         "rows": nrows,
@@ -2137,6 +2129,7 @@ def _plot_layers(
             and "ticks" not in size_kw
         ):
             cbar.set_ticklabels(p["flag_labels"])
+    settle_figure(fig)
     return fig, drawn
 
 
@@ -2259,9 +2252,7 @@ def compile_map(spec: dict, datasets: dict, *, fontsize, template="weather_skill
     fig, drawn = compile_map_figure(
         spec, datasets, fontsize=fontsize, template=template, registry=registry
     )
-    layout = spec.get("layout") or {}
-    tight = layout.get("autosize", True) and layout.get("figsize") is None
-    return CompiledFigure(fig, spec, tight=tight, map_drawn=drawn)
+    return CompiledFigure(fig, spec, tight=False, map_drawn=drawn)
 
 
 def compile_map_figure(
@@ -2478,8 +2469,6 @@ def compile_grid(
     ``{"kind": "blank", "text": "n/a"}``.
     ``scales`` maps scale id → dict from ``resolve_colorscale``.
     """
-    import matplotlib.pyplot as plt
-
     apply_style_then_rc(spec or {}, chart="map", fontsize=fontsize, template=template)
     trace = trace_at(spec)
     nrows = len(cells)
@@ -2492,21 +2481,18 @@ def compile_grid(
     spacing = _facet_spacing(facet.get("wspace"), facet.get("hspace"))
     if figsize is not None:
         fig_w, fig_h = float(figsize[0]), float(figsize[1])
-        tight = False
     else:
         fig_w, fig_h = max(sw * ncols, 6.0), max(sh * nrows, 4.0)
         if spacing is not None:
             fig_w, fig_h = _figsize_with_spacing((fig_w, fig_h), nrows, ncols, spacing)
-        tight = True
-    fig, axes = plt.subplots(
+    fig, axes = facet_figure(
         nrows,
         ncols,
         figsize=(fig_w, fig_h),
-        squeeze=False,
-        layout=None if spacing is not None else "constrained",
+        wspace=None if spacing is None else spacing[0],
+        hspace=None if spacing is None else spacing[1],
+        despine=False,
     )
-    if spacing is not None:
-        _apply_subplot_spacing(fig, spacing)
     mappables = {}
     for r, row in enumerate(cells):
         for c in range(ncols):
@@ -2523,7 +2509,7 @@ def compile_grid(
                 ax.set_ylim(extent[2], extent[3])
                 ax.set_aspect("equal", adjustable="box")
             if r == 0 and col_titles and c < len(col_titles):
-                ax.set_title(col_titles[c])
+                ax.set_title(wrap_axes_title(ax, col_titles[c]))
             if r == nrows - 1:
                 ax.set_xlabel(xlabel)
             if c == 0 and row_titles and r < len(row_titles):
@@ -2617,6 +2603,7 @@ def compile_grid(
             cbar.set_ticklabels(list(scale["ticktext"]))
     apply_suptitle(fig, title, spec)
     finish_figure(fig, spec or {}, axes)
+    settle_figure(fig)
     from weather_skills_core.plot.figure import CompiledFigure
 
-    return CompiledFigure(fig, spec or {}, tight=tight)
+    return CompiledFigure(fig, spec or {}, tight=False)

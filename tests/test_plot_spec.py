@@ -883,7 +883,7 @@ def test_compile_heatmap_facet_spacing_separates_panels():
     gap_spaced = right_s.get_position().x0 - left_s.get_position().x1
     assert resolved["layout"]["facet"]["wspace"] == 0.45
     assert gap_spaced > gap_tight + 0.03
-    assert fig_spaced.get_layout_engine() is None
+    assert fig_spaced._ws_facet_spacing[0] == 0.45
 
 
 def test_normalize_spec_rejects_negative_facet_spacing():
@@ -1063,7 +1063,7 @@ def test_compile_grid_facet_spacing_separates_columns():
     left_s, right_s = _visible_map_axes(fig_spaced)[:2]
     gap_spaced = right_s.get_position().x0 - left_s.get_position().x1
     assert gap_spaced > gap_tight + 0.03
-    assert fig_spaced.get_layout_engine() is None
+    assert fig_spaced._ws_facet_spacing[0] == 0.45
 
 
 def test_compile_heatmap_grid_blank_and_heatmap():
