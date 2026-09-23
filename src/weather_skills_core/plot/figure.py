@@ -772,6 +772,7 @@ QUIVER_KEYS = frozenset(
         "pivot",
         "scale",
         "scale_units",
+        "step",
         "units",
         "width",
         "zorder",
@@ -1588,7 +1589,8 @@ def contour_kwargs(trace: dict | None) -> dict:
 
 
 def quiver_kwargs(trace: dict | None) -> dict:
-    raw = (trace or {}).get("quiver") or {}
+    raw = dict((trace or {}).get("quiver") or {})
+    raw.pop("step", None)
     return pick(raw, QUIVER_KEYS, loc="traces[].quiver") if raw else {}
 
 

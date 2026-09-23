@@ -366,16 +366,18 @@ def parse_band(value) -> tuple[float, float] | None:
             value = q
     if isinstance(value, (list, tuple)):
         if len(value) != 2:
-            raise UsageError("--band must be two percentiles, e.g. 10,90")
+            raise UsageError("traces[].band must be two percentiles, e.g. [10, 90]")
         lo, hi = float(value[0]), float(value[1])
     else:
         raw = str(value).strip().lower().replace("q", "")
         parts = [p.strip() for p in raw.split(",") if p.strip()]
         if len(parts) != 2:
-            raise UsageError("--band must be two percentiles, e.g. 10,90")
+            raise UsageError("traces[].band must be two percentiles, e.g. [10, 90]")
         lo, hi = float(parts[0]), float(parts[1])
     if not 0 <= lo < hi <= 100:
-        raise UsageError(f"--band percentiles must satisfy 0 ≤ low < high ≤ 100; got {lo},{hi}")
+        raise UsageError(
+            f"traces[].band percentiles must satisfy 0 ≤ low < high ≤ 100; got {lo},{hi}"
+        )
     return (lo, hi)
 
 

@@ -249,9 +249,9 @@ def require_reduced_or_along(da, time_dim, *, along=None, reduce=None):
     if extras:
         hint = extras[0]
         raise UsageError(
-            f"variable still has non-time dims {extras}. Pass --reduce "
-            f"(traces[].reduce) for each leftover dim, or --along {hint} "
-            f"(traces[].along) to draw one line per {hint} value."
+            f"variable still has non-time dims {extras}. Set traces[].reduce "
+            f"for each leftover dim, or traces[].along {hint!r} "
+            f"to draw one line per {hint} value."
         )
     return da
 
@@ -806,7 +806,7 @@ def _calendar_year(value) -> int:
     arr = np.asarray(value)
     if arr.dtype.kind == "M":
         return int(arr.astype("datetime64[Y]").astype(int) + 1970)
-    raise UsageError(f"--pair-on year needs datetime samples; got {value!r}")
+    raise UsageError(f"traces[].pair_on year needs datetime samples; got {value!r}")
 
 
 def _pair_key(value, pair_on: str):
@@ -867,7 +867,7 @@ def _pair_xy(x_axis, x_vals, y_axis, y_vals, pair_on: str):
     if pair_on == "index":
         if x_vals.size != y_vals.size:
             raise UsageError(
-                f"--pair-on index needs the same number of samples "
+                f"traces[].pair_on index needs the same number of samples "
                 f"(--x has {x_vals.size}, --y has {y_vals.size})."
             )
         keys = list(range(x_vals.size))
@@ -879,7 +879,7 @@ def _pair_xy(x_axis, x_vals, y_axis, y_vals, pair_on: str):
     for i, key in enumerate(x_keys):
         if key in x_map:
             raise UsageError(
-                f"--pair-on {pair_on} has duplicate {key!r} on --x; "
+                f"traces[].pair_on {pair_on} has duplicate {key!r} on --x; "
                 "aggregate or select so each key appears once."
             )
         x_map[key] = i
@@ -887,13 +887,13 @@ def _pair_xy(x_axis, x_vals, y_axis, y_vals, pair_on: str):
     for i, key in enumerate(y_keys):
         if key in y_map:
             raise UsageError(
-                f"--pair-on {pair_on} has duplicate {key!r} on --y; "
+                f"traces[].pair_on {pair_on} has duplicate {key!r} on --y; "
                 "aggregate or select so each key appears once."
             )
         y_map[key] = i
     shared = [key for key in x_keys if key in y_map]
     if not shared:
-        raise UsageError(f"--pair-on {pair_on} found no matching samples between --x and --y.")
+        raise UsageError(f"traces[].pair_on {pair_on} found no matching samples between --x and --y.")
     x_out = np.array([x_vals[x_map[k]] for k in shared], dtype=float)
     y_out = np.array([y_vals[y_map[k]] for k in shared], dtype=float)
     return x_out, y_out, shared
@@ -1135,8 +1135,8 @@ def _plot_windrose(
 
     if variable:
         print(
-            "Warning: --variable is ignored for --kind windrose; "
-            "use --u-variable/--v-variable or auto-detection.",
+            "Warning: inputs[].variable is ignored for kind windrose; "
+            "set traces[].u_variable and traces[].v_variable, or rely on auto-detection.",
             file=sys.stderr,
         )
     u_name, v_name = _resolve_uv(ds, u_variable, v_variable)
@@ -1150,7 +1150,7 @@ def _plot_windrose(
         raise UsageError(
             f"dimension {extra[0]!r} remains after selection; windrose "
             "flattens space/time/ensemble into samples — select a position "
-            f"from {extra[0]!r} with --index"
+            f"from {extra[0]!r} with inputs[].index"
         )
     region_polygon = polygon_from_geojson(mask_geojson) if mask_geojson else None
     if bbox_nwse is not None or region_polygon is not None:
