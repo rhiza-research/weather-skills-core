@@ -709,14 +709,21 @@ def _parse_layer_options(blob):
 
 
 def parse_layer(value):
-    """Argparse converter for ``KIND:PATH`` or ``KIND:PATH::k=v[,k=v...]``."""
+    """Argparse converter for ``KIND:PATH``.
+
+    Layer options belong on ``layers[]`` in ``--spec``, not a ``::k=v`` suffix.
+    """
     if not value or not str(value).strip():
         raise argparse.ArgumentTypeError("--layer spec is empty")
     raw = str(value).strip()
     if "::" in raw:
-        head, _, opt_blob = raw.partition("::")
-    else:
-        head, opt_blob = raw, ""
+        head, _, _opt_blob = raw.partition("::")
+        raise argparse.ArgumentTypeError(
+            f"--layer {raw!r} cannot take ::k=v options. "
+            f"Pass --layer {head} and set those keys on layers[] in --spec, "
+            'e.g. --spec \'{"layers": [{"id": "a", "colormap": "RdBu_r"}]}\'.'
+        )
+    head, opt_blob = raw, ""
     if ":" not in head:
         raise argparse.ArgumentTypeError(
             f"--layer {raw!r} must be KIND:PATH (e.g. heatmap:/tmp/a.zarr)"
@@ -2157,10 +2164,10 @@ MAP_STYLES = frozenset(KIND_TO_LAYER) | {"layer"}
 def _inherit_layer_options(options: dict, spec: dict, spec_input: dict | None = None) -> dict:
     """Fill omitted layer knobs from figure-level ``theme.colormap`` / vmin / vmax.
 
-    A ``::colormap=`` / ``::vmin=`` suffix on ``--layer`` still wins. Same
-    defaults a single-input ``--kind heatmap`` already copies onto its
-    synthetic layer — without this, ``--layer heatmap:… --colormap RdBu_r``
-    dropped the palette and fell through to ``rocket``.
+    Keys already set on the layer (from ``layers[]`` in ``--spec``) win.
+    Same defaults a single-input heatmap already copies onto its synthetic
+    layer — without this, a figure-level ``theme.colormap`` was dropped and
+    the layer fell through to ``rocket``.
     """
     spec_input = spec_input or {}
     out = dict(options)

@@ -267,10 +267,10 @@ for the full units contract.
 Install the `[plot]` extra (matplotlib, seaborn, cartopy). The public names
 are `PlotSpec`, `load_spec`, `dump_spec`, `compile`, and `export`. Matplotlib
 does not load on `import weather_skills_core.plot`. The spec must not open
-files; pass already-opened Datasets into `compile`. Figure skills take the
-same knobs as CLI flags or as `--spec` JSON (`FLAG_TO_SPEC` is the bridge; a
-set flag overlays the spec). `--dump-spec -` dumps the assembled spec as
-JSON and skips the PNG (`-o` is not required); `--patch` submits edits.
+files; pass already-opened Datasets into `compile`. Figure skills name
+files on the command line and take every other knob in `--spec`, which is
+deep-merged onto the spec built from those files. `--dump-spec -` writes
+that merge and skips the PNG.
 No `*.plot.json` sidecar is written.
 
 ```python

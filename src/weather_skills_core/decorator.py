@@ -73,6 +73,14 @@ class Argument:
         return flag.lstrip("-").replace("-", "_")
 
 
+def _history_json_default(obj):
+    """Keep a plot spec's keys in provenance instead of stringifying the object."""
+    to_dict = getattr(obj, "to_dict", None)
+    if callable(to_dict):
+        return to_dict()
+    return str(obj)
+
+
 def build_history(name, version, args, params, input_paths, upstream, strip_dests, revision=None):
     """Record this skill as a node on the provenance DAG.
 
@@ -86,7 +94,7 @@ def build_history(name, version, args, params, input_paths, upstream, strip_dest
     for dest in ("date", "start_time", "end_time"):
         if dest in params and params[dest] is not None:
             entry_args[dest] = params[dest].isoformat()
-    entry_args = json.loads(json.dumps(entry_args, default=str))
+    entry_args = json.loads(json.dumps(entry_args, default=_history_json_default))
 
     if not input_paths:
         input_field, base_history = None, []
@@ -353,6 +361,10 @@ def weather_skill(
                     kwargs, standard_args.STANDARD_HELP[arg.dest]
                 )
             parser.add_argument(*arg.option_strings, **kwargs)
+
+        from weather_skills_core.plot.spec import patch_parser_for_spec_flags
+
+        patch_parser_for_spec_flags(parser)
 
         strip_dests = {arg.dest for arg in arguments if arg.dataset_type is not None} | {"output"}
 

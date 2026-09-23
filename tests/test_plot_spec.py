@@ -70,7 +70,7 @@ def test_normalize_spec_reports_where_a_relocated_key_moved():
     from weather_skills_core.plot.spec import normalize_spec
 
     for bad, expected in [
-        ({"patch": {"title": "x"}}, "pass --patch"),
+        ({"patch": {"title": "x"}}, "pass them on --spec"),
         ({"layered": True}, "traces\\[0\\].kind"),
         ({"rc": {"axes.grid": False}}, "theme.rc"),
         ({"mesh": {"alpha": 0.4}}, r"traces\[\].mesh"),
@@ -374,6 +374,39 @@ def test_overlay_spec_empty_layer_patch_is_noop():
 def test_overlay_spec_keeps_pending_layers_when_base_has_none():
     out = overlay_spec({}, {"layers": [{"id": "a", "colormap": "RdBu_r"}]})
     assert out["layers"] == [{"id": "a", "colormap": "RdBu_r"}]
+
+
+def test_overlay_spec_merges_inputs_and_traces_without_wiping():
+    from weather_skills_core import UsageError
+
+    base = {
+        "inputs": [{"id": "a", "path": "a.zarr"}, {"id": "b", "path": "b.zarr"}],
+        "traces": [{"kind": "heatmap", "input": "a", "mark": "line"}],
+    }
+    out = overlay_spec(
+        base,
+        {
+            "inputs": [{"variable": "tp"}],
+            "traces": [{"kind": "contour"}],
+        },
+    )
+    assert out["inputs"][0] == {"id": "a", "path": "a.zarr", "variable": "tp"}
+    assert out["inputs"][1]["path"] == "b.zarr"
+    assert out["traces"][0] == {"kind": "contour", "input": "a", "mark": "line"}
+    assert overlay_spec(base, {"inputs": [], "traces": []})["traces"][0]["kind"] == "heatmap"
+    with pytest.raises(UsageError, match="does not match"):
+        overlay_spec(base, {"inputs": [{"id": "z", "variable": "tp"}]})
+    with pytest.raises(UsageError, match="does not match"):
+        overlay_spec(base, {"traces": [{"input": "missing", "kind": "xy"}]})
+
+
+def test_hint_moved_plot_flags_names_spec():
+    from weather_skills_core.plot.spec import hint_moved_plot_flags
+
+    text = hint_moved_plot_flags("unrecognized arguments: --title --patch")
+    assert "--spec" in text
+    assert "--title → title" in text
+    assert "--patch → --spec" in text
 
 
 def test_merge_layer_lists_index_fallback_and_unknown_id():

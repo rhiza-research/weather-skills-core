@@ -112,6 +112,7 @@ TRACE_KEYS = (
             "kind",
             "input",
             "mark",
+            "time_dim",
             "x",
             "y",
             "path",
@@ -160,7 +161,7 @@ _SECTIONS = {
 # in the error is the whole point: an agent editing a dumped spec gets told
 # where the knob moved instead of watching its edit silently do nothing.
 RELOCATED = {
-    "patch": "merge your edits into the spec itself (or pass --patch on the CLI)",
+    "patch": "merge your edits into the spec itself (pass them on --spec)",
     "style": "theme",
     "layered": "traces[0].kind = 'layer'",
     "rc": "theme.rc",
@@ -689,21 +690,81 @@ def facet_with_spacing(spec: dict | None, **dims) -> dict:
     return facet
 
 
-def _layer_id(item: dict | None) -> str | None:
-    """Stable layer id: explicit ``id``, else ``input``."""
+def _object_id(item: dict | None, keys: tuple[str, ...]) -> str | None:
+    """First non-empty id field on an object, in ``keys`` order."""
     if not isinstance(item, dict):
         return None
-    for key in ("id", "input"):
+    for key in keys:
         raw = item.get(key)
         if raw is not None and str(raw).strip() != "":
             return str(raw)
     return None
 
 
+def _layer_id(item: dict | None) -> str | None:
+    """Stable layer id: explicit ``id``, else ``input``."""
+    return _object_id(item, ("id", "input"))
+
+
+def merge_object_lists(base, overlay, *, id_keys: tuple[str, ...], label: str) -> list:
+    """Merge ``overlay`` objects onto ``base`` by id, else by index.
+
+    Overlay keys win. Unknown ids error (they do not append a half-built
+    entry). An empty overlay leaves ``base`` unchanged. When ``base`` is
+    empty, ``overlay`` is kept as-is.
+    """
+    if overlay is None:
+        return copy.deepcopy(list(base or []))
+    if not isinstance(overlay, list):
+        raise UsageError(f"plot spec {label} must be a list of objects")
+    if not overlay:
+        return copy.deepcopy(list(base or []))
+    if not base:
+        return [copy.deepcopy(item) if isinstance(item, dict) else item for item in overlay]
+    out = [copy.deepcopy(item) if isinstance(item, dict) else item for item in base]
+    used_indexes: set[int] = set()
+
+    def ids_on(items):
+        found = []
+        for item in items:
+            ident = _object_id(item, id_keys) if isinstance(item, dict) else None
+            if ident is not None:
+                found.append(ident)
+        return found
+
+    for item in overlay:
+        if not isinstance(item, dict):
+            raise UsageError(f"plot spec {label} entries must be objects")
+        ident = _object_id(item, id_keys)
+        if ident is not None:
+            matches = [
+                i
+                for i, current in enumerate(out)
+                if isinstance(current, dict) and _object_id(current, id_keys) == ident
+            ]
+            if len(matches) > 1:
+                raise UsageError(f"{label} id {ident!r} is not unique")
+            if not matches:
+                known = ids_on(out)
+                have = ", ".join(known) if known else "none"
+                raise UsageError(
+                    f"--spec {label} id {ident!r} does not match an entry (have {have})"
+                )
+            idx = matches[0]
+        else:
+            idx = next((i for i in range(len(out)) if i not in used_indexes), None)
+            if idx is None:
+                raise UsageError(f"--spec {label} has more items than the figure")
+        used_indexes.add(idx)
+        current = out[idx] if isinstance(out[idx], dict) else {}
+        out[idx] = deep_merge(current, item)
+    return out
+
+
 def fold_layer_options(item: dict) -> dict:
     """Renderer bag: ``options`` plus lifted scale knobs and artist blocks.
 
-    Top-level keys win so a ``--patch`` ``colormap`` / ``mesh`` replaces a
+    Top-level keys win so a ``--spec`` ``colormap`` / ``mesh`` replaces a
     leftover ``options`` bag from an older dump.
     """
     out = dict(item.get("options") or {})
@@ -742,74 +803,42 @@ def merge_layer_lists(base, overlay) -> list:
 
     Overlay keys win. Unknown ``id`` values error (they do not append a
     half-built layer). An empty overlay leaves ``base`` unchanged so
-    ``--patch '{"layers": []}'`` cannot wipe the figure.
+    ``--spec '{"layers": []}'`` cannot wipe the figure.
     """
+    return merge_object_lists(base, overlay, id_keys=("id", "input"), label="layers[]")
+
+
+def _merge_named_list(out: dict, key: str, overlay, *, id_keys: tuple[str, ...], label: str) -> None:
+    """Merge one object list onto ``out`` when the overlay set that key."""
     if overlay is None:
-        return copy.deepcopy(list(base or []))
-    if not isinstance(overlay, list):
-        raise UsageError("plot spec layers must be a list of objects")
-    if not overlay:
-        return copy.deepcopy(list(base or []))
-    out = [copy.deepcopy(item) if isinstance(item, dict) else item for item in (base or [])]
-    used_indexes: set[int] = set()
-
-    def ids_on(layers):
-        found = []
-        for item in layers:
-            lid = _layer_id(item) if isinstance(item, dict) else None
-            if lid is not None:
-                found.append(lid)
-        return found
-
-    for item in overlay:
-        if not isinstance(item, dict):
-            raise UsageError("plot spec layers[] entries must be objects")
-        lid = _layer_id(item)
-        idx = None
-        if lid is not None:
-            matches = [
-                i
-                for i, layer in enumerate(out)
-                if isinstance(layer, dict) and _layer_id(layer) == lid
-            ]
-            if len(matches) > 1:
-                raise UsageError(f"layers[] id {lid!r} is not unique")
-            if matches:
-                idx = matches[0]
-            else:
-                known = ids_on(out)
-                have = ", ".join(known) if known else "none"
-                raise UsageError(f"--patch layers[] id {lid!r} does not match a layer (have {have})")
-        else:
-            idx = next((i for i in range(len(out)) if i not in used_indexes), None)
-            if idx is None:
-                raise UsageError("--patch layers[] has more items than the figure")
-        used_indexes.add(idx)
-        current = out[idx] if isinstance(out[idx], dict) else {}
-        out[idx] = deep_merge(current, item)
-    return out
+        return
+    existing = out.get(key) or []
+    if existing:
+        out[key] = merge_object_lists(existing, overlay, id_keys=id_keys, label=label)
+    else:
+        out[key] = list(overlay)
 
 
 def overlay_spec(base: dict, overlay: dict | None) -> dict:
     """Deep-merge ``overlay`` onto ``base`` (overlay wins).
 
-    ``layers[]`` merges by ``id`` (then by index) so a partial
-    ``--patch '{"layers": [{"id": "a", "colormap": "RdBu_r"}]}'`` cannot
-    replace the whole list.
+    ``inputs[]`` merges by ``id``, ``traces[]`` by ``input`` (else ``id``),
+    and ``layers[]`` by ``id`` (else ``input``), then by index. A partial
+    ``--spec '{"traces": [{"kind": "contour"}]}'`` keeps the other trace
+    fields. An empty list does not wipe the figure.
     """
     if not overlay:
-        return copy.deepcopy(base)
+        return copy.deepcopy(base) if base else {}
     if not base:
         base = {}
     overlay = dict(overlay)
-    layer_patch = overlay.pop("layers", None)
+    input_overlay = overlay.pop("inputs", None)
+    trace_overlay = overlay.pop("traces", None)
+    layer_overlay = overlay.pop("layers", None)
     out = deep_merge(base, overlay)
-    if layer_patch is not None:
-        existing = out.get("layers") or []
-        if existing:
-            out["layers"] = merge_layer_lists(existing, layer_patch)
-        else:
-            out["layers"] = list(layer_patch)
+    _merge_named_list(out, "inputs", input_overlay, id_keys=("id",), label="inputs[]")
+    _merge_named_list(out, "traces", trace_overlay, id_keys=("input", "id"), label="traces[]")
+    _merge_named_list(out, "layers", layer_overlay, id_keys=("id", "input"), label="layers[]")
     return out
 
 
@@ -868,6 +897,7 @@ FLAG_TO_SPEC = {
     "colormap_b": ("inputs", 1, "colormap"),
     "kind": ("traces", 0, "kind"),
     "mark": ("traces", 0, "mark"),
+    "time_dim": ("traces", 0, "time_dim"),
     "along": ("traces", 0, "along"),
     "along_color": ("traces", 0, "along_color"),
     "reduce": ("traces", 0, "reduce"),
@@ -1104,24 +1134,15 @@ def spec_inputs_from_datasets(datasets) -> list[dict]:
 
 
 SPEC_ARGUMENT_HELP = (
-    "Plot spec JSON (path or inline). Same knobs as the CLI (--title, --kind, "
-    "--variable, --figsize, --mask-geojson, colormap, layout, …). A first run "
-    "can be flags only. A set CLI flag overlays the spec. Prefer --patch for "
-    "edits; pass --spec only when replaying a dumped object. Inputs listed in "
-    "the spec are opened for provenance; dataset flags are optional when the "
-    "spec has paths."
+    "Plot spec JSON (path or inline), deep-merged onto the spec built from "
+    "the input files. Set title, traces, layout, theme, geo, axes, and the "
+    "other knobs here. inputs[] merges by id, traces[] by input (else id), "
+    "layers[] by id (else index). "
+    'Example: {"title": "Week 1", "traces": [{"kind": "contour"}]}. '
+    "Paths listed in the spec are opened when no dataset flag is passed."
 )
 
-PATCH_ARGUMENT_HELP = (
-    "Partial spec JSON (file or inline) deep-merged onto --spec before CLI "
-    "flags overlay. Same knobs as --spec (title, axes, layout, theme, …). "
-    'layers[] merges by id (else index), so '
-    '{"layers": [{"id": "a", "colormap": "RdBu_r"}]} edits one overlay. '
-    'Example: {"axes": {"xticks": ["2026-08-17", "2026-08-24"]}}.'
-)
-
-# CLI flag → canonical spec path. Hints argparse unknowns at the spec home;
-# skills still declare these flags and overlay them onto --spec.
+# Removed CLI flag → canonical spec path. Unknown flags are hinted at --spec.
 PLOT_CLI_TO_SPEC = {
     "--title": "title",
     "--subplot-title": "subplot_titles",
@@ -1179,6 +1200,8 @@ PLOT_CLI_TO_SPEC = {
     "--independent-scale": "layout.shared_colorscale",
     "--trace": "traces[].line",
     "--lead": "traces[].leads",
+    "--time-dim": "traces[].time_dim",
+    "--patch": "--spec",
 }
 
 
@@ -1192,13 +1215,12 @@ def hint_moved_plot_flags(message: str) -> str:
         return message
     lines = [
         message.rstrip(),
-        "Those names are plot-spec keys. Use the matching CLI flag when the "
-        "skill declares it, or set the same path in --spec (CLI overlays spec):",
+        "Those names are plot-spec keys. Set them in --spec, which is merged "
+        "onto the figure built from the input files:",
     ]
     for flag, path in found:
         lines.append(f"  {flag} → {path}")
     lines.append(
-        'Example: --title "S2S precip" --columns 4   or   '
         '--spec \'{"title": "S2S precip", "layout": {"facet": {"columns": 4}}}\''
     )
     return "\n".join(lines)
@@ -1218,8 +1240,8 @@ def patch_parser_for_spec_flags(parser):
 DUMP_SPEC_ARGUMENT_HELP = (
     "Dump the assembled plot spec as JSON and skip drawing a PNG. "
     "Bare --dump-spec (or '-') prints to stdout; a path writes a file. "
-    "--output is not required. Token-expensive; omit unless --patch needs "
-    "a key you cannot name from the CLI."
+    "--output is not required. Token-expensive; omit unless you need to "
+    "inspect a key before editing --spec."
 )
 
 
@@ -1253,7 +1275,7 @@ def parse_plot_patch(value):
     except json.JSONDecodeError as exc:
         raise argparse.ArgumentTypeError(f"expected a JSON object: {exc}") from None
     if not isinstance(data, dict):
-        raise argparse.ArgumentTypeError("--patch JSON must be an object")
+        raise argparse.ArgumentTypeError("--spec JSON must be an object")
     return data
 
 
