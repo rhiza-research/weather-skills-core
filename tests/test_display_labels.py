@@ -76,6 +76,7 @@ def test_dataset_display_label_fallback():
 def test_resolve_input_labels_empty():
     assert dl.resolve_input_labels(None, 2) == [None, None]
     assert dl.resolve_input_labels([], 2) == [None, None]
+    assert dl.resolve_input_labels([None, None], 1) == [None]
 
 
 def test_resolve_input_labels_count_mismatch():

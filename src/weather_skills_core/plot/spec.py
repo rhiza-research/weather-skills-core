@@ -128,7 +128,6 @@ TRACE_KEYS = (
             "y_variable",
             "metric",
             "leads",
-            "quiver_step",
         }
     )
     | ARTIST_BLOCKS
@@ -142,8 +141,6 @@ LAYER_SCALE_KEYS = frozenset(
         "vmax",
         "u_variable",
         "v_variable",
-        "quiver_scale",
-        "quiver_step",
     }
 )
 LAYER_KEYS = (
@@ -220,6 +217,10 @@ RELOCATED = {
     "theme.max_columns": "layout.facet.max_columns",
     "traces[].type": "traces[].kind",
     "traces[].style": "traces[].mark",
+    "quiver_scale": "quiver.scale",
+    "quiver_step": "quiver.step",
+    "traces[].quiver_scale": "traces[].quiver.scale",
+    "traces[].quiver_step": "traces[].quiver.step",
     **{key: f"traces[].{key}" for key in sorted(ARTIST_BLOCKS)},
 }
 
@@ -706,12 +707,15 @@ def _layer_id(item: dict | None) -> str | None:
     return _object_id(item, ("id", "input"))
 
 
-def merge_object_lists(base, overlay, *, id_keys: tuple[str, ...], label: str) -> list:
+def merge_object_lists(
+    base, overlay, *, id_keys: tuple[str, ...], label: str, known_ids: set[str] | None = None
+) -> list:
     """Merge ``overlay`` objects onto ``base`` by id, else by index.
 
     Overlay keys win. Unknown ids error (they do not append a half-built
-    entry). An empty overlay leaves ``base`` unchanged. When ``base`` is
-    empty, ``overlay`` is kept as-is.
+    entry), except an id listed in ``known_ids``, which is appended. An
+    empty overlay leaves ``base`` unchanged. When ``base`` is empty,
+    ``overlay`` is kept as-is.
     """
     if overlay is None:
         return copy.deepcopy(list(base or []))
@@ -745,6 +749,9 @@ def merge_object_lists(base, overlay, *, id_keys: tuple[str, ...], label: str) -
             if len(matches) > 1:
                 raise UsageError(f"{label} id {ident!r} is not unique")
             if not matches:
+                if known_ids is not None and ident in known_ids:
+                    out.append(copy.deepcopy(item))
+                    continue
                 known = ids_on(out)
                 have = ", ".join(known) if known else "none"
                 raise UsageError(
@@ -808,13 +815,23 @@ def merge_layer_lists(base, overlay) -> list:
     return merge_object_lists(base, overlay, id_keys=("id", "input"), label="layers[]")
 
 
-def _merge_named_list(out: dict, key: str, overlay, *, id_keys: tuple[str, ...], label: str) -> None:
+def _merge_named_list(
+    out: dict,
+    key: str,
+    overlay,
+    *,
+    id_keys: tuple[str, ...],
+    label: str,
+    known_ids: set[str] | None = None,
+) -> None:
     """Merge one object list onto ``out`` when the overlay set that key."""
     if overlay is None:
         return
     existing = out.get(key) or []
     if existing:
-        out[key] = merge_object_lists(existing, overlay, id_keys=id_keys, label=label)
+        out[key] = merge_object_lists(
+            existing, overlay, id_keys=id_keys, label=label, known_ids=known_ids
+        )
     else:
         out[key] = list(overlay)
 
@@ -823,9 +840,10 @@ def overlay_spec(base: dict, overlay: dict | None) -> dict:
     """Deep-merge ``overlay`` onto ``base`` (overlay wins).
 
     ``inputs[]`` merges by ``id``, ``traces[]`` by ``input`` (else ``id``),
-    and ``layers[]`` by ``id`` (else ``input``), then by index. A partial
-    ``--spec '{"traces": [{"kind": "contour"}]}'`` keeps the other trace
-    fields. An empty list does not wipe the figure.
+    and ``layers[]`` by ``id`` (else ``input``), then by index. A trace whose
+    ``input`` already names an input is appended, so two heatmap traces become
+    two panels. A partial ``--spec '{"traces": [{"kind": "contour"}]}'`` keeps
+    the other trace fields. An empty list does not wipe the figure.
     """
     if not overlay:
         return copy.deepcopy(base) if base else {}
@@ -837,7 +855,19 @@ def overlay_spec(base: dict, overlay: dict | None) -> dict:
     layer_overlay = overlay.pop("layers", None)
     out = deep_merge(base, overlay)
     _merge_named_list(out, "inputs", input_overlay, id_keys=("id",), label="inputs[]")
-    _merge_named_list(out, "traces", trace_overlay, id_keys=("input", "id"), label="traces[]")
+    input_ids = {
+        str(item.get("id"))
+        for item in (out.get("inputs") or [])
+        if isinstance(item, dict) and item.get("id") is not None and str(item.get("id")).strip()
+    }
+    _merge_named_list(
+        out,
+        "traces",
+        trace_overlay,
+        id_keys=("input", "id"),
+        label="traces[]",
+        known_ids=input_ids,
+    )
     _merge_named_list(out, "layers", layer_overlay, id_keys=("id", "input"), label="layers[]")
     return out
 
@@ -914,7 +944,7 @@ FLAG_TO_SPEC = {
     "lead": ("traces", 0, "leads"),
     "align_day_of_year": ("traces", 0, "align"),
     "quiver_scale": ("traces", 0, "quiver", "scale"),
-    "quiver_step": ("traces", 0, "quiver_step"),
+    "quiver_step": ("traces", 0, "quiver", "step"),
 }
 
 # Flags whose value is normalized on the way into the spec (JSON-safe types).

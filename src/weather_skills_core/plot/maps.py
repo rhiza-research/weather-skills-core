@@ -399,14 +399,14 @@ def slice_bbox_mask(da, lat_dim, lon_dim, bbox, polygon, label):
         lon_grid, lat_grid = np.meshgrid(da[lon_dim].values, da[lat_dim].values)
         if not bool(shapely.contains_xy(polygon, lon_grid, lat_grid).any()):
             print(
-                f"Warning: --mask-geojson polygon does not intersect {label}; "
+                f"Warning: geo.mask_geojson polygon does not intersect {label}; "
                 "its panels will be entirely empty.",
                 file=sys.stderr,
             )
     if da.sizes.get(lat_dim, 0) == 0 or da.sizes.get(lon_dim, 0) == 0:
         raise UsageError(
             f"selection produced an empty grid on {label} "
-            "(no cells remain after --bbox/--mask-geojson); nothing to plot."
+            "(no cells remain after geo.bbox / geo.mask_geojson); nothing to plot."
         )
     return da
 
@@ -448,7 +448,7 @@ def parse_extent(spec):
         return [float(x) for x in spec]
     parts = [float(x) for x in str(spec).split(",")]
     if len(parts) != 4:
-        raise UsageError("--extent expects lon_min,lon_max,lat_min,lat_max")
+        raise UsageError("geo.extent expects lon_min,lon_max,lat_min,lat_max")
     return parts
 
 
@@ -753,7 +753,7 @@ def _subset_points(da, bbox_nwse, region_polygon):
     lon_name = cf_dim(da, "longitude")
     if lat_name is None or lon_name is None:
         raise UsageError(
-            f"--bbox/--mask-geojson need latitude/longitude coordinates; got dims {list(da.dims)}"
+            f"geo.bbox / geo.mask_geojson need latitude/longitude coordinates; got dims {list(da.dims)}"
         )
     lat = np.asarray(da[lat_name].values)
     lon = np.asarray(da[lon_name].values)
@@ -772,7 +772,7 @@ def _subset_points(da, bbox_nwse, region_polygon):
         keep &= shapely.contains_xy(region_polygon, lon_b, lat_b)
         if not bool(keep.any()):
             print(
-                "Warning: --mask-geojson polygon does not intersect the points; "
+                "Warning: geo.mask_geojson polygon does not intersect the points; "
                 "the rose will be empty.",
                 file=sys.stderr,
             )
@@ -804,7 +804,7 @@ def _prepare_gridded_map(
     for spatial_dim in (lat_dim, lon_dim):
         if spatial_dim in overrides and spatial_dim not in da.dims:
             raise UsageError(
-                f"--index removed the {spatial_dim!r} dimension; {style} needs a 2D lat/lon grid"
+                f"inputs[].index removed the {spatial_dim!r} dimension; {style} needs a 2D lat/lon grid"
             )
     panel_dim = step_dim(da)
     for dim in da.dims:
@@ -813,7 +813,7 @@ def _prepare_gridded_map(
             raise UsageError(
                 f"dimension {dim!r} remains after selection; {style} "
                 f"panels only the {panel_desc} dimension — select a position "
-                f"from {dim!r} with --index"
+                f"from {dim!r} with inputs[].index"
             )
     if panel_dim is not None and da.sizes[panel_dim] == 0:
         raise UsageError(f"dimension {panel_dim!r} has size 0; nothing to plot.")
@@ -825,7 +825,7 @@ def _prepare_gridded_map(
     if da.sizes[lat_dim] == 0 or da.sizes[lon_dim] == 0:
         raise UsageError(
             "selection produced an empty grid (no cells remain after "
-            "--index/--bbox selection); nothing to plot."
+            "inputs[].index / geo.bbox selection); nothing to plot."
         )
     return da, lat_dim, lon_dim, extent_vals, not wrapped_bbox, native_step_dim, native_steps
 
@@ -927,7 +927,7 @@ def _layer_optional_float(spec, key):
         raise UsageError(f"--layer option {key}={raw!r} is not a number") from exc
 
 
-def _resolve_color_limits(da, vmin=None, vmax=None, *, norm=None, flag="--vmin/--vmax"):
+def _resolve_color_limits(da, vmin=None, vmax=None, *, norm=None, flag="vmin/vmax"):
     """Resolve colorbar limits. User limits drop a discrete ``BoundaryNorm``.
 
     When both limits are omitted, diverging data is recentered on zero.
@@ -1060,9 +1060,9 @@ def _resolve_uv(ds, u_variable, v_variable):
     """Eastward/northward variable names from flags, CF attrs, or common names."""
     names = list(ds.data_vars)
     if u_variable and u_variable not in ds:
-        raise UsageError(f"--u_variable {u_variable!r} is not in the data (have {names})")
+        raise UsageError(f"u_variable {u_variable!r} is not in the data (have {names})")
     if v_variable and v_variable not in ds:
-        raise UsageError(f"--v_variable {v_variable!r} is not in the data (have {names})")
+        raise UsageError(f"v_variable {v_variable!r} is not in the data (have {names})")
     if u_variable and v_variable:
         return u_variable, v_variable
     if u_variable:
@@ -1070,16 +1070,16 @@ def _resolve_uv(ds, u_variable, v_variable):
         if partner and partner in ds:
             return u_variable, partner
         raise UsageError(
-            f"--u_variable {u_variable!r} is set but no northward partner was found; "
-            "pass --v_variable"
+            f"u_variable {u_variable!r} is set but no northward partner was found; "
+            "set v_variable too"
         )
     if v_variable:
         partner = _infer_uv_partner(v_variable, want_v=False)
         if partner and partner in ds:
             return partner, v_variable
         raise UsageError(
-            f"--v_variable {v_variable!r} is set but no eastward partner was found; "
-            "pass --u_variable"
+            f"v_variable {v_variable!r} is set but no eastward partner was found; "
+            "set u_variable too"
         )
     u_cf, v_cf = [], []
     for name in names:
@@ -1096,7 +1096,7 @@ def _resolve_uv(ds, u_variable, v_variable):
         return matches[0]
     raise UsageError(
         "u/v plot needs eastward (u) and northward (v) wind components; "
-        f"could not auto-detect them in {names}. Pass --u_variable and --v_variable."
+        f"could not auto-detect them in {names}. Set traces[].u_variable and traces[].v_variable."
     )
 
 
@@ -1171,7 +1171,7 @@ def _quiver_step(lat, lon, requested=None, target_spacing=QUIVER_TARGET_SPACING_
     """
     if requested is not None:
         if requested < 1:
-            raise UsageError("--quiver_step must be >= 1")
+            raise UsageError("quiver.step must be >= 1")
         return int(requested)
     spacing = _native_spacing_deg(lat, lon)
     if spacing is None:
@@ -1190,7 +1190,7 @@ def _auto_quiver_scale(u, v, lon_span, spacing_deg, requested=None):
     """
     if requested is not None:
         if requested <= 0:
-            raise UsageError("--quiver_scale must be > 0")
+            raise UsageError("quiver.scale must be > 0")
         return float(requested)
     import numpy as np
 
@@ -1383,7 +1383,7 @@ def _prep_heatmap_layer(spec, bbox_nwse, region_polygon, extent, *, registry=Non
     flag_scale = _discrete_flag_scale(da, spec.options.get("colormap"))
     if flag_scale is not None:
         if user_vlim:
-            raise UsageError("--vmin/--vmax cannot be used with CF flag_values fields")
+            raise UsageError("vmin/vmax cannot be used with CF flag_values fields")
         cmap, norm, flag_ticks, flag_labels = flag_scale
         vmin = vmax = None
     else:
@@ -1517,8 +1517,9 @@ def _prep_quiver_layer(spec, bbox_nwse, region_polygon, extent):
         if spec.options.get("colormap")
         else QUIVER_CMAP
     )
-    qscale = spec.options.get("quiver_scale")
-    qstep = spec.options.get("quiver_step")
+    quiver = spec.options.get("quiver") if isinstance(spec.options.get("quiver"), dict) else {}
+    qscale = quiver.get("scale")
+    qstep = quiver.get("step")
     user_vmin = _layer_optional_float(spec, "vmin")
     user_vmax = _layer_optional_float(spec, "vmax")
     user_vlim = user_vmin is not None or user_vmax is not None
@@ -1824,11 +1825,14 @@ def _plot_layers(
     registry=None,
     wspace=None,
     hspace=None,
+    split_panels=False,
 ):
     """Stack ``--layer`` entries on shared Cartopy panels.
 
-    The renderer applies its own map chrome, so a caller cannot hand it the
-    line-chart theme by mistake.
+    ``split_panels`` draws each prepared layer on its own panel instead.
+    That is how several heatmap traces share one colorscale without being
+    stacked on the same axes. The renderer applies its own map chrome, so a
+    caller cannot hand it the line-chart theme by mistake.
     """
     import cartopy.crs as ccrs
 
@@ -1838,7 +1842,7 @@ def _plot_layers(
     import numpy as np
 
     if shared_scale and independent_scale:
-        raise UsageError("--shared-scale and --independent-scale are mutually exclusive")
+        raise UsageError("layout.shared_colorscale cannot be both true and false")
 
     label_slots = resolve_input_labels(layer_labels, len(layers), input_flag="--layer")
 
@@ -1855,10 +1859,13 @@ def _plot_layers(
             opts["u_variable"] = u_variable
         if "v_variable" not in opts and v_variable:
             opts["v_variable"] = v_variable
-        if "quiver_scale" not in opts and quiver_scale is not None:
-            opts["quiver_scale"] = str(quiver_scale)
-        if "quiver_step" not in opts and quiver_step is not None:
-            opts["quiver_step"] = str(quiver_step)
+        block = dict(opts.get("quiver") or {}) if isinstance(opts.get("quiver"), dict) else {}
+        if block.get("scale") is None and quiver_scale is not None:
+            block["scale"] = quiver_scale
+        if block.get("step") is None and quiver_step is not None:
+            block["step"] = quiver_step
+        if block:
+            opts["quiver"] = block
         if "vmin" not in opts and vmin is not None:
             opts["vmin"] = str(vmin)
         if "vmax" not in opts and vmax is not None:
@@ -1897,8 +1904,29 @@ def _plot_layers(
         if p["kind"] == "quiver":
             p["draw_mesh"] = not has_heatmap
 
-    driver = next((p for p in prepared if p.get("panel_dim")), None)
-    if driver is None:
+    if split_panels:
+        for p in prepared:
+            dim = p.get("panel_dim")
+            field = _layer_field(p)
+            if not dim or field is None or dim not in field.dims:
+                continue
+            if field.sizes[dim] == 1:
+                _squeeze_layer_dim(p, dim)
+                continue
+            raise UsageError(
+                "each heatmap trace is its own panel and has to be one map; "
+                f"{p['spec'].kind}:{p['spec'].path} still has {field.sizes[dim]} "
+                f"values along {dim!r}"
+            )
+        steps = list(range(len(prepared)))
+        sdim = None
+        title_da = None
+        title_steps = steps
+    else:
+        driver = next((p for p in prepared if p.get("panel_dim")), None)
+    if split_panels:
+        pass
+    elif driver is None:
         steps = [None]
         sdim = None
         title_da = None
@@ -1964,7 +1992,7 @@ def _plot_layers(
                 if scatter is not None:
                     extent_vals = _extent_from_points(scatter["da"])
                 else:
-                    raise UsageError("could not determine map extent; pass --extent or --bbox")
+                    raise UsageError("could not determine map extent; set geo.extent or geo.bbox")
 
     wrap_lon = True
     for p in prepared:
@@ -2043,8 +2071,9 @@ def _plot_layers(
         else:
             ax.set_xlim(extent_vals[0], extent_vals[1])
             ax.set_ylim(extent_vals[2], extent_vals[3])
-        for p in prepared:
-            slab = _select_panel(p, s)
+        panel_layers = [prepared[i]] if split_panels else prepared
+        for p in panel_layers:
+            slab = p if split_panels else _select_panel(p, s)
             if slab["kind"] == "heatmap":
                 last_by_group.setdefault(id(p) if not share else "shared", None)
                 artist = _draw_heatmap_on_ax(ax, slab, transform)
@@ -2183,14 +2212,46 @@ def _inherit_layer_options(options: dict, spec: dict, spec_input: dict | None = 
     return out
 
 
+def _layer_for_trace(trace, spec, inputs, by_id, dataset_for):
+    """One ``LayerSpec`` for a heatmap, contour, or quiver trace."""
+    style = (trace or {}).get("kind") or "heatmap"
+    if style not in KIND_TO_LAYER:
+        raise UsageError(f"{style!r} is not a map kind; expected one of {sorted(MAP_STYLES)}")
+    input_id = str(trace.get("input") or (inputs[0].get("id") if inputs else "a"))
+    spec_input = by_id.get(input_id, inputs[0] if inputs else {})
+    options = _inherit_layer_options({}, spec, spec_input)
+    for key, value in (
+        ("u_variable", trace.get("u_variable")),
+        ("v_variable", trace.get("v_variable")),
+    ):
+        if value is not None:
+            options[key] = value
+    quiver = trace.get("quiver")
+    if isinstance(quiver, dict) and quiver:
+        options["quiver"] = dict(quiver)
+    if style == "contour":
+        options["draw"] = "contour"
+        if trace.get("contour") is not None:
+            options["contour"] = trace["contour"]
+    if trace.get("mesh") is not None:
+        options["mesh"] = trace["mesh"]
+    layer = LayerSpec(
+        KIND_TO_LAYER[style],
+        spec_input.get("path") or "",
+        options,
+        f"{style}:{spec_input.get('path') or ''}",
+    )
+    layer.ds = dataset_for(input_id, spec_input.get("path"))
+    return layer
+
+
 def layers_from_spec(spec: dict, datasets: dict) -> list:
     """Build the ``LayerSpec`` list a map spec describes.
 
-    An explicit ``layers`` list is used as given; otherwise ``traces[0].kind``
-    is turned into the single layer that draws it.
+    An explicit ``layers`` list is stacked on one axes. Otherwise each
+    heatmap, contour, or quiver trace is its own layer; several of those
+    are drawn as separate panels.
     """
-    trace = trace_at(spec)
-    style = trace.get("kind") or "heatmap"
     inputs = [i for i in (spec.get("inputs") or []) if isinstance(i, dict)]
     by_id = {str(i.get("id")): i for i in inputs}
 
@@ -2223,33 +2284,8 @@ def layers_from_spec(spec: dict, datasets: dict) -> list:
             built.append(layer)
         return built
 
-    if style not in KIND_TO_LAYER:
-        raise UsageError(f"{style!r} is not a map kind; expected one of {sorted(MAP_STYLES)}")
-    input_id = str(trace.get("input") or (inputs[0].get("id") if inputs else "a"))
-    spec_input = by_id.get(input_id, inputs[0] if inputs else {})
-    options = _inherit_layer_options({}, spec, spec_input)
-    for key, value in (
-        ("u_variable", trace.get("u_variable")),
-        ("v_variable", trace.get("v_variable")),
-        ("quiver_scale", (trace.get("quiver") or {}).get("scale")),
-        ("quiver_step", trace.get("quiver_step")),
-    ):
-        if value is not None:
-            options[key] = value
-    if style == "contour":
-        options["draw"] = "contour"
-        if trace.get("contour") is not None:
-            options["contour"] = trace["contour"]
-    if trace.get("mesh") is not None:
-        options["mesh"] = trace["mesh"]
-    layer = LayerSpec(
-        KIND_TO_LAYER[style],
-        spec_input.get("path") or "",
-        options,
-        f"{style}:{spec_input.get('path') or ''}",
-    )
-    layer.ds = dataset_for(input_id, spec_input.get("path"))
-    return [layer]
+    traces = [t for t in (spec.get("traces") or []) if isinstance(t, dict)] or [trace_at(spec)]
+    return [_layer_for_trace(trace, spec, inputs, by_id, dataset_for) for trace in traces]
 
 
 def compile_map(spec: dict, datasets: dict, *, fontsize, template="weather_skills", registry=None):
@@ -2275,15 +2311,18 @@ def compile_map_figure(
     labels = []
     by_id = {str(item.get("id")): item.get("label") for item in (spec.get("inputs") or [])}
     raw_layers = spec.get("layers") or []
+    built_layers = layers_from_spec(spec, datasets)
     if raw_layers:
         for item in raw_layers:
             labels.append(by_id.get(str(item.get("input") or "")))
     else:
-        labels = [item.get("label") for item in (spec.get("inputs") or [])]
+        labels = [item.get("label") for item in (spec.get("inputs") or []) if isinstance(item, dict)]
+        if len(labels) != len(built_layers):
+            labels = []
     theme = spec.get("theme") or {}
     first_input = (spec.get("inputs") or [{}])[0] if spec.get("inputs") else {}
     fig, drawn = _plot_layers(
-        layers_from_spec(spec, datasets),
+        built_layers,
         tuple(bbox) if bbox is not None else None,
         geo.get("mask_geojson"),
         geo.get("extent"),
@@ -2299,7 +2338,7 @@ def compile_map_figure(
         trace.get("u_variable"),
         trace.get("v_variable"),
         (trace.get("quiver") or {}).get("scale"),
-        trace.get("quiver_step"),
+        (trace.get("quiver") or {}).get("step"),
         shared is True,
         shared is False,
         layer_labels=labels or None,
@@ -2315,6 +2354,7 @@ def compile_map_figure(
         registry=registry,
         wspace=facet.get("wspace"),
         hspace=facet.get("hspace"),
+        split_panels=not raw_layers and len(built_layers) > 1,
     )
     return fig, drawn
 

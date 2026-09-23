@@ -87,10 +87,8 @@ def test_normalize_spec_reports_where_a_relocated_key_moved():
         ({"theme": {"legend_fontsize": 11}}, "theme.rc.legend.fontsize"),
         ({"theme": {"title_fontsize": 18}}, "theme.rc.figure.titlesize"),
         ({"traces": [{"type": "heatmap"}]}, r"traces\[0\].type moved to traces\[\].kind"),
-        (
-            {"traces": [{"kind": "heatmap", "style": "line"}]},
-            r"traces\[0\].style moved to traces\[\].mark",
-        ),
+        ({"traces": [{"kind": "heatmap", "quiver_step": 2}]}, r"traces\[0\].quiver_step moved to traces\[\].quiver.step"),
+        ({"layers": [{"id": "a", "kind": "quiver", "path": "w.zarr", "quiver_scale": 10}]}, "quiver.scale"),
         ({"version": 1}, "version 1 is not supported"),
     ]:
         with pytest.raises(UsageError, match=expected):
@@ -156,6 +154,11 @@ def test_flag_table_writes_and_reads_one_canonical_path():
     spaced = overlay_flags({}, panel_spacing=(0.4, 0.2))
     assert spaced["layout"]["facet"] == {"wspace": 0.4, "hspace": 0.2}
     assert spec_get(spaced, "panel_spacing") == (0.4, 0.2)
+    assert FLAG_TO_SPEC["quiver_step"] == ("traces", 0, "quiver", "step")
+    stepped = overlay_flags({}, quiver_step=2, quiver_scale=80)
+    assert stepped["traces"][0]["quiver"] == {"step": 2, "scale": 80}
+    assert spec_get(stepped, "quiver_step") == 2
+    assert spec_get(stepped, "quiver_scale") == 80
 
 
 def test_theme_file_rejects_unknown_keys(tmp_path):
@@ -393,6 +396,8 @@ def test_overlay_spec_merges_inputs_and_traces_without_wiping():
     assert out["inputs"][0] == {"id": "a", "path": "a.zarr", "variable": "tp"}
     assert out["inputs"][1]["path"] == "b.zarr"
     assert out["traces"][0] == {"kind": "contour", "input": "a", "mark": "line"}
+    added = overlay_spec(base, {"traces": [{"input": "b", "kind": "heatmap"}]})
+    assert [t["input"] for t in added["traces"]] == ["a", "b"]
     assert overlay_spec(base, {"inputs": [], "traces": []})["traces"][0]["kind"] == "heatmap"
     with pytest.raises(UsageError, match="does not match"):
         overlay_spec(base, {"inputs": [{"id": "z", "variable": "tp"}]})
@@ -691,6 +696,58 @@ def test_compile_heatmap_facets_time():
     assert resolved["layout"]["facet"]["rows"] == 2
     assert resolved["layout"]["facet"]["n_panels"] == 5
     assert len(_quadmeshes(fig)) == 5
+
+
+def test_compile_heatmap_traces_are_separate_panels():
+    pytest.importorskip("matplotlib")
+    from weather_skills_core import UsageError
+    from weather_skills_core.plot import compile
+
+    chirps = make_gridded(n_time=1, lats=(1.0, 2.0, 3.0), lons=(10.0, 11.0, 12.0), fill=10.0)
+    ecmwf = make_gridded(
+        n_time=1,
+        lats=(1.5, 2.5),
+        lons=(10.5, 12.5),
+        name="precipitation_surface",
+        fill=40.0,
+    )
+    spec = {
+        "inputs": [
+            {"id": "a", "variable": "precip"},
+            {"id": "b", "variable": "precipitation_surface"},
+        ],
+        "traces": [
+            {"kind": "heatmap", "input": "a"},
+            {"kind": "heatmap", "input": "b"},
+        ],
+        "layout": {"shared_colorscale": True, "facet": {"rows": 1, "columns": 2}, "figsize": [8, 4]},
+        "subplot_titles": ["CHIRPS", "ECMWF"],
+        "title": "August total",
+        "vmin": 0,
+        "vmax": 50,
+    }
+    compiled = compile(spec, {"a": chirps, "b": ecmwf})
+    facet = compiled.spec["layout"]["facet"]
+    assert facet["rows"] == 1
+    assert facet["columns"] == 2
+    assert facet["n_panels"] == 2
+    assert len(_quadmeshes(compiled.fig)) == 2
+    titles = [ax.get_title() for ax in compiled.fig.axes if ax.get_title()]
+    assert any("CHIRPS" in title for title in titles)
+    assert any("ECMWF" in title for title in titles)
+
+    multi = make_gridded(n_time=3)
+    with pytest.raises(UsageError, match="its own panel"):
+        compile(
+            {
+                "inputs": [{"id": "a", "variable": "precip"}, {"id": "b", "variable": "precip"}],
+                "traces": [
+                    {"kind": "heatmap", "input": "a"},
+                    {"kind": "heatmap", "input": "b"},
+                ],
+            },
+            {"a": multi, "b": multi},
+        )
 
 
 def test_compile_rejects_unknown_colorbar_key():

@@ -99,7 +99,7 @@ def resolve_input_labels(
     input_flag: str = "--input",
 ) -> list[str | None]:
     """Map optional ``--label`` values to *n* inputs; ``None`` slots use auto labels."""
-    if not labels:
+    if not labels or all(label is None for label in labels):
         return [None] * n
     if len(labels) != n:
         raise UsageError(f"expected {n} --label values (one per {input_flag}), got {len(labels)}")
