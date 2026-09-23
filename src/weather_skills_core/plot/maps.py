@@ -20,6 +20,7 @@ from weather_skills_core.errors import UsageError
 from weather_skills_core.plot.figure import (
     add_shared_colorbar,
     apply_style_then_rc,
+    apply_suptitle,
     colorbar_mpl_kwargs,
     finish_figure,
     format_plot_date,
@@ -2107,8 +2108,7 @@ def _plot_layers(
             )
             y_key -= 0.10
 
-    if title:
-        fig.suptitle(title)
+    apply_suptitle(fig, title, mpl_spec)
 
     visible = [ax for ax in axes if ax.get_visible()]
     size_kw = colorbar_mpl_kwargs(mpl_spec or {})
@@ -2615,8 +2615,7 @@ def compile_grid(
         )
         if cbar is not None and labels is None and scale.get("ticktext"):
             cbar.set_ticklabels(list(scale["ticktext"]))
-    if title:
-        fig.suptitle(title)
+    apply_suptitle(fig, title, spec)
     finish_figure(fig, spec or {}, axes)
     from weather_skills_core.plot.figure import CompiledFigure
 

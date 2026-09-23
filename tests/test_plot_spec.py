@@ -99,6 +99,18 @@ def test_normalize_spec_reports_where_a_relocated_key_moved():
         normalize_spec({"bogus": 1})
 
 
+def test_layout_suptitle_y_sets_figure_title_height():
+    from weather_skills_core import UsageError
+    from weather_skills_core.plot.spec import normalize_spec
+
+    spec = normalize_spec({"title": "Rain", "layout": {"suptitle": {"y": 1.04}}})
+    assert spec["layout"]["suptitle"]["y"] == 1.04
+    with pytest.raises(UsageError, match="layout.suptitle.y must be a number"):
+        normalize_spec({"layout": {"suptitle": {"y": "high"}}})
+    with pytest.raises(UsageError, match="not a known key"):
+        normalize_spec({"layout": {"suptitle": {"pad": 12}}})
+
+
 def test_dumped_spec_includes_resolved_title_sizes():
     from weather_skills_core.plot.figure import attach_figure_spec
 

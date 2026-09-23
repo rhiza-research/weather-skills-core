@@ -753,6 +753,8 @@ ARROW_KEYS = frozenset(
     }
 )
 
+SUPTITLE_KEYS = frozenset({"y"})
+
 COLORBAR_EXTRA_KEYS = frozenset(
     {
         "extend",
@@ -1365,6 +1367,41 @@ def apply_axes_from_spec(fig, spec: dict, axes=None) -> None:
         apply_axes(ax, opts)
 
 
+def suptitle_kwargs(spec: dict | None) -> dict:
+    """Matplotlib ``Figure.suptitle`` kwargs from ``layout.suptitle``.
+
+    ``y`` is a figure fraction. The Matplotlib default is 0.98; a larger value
+    moves the figure title up. Panel titles use ``axes.titlepad`` instead.
+    """
+    layout = (spec or {}).get("layout") if isinstance(spec, dict) else None
+    raw = layout.get("suptitle") if isinstance(layout, dict) else None
+    if raw is None:
+        return {}
+    picked = pick(raw, SUPTITLE_KEYS, loc="layout.suptitle")
+    y = picked.get("y")
+    if y is None:
+        return {}
+    if isinstance(y, bool) or not isinstance(y, (int, float)):
+        raise UsageError(
+            "layout.suptitle.y must be a number "
+            "(figure fraction; larger moves the title up, default 0.98)"
+        )
+    number = float(y)
+    if number != number or number in (float("inf"), float("-inf")):
+        raise UsageError(
+            "layout.suptitle.y must be a finite number "
+            "(figure fraction; larger moves the title up, default 0.98)"
+        )
+    return {"y": number}
+
+
+def apply_suptitle(fig, title, spec=None):
+    """Place the figure title, honoring ``layout.suptitle.y`` when set."""
+    if not title:
+        return None
+    return fig.suptitle(title, **suptitle_kwargs(spec))
+
+
 def colorbar_mpl_kwargs(spec: dict | None) -> dict:
     """Extra matplotlib colorbar kwargs (extend, pad, orientation, …)."""
     cbar = colorbar_spec(spec) or {}
@@ -1481,7 +1518,7 @@ def attach_figure_spec(resolved: dict, spec: dict | None = None) -> dict:
             out.setdefault(key, list(out.get(key) or []))
     layout = dict(out.get("layout") or {})
     spec_layout = src.get("layout") or {}
-    for key in ("facecolor", "dpi", "colorbar"):
+    for key in ("facecolor", "dpi", "colorbar", "suptitle"):
         if spec_layout.get(key) is not None:
             layout[key] = spec_layout[key]
     out["layout"] = layout

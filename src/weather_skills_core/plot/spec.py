@@ -72,12 +72,14 @@ LAYOUT_KEYS = frozenset(
         "facecolor",
         "facet",
         "colorbar",
+        "suptitle",
         "shared_colorscale",
         "subplots",
         "bar_mode",
     }
 )
 FACET_KEYS = frozenset({"rows", "columns", "max_columns", "n_panels", "wspace", "hspace"})
+SUPTITLE_KEYS = frozenset({"y"})
 COLORBAR_KEYS = frozenset(
     {
         "extend",
@@ -306,6 +308,15 @@ def normalize_spec(data: dict) -> dict:
             raise UsageError(
                 f"plot spec layout.colorbar.labels has {len(list(labels))} entries "
                 f"but ticks has {len(list(ticks))}"
+            )
+    suptitle = (data.get("layout") or {}).get("suptitle")
+    if suptitle is not None:
+        _check_keys(suptitle, SUPTITLE_KEYS, "layout.suptitle")
+        y = suptitle.get("y")
+        if y is not None and (isinstance(y, bool) or not isinstance(y, (int, float))):
+            raise UsageError(
+                "plot spec layout.suptitle.y must be a number "
+                "(figure fraction; larger moves the title up, default 0.98)"
             )
     colormap = (data.get("theme") or {}).get("colormap")
     if isinstance(colormap, dict):

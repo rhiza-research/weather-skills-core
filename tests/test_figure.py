@@ -135,6 +135,33 @@ def test_add_shared_colorbar_custom_tick_labels():
     plt.close(fig)
 
 
+def test_apply_suptitle_honors_layout_y():
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    from weather_skills_core.errors import UsageError
+    from weather_skills_core.plot.figure import apply_suptitle, suptitle_kwargs
+
+    fig, ax = plt.subplots()
+    ax.plot([0, 1], [0, 1])
+    apply_suptitle(fig, "Rain", {"layout": {"suptitle": {"y": 1.05}}})
+    fig.canvas.draw()
+    assert fig._suptitle.get_position()[1] == pytest.approx(1.05)
+    plt.close(fig)
+
+    fig, ax = plt.subplots()
+    ax.plot([0, 1], [0, 1])
+    apply_suptitle(fig, "Rain", None)
+    fig.canvas.draw()
+    assert fig._suptitle.get_position()[1] == pytest.approx(0.98)
+    plt.close(fig)
+
+    with pytest.raises(UsageError, match="layout.suptitle.y must be a number"):
+        suptitle_kwargs({"layout": {"suptitle": {"y": "up"}}})
+
+
 def test_add_shared_colorbar_labelpad():
     import matplotlib
 

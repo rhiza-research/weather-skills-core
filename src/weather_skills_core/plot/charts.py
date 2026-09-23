@@ -12,6 +12,7 @@ from weather_skills_core.plot.figure import (
     LEGEND_KEYS,
     apply_date_ticks,
     apply_style_then_rc,
+    apply_suptitle,
     axis_label,
     bar_kwargs,
     box_kwargs,
@@ -335,8 +336,7 @@ def compile_lines(
         axes[0, 0].legend(
             loc="upper center", bbox_to_anchor=(0.5, -0.12), ncol=min(max(legend_n, 1), 4)
         )
-    if title:
-        fig.suptitle(title)
+    apply_suptitle(fig, title, spec)
     finish_figure(fig, spec or {}, axes)
     from weather_skills_core.plot.figure import CompiledFigure
 
@@ -440,8 +440,7 @@ def compile_mediogram(
         )
     else:
         ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.18), ncol=3)
-    if title:
-        fig.suptitle(title)
+    apply_suptitle(fig, title, spec)
     finish_figure(fig, spec or {}, ax)
     from weather_skills_core.plot.figure import CompiledFigure
 
@@ -646,7 +645,7 @@ def _compile_timeseries(prepared, spec, fontsize, *, template="weather_skills"):
     elif legend not in (None, "none", "off"):
         loc = legend if isinstance(legend, str) else None
         ax.legend(**({"loc": loc} if loc and loc not in ("on", "true", "yes") else {}))
-    fig.suptitle(spec.get("title") or f"{qty} (timeseries)")
+    apply_suptitle(fig, spec.get("title") or f"{qty} (timeseries)", spec)
     tight = (
         spec.get("layout", {}).get("autosize", True)
         and spec.get("layout", {}).get("figsize") is None
@@ -989,8 +988,7 @@ def _windrose(
         for i in range(n_speed)
     ]
     _place_legend(ax, legend, default="outside right", handles=handles, title="Wind speed")
-    if title:
-        fig.suptitle(title)
+    apply_suptitle(fig, title, mpl_spec)
     return fig
 
 
