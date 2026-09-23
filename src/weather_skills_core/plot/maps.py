@@ -660,12 +660,14 @@ _KIND_ZORDER = {"heatmap": 1.0, "quiver": 5.0, "scatter": 6.0, "outline": 7.0}
 class LayerSpec:
     """One ``--layer KIND:PATH[::k=v]`` entry. The decorator may set ``.ds``."""
 
-    def __init__(self, kind, path, options, raw):
+    def __init__(self, kind, path, options, raw, panel=None, input_label=None):
         self.kind = kind
-        self.path = Path(path)
+        self.path = Path(path) if path else Path()
         self.options = options
         self.raw = raw
         self.ds = None
+        self.panel = panel
+        self.input_label = input_label
 
     def zarr_paths(self):
         if self.kind in _ZARR_LAYER_KINDS:
@@ -813,7 +815,9 @@ def _prepare_gridded_map(
             raise UsageError(
                 f"dimension {dim!r} remains after selection; {style} "
                 f"panels only the {panel_desc} dimension — select a position "
-                f"from {dim!r} with inputs[].index"
+                f"from {dim!r} with inputs[].index. Side-by-side maps are two "
+                f"-i files and two heatmap traces, not one dataset concatenated "
+                f"along {dim!r}"
             )
     if panel_dim is not None and da.sizes[panel_dim] == 0:
         raise UsageError(f"dimension {panel_dim!r} has size 0; nothing to plot.")
@@ -1006,10 +1010,26 @@ def _resolve_subplot_titles(overrides, n_panels):
 
 
 def _set_panel_title(ax, index, auto, subplot_titles):
-    """Apply ``--subplot-title`` when given for this panel; otherwise ``auto``."""
-    text = subplot_titles[index] if index < len(subplot_titles) else auto
+    """Apply the user's panel title when given for this panel; otherwise ``auto``.
+
+    A missing or blank entry in ``subplot_titles`` means "use this panel's
+    auto title" — it never forces a blank title.
+    """
+    override = subplot_titles[index] if index < len(subplot_titles) else None
+    text = override if override else auto
     if text:
         ax.set_title(wrap_axes_title(ax, text))
+
+
+def _panel_label_title(panel_layers):
+    """A panel's auto title when every zarr-backed layer on it shares one ``inputs[].label``."""
+    labels = {
+        layer.input_label
+        for p in panel_layers
+        for layer in [p.get("spec")]
+        if getattr(layer, "input_label", None)
+    }
+    return next(iter(labels)) if len(labels) == 1 else None
 
 
 def _apply_geo_axis_labels(ax, xlabel, ylabel, *, xlabel_on=True, ylabel_on=True):
@@ -1264,14 +1284,6 @@ def _layer_overrides(spec, default_index):
         return parse_index(raw)
     except ValueError as exc:
         raise UsageError(f"--layer {spec.kind}:{spec.path}: {exc}") from None
-
-
-def _copy_layer(spec, options=None):
-    out = LayerSpec(
-        spec.kind, spec.path, options if options is not None else spec.options, spec.raw
-    )
-    out.ds = spec.ds
-    return out
 
 
 def _ensure_layer_dataset(spec):
@@ -1745,6 +1757,62 @@ def _draw_outline_on_ax(ax, prepared, crs):
     )
 
 
+def _limit_token(value):
+    if value is None or isinstance(value, bool):
+        return None if value is None else value
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def _style_token(value):
+    if isinstance(value, dict):
+        return tuple(sorted((str(key), _style_token(item)) for key, item in value.items()))
+    if isinstance(value, (list, tuple)):
+        return tuple(_style_token(item) for item in value)
+    return _limit_token(value) if not isinstance(value, str) else value
+
+
+def _layer_options(prepared):
+    spec = prepared.get("spec")
+    return getattr(spec, "options", None) or {}
+
+
+def _per_panel_style_differs(data):
+    """True when inputs set their own scale and those settings are not identical."""
+
+    def tokens(key):
+        found = []
+        saw = False
+        for item in data:
+            opts = _layer_options(item)
+            if key not in opts or opts.get(key) is None:
+                found.append(None)
+                continue
+            saw = True
+            found.append(_style_token(opts.get(key)))
+        return saw, found
+
+    for key in ("colormap", "cbar_label"):
+        saw, found = tokens(key)
+        if saw and (any(item is None for item in found) or len(set(found)) > 1):
+            return True
+    limits = []
+    saw_limit = False
+    for item in data:
+        opts = _layer_options(item)
+        if "vmin" not in opts and "vmax" not in opts:
+            limits.append(None)
+            continue
+        saw_limit = True
+        limits.append((_limit_token(opts.get("vmin")), _limit_token(opts.get("vmax"))))
+    if not saw_limit:
+        return False
+    own = [item for item in limits if item is not None]
+    return len(own) != len(limits) or len(set(own)) > 1
+
+
 def _scale_groups(prepared_layers, shared_scale, independent_scale):
     """Return True if heatmap/scatter layers should share one color scale."""
     data = [p for p in prepared_layers if p["kind"] in ("heatmap", "scatter")]
@@ -1752,11 +1820,98 @@ def _scale_groups(prepared_layers, shared_scale, independent_scale):
         return False
     if independent_scale:
         return False
+    if _per_panel_style_differs(data):
+        return False
     if shared_scale:
         return True
     variables = {p["variable"] for p in data}
     units = {p["units"] for p in data if p["units"]}
     return len(variables) == 1 and len(units) <= 1
+
+
+def _scale_share_keys(prepared, groups, shared_scale, independent_scale):
+    """Map each heatmap/scatter layer's ``id()`` to its colorbar-sharing key.
+
+    Two layers with the same key share one colorbar. With no fixed grid
+    (``groups`` is ``None`` — a lone trace or a ``--layer`` stack), this is
+    exactly ``_scale_groups`` on the whole figure: one axes stack, auto-share
+    allowed. With a fixed grid (``subplots[]``, or several side-by-side
+    traces), the same auto-share rule applies *within* each cell only —
+    sharing *across* cells needs ``layout.shared_colorscale: true``.
+    """
+    if groups is None:
+        share = _scale_groups(prepared, shared_scale, independent_scale)
+        return {
+            id(p): ("shared" if share else id(p))
+            for p in prepared
+            if p["kind"] in ("heatmap", "scatter")
+        }
+
+    keys = {}
+    for cell_index, cell in enumerate(groups):
+        data = [p for p in cell if p["kind"] in ("heatmap", "scatter")]
+        share_within = _scale_groups(data, shared_scale=False, independent_scale=independent_scale)
+        for p in data:
+            keys[id(p)] = f"shared:{cell_index}" if share_within else id(p)
+
+    if shared_scale:
+        data_all = [p for p in prepared if p["kind"] in ("heatmap", "scatter")]
+        if len(data_all) >= 2 and not independent_scale and not _per_panel_style_differs(data_all):
+            for p in data_all:
+                keys[id(p)] = "shared"
+    return keys
+
+
+def _panel_grid(
+    nrows,
+    ncols,
+    *,
+    extent=None,
+    default_cell_size=(5.0, 4.0),
+    min_figsize=None,
+    figsize=None,
+    wspace=None,
+    hspace=None,
+    subplot_kws=None,
+    sharex=False,
+    sharey=False,
+    despine=False,
+):
+    """Build a matplotlib panel grid via ``facet_figure`` — the one sizing rule
+    shared by ``_plot_layers`` (``plot``) and ``compile_grid`` (``plot-verify``).
+
+    The default canvas comes from a map ``extent`` (lon/lat aspect) when
+    given, else ``default_cell_size`` per panel. ``min_figsize`` floors that
+    default before ``wspace``/``hspace`` grow it to keep GridSpec gaps from
+    stealing panel space; an explicit ``figsize`` always wins outright.
+    Returns ``(fig, axes, spacing)`` — ``spacing`` is the resolved
+    ``(wspace, hspace)`` pair, or ``None``.
+    """
+    if extent is not None:
+        cell_w, cell_h = figsize_from_extent(*extent)
+    else:
+        cell_w, cell_h = default_cell_size
+    default_size = (cell_w * ncols, cell_h * nrows)
+    if min_figsize is not None:
+        default_size = (
+            max(default_size[0], min_figsize[0]),
+            max(default_size[1], min_figsize[1]),
+        )
+    spacing = _facet_spacing(wspace, hspace)
+    if spacing is not None and figsize is None:
+        default_size = _figsize_with_spacing(default_size, nrows, ncols, spacing)
+    fig, axes = facet_figure(
+        nrows,
+        ncols,
+        figsize=resolve_figsize(figsize, default_size),
+        sharex=sharex,
+        sharey=sharey,
+        subplot_kws=subplot_kws,
+        wspace=None if spacing is None else spacing[0],
+        hspace=None if spacing is None else spacing[1],
+        despine=despine,
+    )
+    return fig, axes, spacing
 
 
 def _apply_shared_scale(prepared_layers):
@@ -1803,21 +1958,12 @@ def _plot_layers(
     draw_boxes,
     rows,
     columns,
-    variable,
-    colormap,
-    index,
-    u_variable,
-    v_variable,
-    quiver_scale,
-    quiver_step,
     shared_scale,
     independent_scale,
     layer_labels=None,
     xlabel=None,
     ylabel=None,
     figsize=None,
-    vmin=None,
-    vmax=None,
     subplot_titles=None,
     cbar_label=None,
     mpl_spec=None,
@@ -1825,13 +1971,17 @@ def _plot_layers(
     registry=None,
     wspace=None,
     hspace=None,
-    split_panels=False,
+    is_subplots=False,
 ):
-    """Stack ``--layer`` entries on shared Cartopy panels.
+    """Draw prepared ``LayerSpec`` entries, one Cartopy panel per grid cell.
 
-    ``split_panels`` draws each prepared layer on its own panel instead.
-    That is how several heatmap traces share one colorscale without being
-    stacked on the same axes. The renderer applies its own map chrome, so a
+    A ``layer.panel`` groups layers onto a fixed axes (a ``subplots[]``
+    cell, or one of several side-by-side heatmap/quiver traces) — see
+    ``_panel_groups``. Layers with no ``.panel`` (a lone trace, or a
+    ``--layer`` stack) share one axes set instead, auto-tiled by whichever
+    layer still has a leftover time/step axis. Every layer already carries
+    its fully-resolved options (``layers_from_spec``); this function does
+    not re-derive them. The renderer applies its own map chrome, so a
     caller cannot hand it the line-chart theme by mistake.
     """
     import cartopy.crs as ccrs
@@ -1846,36 +1996,10 @@ def _plot_layers(
 
     label_slots = resolve_input_labels(layer_labels, len(layers), input_flag="--layer")
 
-    inherited = []
-    for spec in layers:
-        opts = dict(spec.options)
-        if "variable" not in opts and variable:
-            opts["variable"] = variable
-        if "colormap" not in opts and colormap:
-            opts["colormap"] = colormap
-        if "index" not in opts and index:
-            opts["index"] = index
-        if "u_variable" not in opts and u_variable:
-            opts["u_variable"] = u_variable
-        if "v_variable" not in opts and v_variable:
-            opts["v_variable"] = v_variable
-        block = dict(opts.get("quiver") or {}) if isinstance(opts.get("quiver"), dict) else {}
-        if block.get("scale") is None and quiver_scale is not None:
-            block["scale"] = quiver_scale
-        if block.get("step") is None and quiver_step is not None:
-            block["step"] = quiver_step
-        if block:
-            opts["quiver"] = block
-        if "vmin" not in opts and vmin is not None:
-            opts["vmin"] = str(vmin)
-        if "vmax" not in opts and vmax is not None:
-            opts["vmax"] = str(vmax)
-        inherited.append(_copy_layer(spec, opts))
-
-    region_polygon = _combined_mask_polygon(mask_geojson, inherited)
+    region_polygon = _combined_mask_polygon(mask_geojson, layers)
     extent_vals = parse_extent(extent)
     prepared = []
-    for i, spec in enumerate(inherited):
+    for i, spec in enumerate(layers):
         if spec.kind == "mask":
             continue
         if spec.kind == "heatmap":
@@ -1888,8 +2012,11 @@ def _plot_layers(
             item = _prep_outline_layer(spec)
         else:
             raise UsageError(f"unknown --layer kind {spec.kind!r}")
+        own_cbar = spec.options.get("cbar_label")
         label_override = label_slots[i]
-        if label_override:
+        if own_cbar:
+            item["cbar_label"] = str(own_cbar)
+        elif label_override:
             item["cbar_label"] = label_override
         elif cbar_label:
             item["cbar_label"] = cbar_label
@@ -1904,7 +2031,9 @@ def _plot_layers(
         if p["kind"] == "quiver":
             p["draw_mesh"] = not has_heatmap
 
-    if split_panels:
+    groups = _panel_groups(prepared)
+    if groups is not None:
+        where = "subplots[] cell" if is_subplots else "heatmap/quiver trace"
         for p in prepared:
             dim = p.get("panel_dim")
             field = _layer_field(p)
@@ -1914,17 +2043,17 @@ def _plot_layers(
                 _squeeze_layer_dim(p, dim)
                 continue
             raise UsageError(
-                "each heatmap trace is its own panel and has to be one map; "
+                f"each {where} has to be one map; "
                 f"{p['spec'].kind}:{p['spec'].path} still has {field.sizes[dim]} "
                 f"values along {dim!r}"
             )
-        steps = list(range(len(prepared)))
+        steps = list(range(len(groups)))
         sdim = None
         title_da = None
         title_steps = steps
     else:
         driver = next((p for p in prepared if p.get("panel_dim")), None)
-    if split_panels:
+    if groups is not None:
         pass
     elif driver is None:
         steps = [None]
@@ -2000,27 +2129,23 @@ def _plot_layers(
             wrap_lon = p["wrap_lon"]
             break
 
-    share = _scale_groups(prepared, shared_scale, independent_scale)
-    if share:
-        _apply_shared_scale(prepared)
+    share_keys = _scale_share_keys(prepared, groups, shared_scale, independent_scale)
+    for shared_key in {key for key in share_keys.values() if isinstance(key, str)}:
+        _apply_shared_scale([p for p in prepared if share_keys.get(id(p)) == shared_key])
 
     num_steps = len(steps)
     subplot_titles = _resolve_subplot_titles(subplot_titles, num_steps)
     nrows, ncols = panel_shape(num_steps, rows=rows, columns=columns)
-    sw, sh = figsize_from_extent(*extent_vals)
-    spacing = _facet_spacing(wspace, hspace)
-    default_size = (sw * ncols, sh * nrows)
-    if spacing is not None and figsize is None:
-        default_size = _figsize_with_spacing(default_size, nrows, ncols, spacing)
-    fig, axes = facet_figure(
+    fig, axes, spacing = _panel_grid(
         nrows,
         ncols,
-        figsize=resolve_figsize(figsize, default_size),
+        extent=extent_vals,
+        figsize=figsize,
+        wspace=wspace,
+        hspace=hspace,
+        subplot_kws={"projection": ccrs.PlateCarree()},
         sharex=True,
         sharey=True,
-        subplot_kws={"projection": ccrs.PlateCarree()},
-        wspace=None if spacing is None else spacing[0],
-        hspace=None if spacing is None else spacing[1],
         despine=False,
     )
     axes = np.array(axes).reshape(nrows, ncols).flatten()
@@ -2063,6 +2188,7 @@ def _plot_layers(
             break
 
     last_by_group = {}
+    group_axes = {}
     last_quiv = None
     for i, s in enumerate(steps):
         ax = axes[i]
@@ -2071,16 +2197,25 @@ def _plot_layers(
         else:
             ax.set_xlim(extent_vals[0], extent_vals[1])
             ax.set_ylim(extent_vals[2], extent_vals[3])
-        panel_layers = [prepared[i]] if split_panels else prepared
+        if groups is not None:
+            panel_layers = groups[i]
+            if not panel_layers:
+                ax.set_visible(False)
+                continue
+        else:
+            panel_layers = prepared
         for p in panel_layers:
-            slab = p if split_panels else _select_panel(p, s)
+            slab = p if groups is not None else _select_panel(p, s)
             if slab["kind"] == "heatmap":
-                last_by_group.setdefault(id(p) if not share else "shared", None)
                 artist = _draw_heatmap_on_ax(ax, slab, transform)
-                last_by_group["shared" if share else id(p)] = (artist, p)
+                key = share_keys.get(id(p), id(p))
+                last_by_group[key] = (artist, p)
+                group_axes.setdefault(key, []).append(ax)
             elif slab["kind"] == "scatter":
                 artist = _draw_scatter_on_ax(ax, slab, transform)
-                last_by_group["shared" if share else id(p)] = (artist, p)
+                key = share_keys.get(id(p), id(p))
+                last_by_group[key] = (artist, p)
+                group_axes.setdefault(key, []).append(ax)
             elif slab["kind"] == "quiver":
                 _, scale, step = quiver_meta
                 mesh, quiv = _draw_quiver_on_ax(ax, slab, transform, scale, step, mpl_spec=mpl_spec)
@@ -2109,11 +2244,12 @@ def _plot_layers(
             )
         if boxes:
             draw_box_outlines(ax, boxes, transform)
-        auto = (
-            panel_title(title_da, sdim, s, title_steps)
-            if s is not None and title_da is not None
-            else None
-        )
+        if s is not None and title_da is not None:
+            auto = panel_title(title_da, sdim, s, title_steps)
+        elif groups is not None:
+            auto = _panel_label_title(panel_layers)
+        else:
+            auto = None
         _set_panel_title(ax, i, auto, subplot_titles)
 
     for j in range(num_steps, len(axes)):
@@ -2140,7 +2276,8 @@ def _plot_layers(
 
     visible = [ax for ax in axes if ax.get_visible()]
     size_kw = colorbar_mpl_kwargs(mpl_spec or {})
-    for mappable, p in last_by_group.values():
+    for key, (mappable, p) in last_by_group.items():
+        axes_for = visible if key == "shared" else group_axes.get(key) or visible
         kw = dict(_cbar_boundary_kwargs(p.get("norm"), p.get("cmap")))
         if p.get("flag_ticks") is not None:
             kw["ticks"] = p["flag_ticks"]
@@ -2154,7 +2291,7 @@ def _plot_layers(
         cbar = add_shared_colorbar(
             fig,
             mappable,
-            visible,
+            axes_for,
             p.get("cbar_label") or _variable_label(p.get("da")),
             **kw,
         )
@@ -2190,36 +2327,62 @@ KIND_TO_LAYER = {"heatmap": "heatmap", "contour": "heatmap", "quiver": "quiver"}
 MAP_STYLES = frozenset(KIND_TO_LAYER) | {"layer"}
 
 
-def _inherit_layer_options(options: dict, spec: dict, spec_input: dict | None = None) -> dict:
-    """Fill omitted layer knobs from figure-level ``theme.colormap`` / vmin / vmax.
+def _inherit_layer_options(
+    options: dict, spec: dict, spec_input: dict | None = None, default_trace: dict | None = None
+) -> dict:
+    """Fill omitted layer knobs, one order, for every map path.
 
-    Keys already set on the layer (from ``layers[]`` in ``--spec``) win.
-    Same defaults a single-input heatmap already copies onto its synthetic
-    layer — without this, a figure-level ``theme.colormap`` was dropped and
-    the layer fell through to ``rocket``.
+    The layer's own keys (already in ``options``) always win. Then the
+    matching ``inputs[]`` entry (``spec_input``, already falling back to
+    ``inputs[0]`` when a layer names no input of its own — see
+    ``layers_from_spec``/``_layer_for_trace``). Then figure-level
+    ``theme.colormap`` / top-level ``vmin``/``vmax``. Wind-vector names and
+    quiver stride/scale fall back to the figure's default trace
+    (``trace_at(spec)``) last, so ``--layer quiver:path`` can set them once
+    on ``traces[0]`` instead of repeating them per layer.
     """
     spec_input = spec_input or {}
+    default_trace = default_trace or {}
     out = dict(options)
+    input_vmin = spec_input.get("vmin")
+    input_vmax = spec_input.get("vmax")
     for key, value in (
         ("variable", spec_input.get("variable")),
         ("index", spec_input.get("index")),
-        ("colormap", (spec.get("theme") or {}).get("colormap") or spec_input.get("colormap")),
-        ("vmin", spec.get("vmin")),
-        ("vmax", spec.get("vmax")),
+        ("colormap", spec_input.get("colormap") or (spec.get("theme") or {}).get("colormap")),
+        ("vmin", spec.get("vmin") if input_vmin is None else input_vmin),
+        ("vmax", spec.get("vmax") if input_vmax is None else input_vmax),
+        ("cbar_label", spec_input.get("cbar_label")),
+        ("u_variable", default_trace.get("u_variable")),
+        ("v_variable", default_trace.get("v_variable")),
     ):
         if value is not None and key not in out:
             out[key] = value
+    default_quiver = default_trace.get("quiver")
+    if isinstance(default_quiver, dict) and default_quiver:
+        block = dict(out.get("quiver") or {})
+        for key in ("scale", "step"):
+            if block.get(key) is None and default_quiver.get(key) is not None:
+                block[key] = default_quiver[key]
+        if block:
+            out["quiver"] = block
     return out
 
 
-def _layer_for_trace(trace, spec, inputs, by_id, dataset_for):
-    """One ``LayerSpec`` for a heatmap, contour, or quiver trace."""
+def _layer_for_trace(trace, spec, inputs, by_id, dataset_for, panel=None):
+    """One ``LayerSpec`` for a heatmap, contour, or quiver trace.
+
+    ``panel`` is the fixed grid cell this trace occupies when several
+    heatmap/contour/quiver traces share one figure (side by side, each on
+    its own lat/lon). Left ``None`` for a lone trace, whose own leftover
+    time/step axis instead auto-tiles into panels (see ``_panel_groups``).
+    """
     style = (trace or {}).get("kind") or "heatmap"
     if style not in KIND_TO_LAYER:
         raise UsageError(f"{style!r} is not a map kind; expected one of {sorted(MAP_STYLES)}")
     input_id = str(trace.get("input") or (inputs[0].get("id") if inputs else "a"))
     spec_input = by_id.get(input_id, inputs[0] if inputs else {})
-    options = _inherit_layer_options({}, spec, spec_input)
+    options = _inherit_layer_options({}, spec, spec_input, default_trace=trace_at(spec))
     for key, value in (
         ("u_variable", trace.get("u_variable")),
         ("v_variable", trace.get("v_variable")),
@@ -2240,9 +2403,85 @@ def _layer_for_trace(trace, spec, inputs, by_id, dataset_for):
         spec_input.get("path") or "",
         options,
         f"{style}:{spec_input.get('path') or ''}",
+        panel=panel,
+        input_label=spec_input.get("label"),
     )
     layer.ds = dataset_for(input_id, spec_input.get("path"))
+    if layer.ds is None:
+        raise UsageError(f"traces[].input {input_id!r} has no matching inputs[] entry")
     return layer
+
+
+def _panel_groups(prepared):
+    """Group prepared layers by ``LayerSpec.panel``. ``None`` when this is not a fixed grid."""
+    indexes = [getattr((item.get("spec")), "panel", None) for item in prepared]
+    if all(index is None for index in indexes):
+        return None
+    if any(index is None for index in indexes):
+        raise UsageError("subplots[] layers are missing a grid cell")
+    groups = [[] for _ in range(max(indexes) + 1)]
+    for item, index in zip(prepared, indexes, strict=True):
+        groups[index].append(item)
+    return groups
+
+
+def _layers_from_subplots(spec, inputs, by_id, dataset_for):
+    """Flatten ``subplots[].layers`` into ``LayerSpec``s tagged with a cell index."""
+    cells = [item for item in (spec.get("subplots") or []) if isinstance(item, dict)]
+    positioned = any(item.get("row") is not None for item in cells)
+    facet = (spec.get("layout") or {}).get("facet") or {}
+    ncols = int(facet["columns"]) if positioned and facet.get("columns") else None
+    default_trace = trace_at(spec)
+
+    def panel_index(item, ordinal):
+        if not positioned:
+            return ordinal
+        return (item["row"] - 1) * ncols + (item["col"] - 1)
+
+    built = []
+    for ordinal, cell in enumerate(cells):
+        panel = panel_index(cell, ordinal)
+        for layer in cell.get("layers") or []:
+            if not isinstance(layer, dict):
+                continue
+            kind = str(layer.get("kind") or "").strip().lower()
+            if kind not in {"heatmap", "contour", "scatter", "quiver", "outline", "mask"}:
+                raise UsageError(
+                    "subplots[].layers kind must be heatmap, contour, scatter, quiver, outline, or mask; "
+                    f"got {kind!r}"
+                )
+            spec_input = by_id.get(str(layer.get("input") or ""), {})
+            path = layer.get("path") or spec_input.get("path") or ""
+            if kind in {"outline", "mask"} and not path:
+                raise UsageError(f"subplots[].layers {kind} needs path")
+            options = {
+                key: cell[key]
+                for key in ("variable", "index", "colormap", "vmin", "vmax", "cbar_label")
+                if cell.get(key) is not None
+            }
+            options.update(fold_layer_options(layer))
+            options = _inherit_layer_options(options, spec, spec_input, default_trace=default_trace)
+            draw_kind = "heatmap" if kind == "contour" else kind
+            if kind == "contour":
+                options["draw"] = "contour"
+                if layer.get("contour") is not None:
+                    options["contour"] = layer["contour"]
+            entry = LayerSpec(
+                draw_kind,
+                path or str(layer.get("input") or kind),
+                options,
+                f"{kind}:{path or layer.get('input') or ''}",
+                panel=panel,
+                input_label=spec_input.get("label"),
+            )
+            if draw_kind in _ZARR_LAYER_KINDS:
+                entry.ds = dataset_for(layer.get("input"), path or None)
+                if entry.ds is None:
+                    raise UsageError(
+                        f"subplots[].layers {kind} has no dataset for input {layer.get('input')!r}"
+                    )
+            built.append(entry)
+    return built
 
 
 def layers_from_spec(spec: dict, datasets: dict) -> list:
@@ -2256,18 +2495,26 @@ def layers_from_spec(spec: dict, datasets: dict) -> list:
     by_id = {str(i.get("id")): i for i in inputs}
 
     def dataset_for(input_id, path):
-        if input_id and input_id in datasets:
-            return datasets[input_id]
+        """Resolve a layer's dataset. An explicit id/path that matches nothing
+        is ``None`` (the caller raises) rather than a silent guess; only a
+        layer naming *neither* falls back to the figure's sole dataset."""
+        if input_id:
+            return datasets.get(str(input_id))
         if path:
             for ds in datasets.values():
                 from weather_skills_core.decorator import INPUT_PATH_ATTR
 
                 if str(getattr(ds, "attrs", {}).get(INPUT_PATH_ATTR) or "") == str(path):
                     return ds
+            return None
         return next(iter(datasets.values()), None)
+
+    if spec.get("subplots"):
+        return _layers_from_subplots(spec, inputs, by_id, dataset_for)
 
     raw_layers = spec.get("layers") or []
     if raw_layers:
+        default_trace = trace_at(spec)
         built = []
         for item in raw_layers:
             if not isinstance(item, dict):
@@ -2276,16 +2523,27 @@ def layers_from_spec(spec: dict, datasets: dict) -> list:
             path = item.get("path")
             if not kind or not path:
                 raise UsageError("spec layers[] entries need kind and path")
-            spec_input = by_id.get(str(item.get("input") or ""), {})
-            options = _inherit_layer_options(fold_layer_options(item), spec, spec_input)
-            layer = LayerSpec(kind, path, options, f"{kind}:{path}")
+            spec_input = by_id.get(str(item.get("input") or ""), inputs[0] if inputs else {})
+            options = _inherit_layer_options(
+                fold_layer_options(item), spec, spec_input, default_trace=default_trace
+            )
+            layer = LayerSpec(kind, path, options, f"{kind}:{path}", input_label=spec_input.get("label"))
             if kind in _ZARR_LAYER_KINDS:
                 layer.ds = dataset_for(item.get("input"), path)
+                if layer.ds is None:
+                    raise UsageError(
+                        f"layers[] {kind}:{path} has no matching dataset "
+                        "(check inputs[].id or the file path)"
+                    )
             built.append(layer)
         return built
 
     traces = [t for t in (spec.get("traces") or []) if isinstance(t, dict)] or [trace_at(spec)]
-    return [_layer_for_trace(trace, spec, inputs, by_id, dataset_for) for trace in traces]
+    panels = range(len(traces)) if len(traces) > 1 else [None]
+    return [
+        _layer_for_trace(trace, spec, inputs, by_id, dataset_for, panel=panel)
+        for trace, panel in zip(traces, panels, strict=True)
+    ]
 
 
 def compile_map(spec: dict, datasets: dict, *, fontsize, template="weather_skills", registry=None):
@@ -2305,7 +2563,6 @@ def compile_map_figure(
     geo = spec.get("geo") or {}
     layout = spec.get("layout") or {}
     facet = layout.get("facet") or {}
-    trace = trace_at(spec)
     shared = layout.get("shared_colorscale")
     bbox = geo.get("bbox")
     labels = []
@@ -2313,14 +2570,11 @@ def compile_map_figure(
     raw_layers = spec.get("layers") or []
     built_layers = layers_from_spec(spec, datasets)
     if raw_layers:
+        # A --layer stack's cbar label comes from --label/inputs[].label; a
+        # side-by-side or subplots figure titles each panel instead (the
+        # layer's own .input_label, read inside _plot_layers).
         for item in raw_layers:
             labels.append(by_id.get(str(item.get("input") or "")))
-    else:
-        labels = [item.get("label") for item in (spec.get("inputs") or []) if isinstance(item, dict)]
-        if len(labels) != len(built_layers):
-            labels = []
-    theme = spec.get("theme") or {}
-    first_input = (spec.get("inputs") or [{}])[0] if spec.get("inputs") else {}
     fig, drawn = _plot_layers(
         built_layers,
         tuple(bbox) if bbox is not None else None,
@@ -2332,21 +2586,12 @@ def compile_map_figure(
         geo.get("draw_boxes"),
         facet.get("rows"),
         facet.get("columns"),
-        first_input.get("variable"),
-        theme.get("colormap") or first_input.get("colormap"),
-        first_input.get("index"),
-        trace.get("u_variable"),
-        trace.get("v_variable"),
-        (trace.get("quiver") or {}).get("scale"),
-        (trace.get("quiver") or {}).get("step"),
         shared is True,
         shared is False,
         layer_labels=labels or None,
         xlabel=spec.get("xlabel"),
         ylabel=spec.get("ylabel"),
         figsize=layout.get("figsize"),
-        vmin=spec.get("vmin"),
-        vmax=spec.get("vmax"),
         subplot_titles=spec.get("subplot_titles"),
         cbar_label=spec.get("cbar_label"),
         mpl_spec=spec,
@@ -2354,7 +2599,7 @@ def compile_map_figure(
         registry=registry,
         wspace=facet.get("wspace"),
         hspace=facet.get("hspace"),
-        split_panels=not raw_layers and len(built_layers) > 1,
+        is_subplots=bool(spec.get("subplots")),
     )
     return fig, drawn
 
@@ -2521,23 +2766,15 @@ def compile_grid(
     nrows = len(cells)
     ncols = max((len(row) for row in cells), default=1)
     geo_layers = load_geo_overlays(extent) if overlays else []
-    sw, sh = (5.0, 4.0)
-    if extent is not None:
-        sw, sh = figsize_from_extent(*extent)
     facet = ((spec or {}).get("layout") or {}).get("facet") or {}
-    spacing = _facet_spacing(facet.get("wspace"), facet.get("hspace"))
-    if figsize is not None:
-        fig_w, fig_h = float(figsize[0]), float(figsize[1])
-    else:
-        fig_w, fig_h = max(sw * ncols, 6.0), max(sh * nrows, 4.0)
-        if spacing is not None:
-            fig_w, fig_h = _figsize_with_spacing((fig_w, fig_h), nrows, ncols, spacing)
-    fig, axes = facet_figure(
+    fig, axes, _spacing = _panel_grid(
         nrows,
         ncols,
-        figsize=(fig_w, fig_h),
-        wspace=None if spacing is None else spacing[0],
-        hspace=None if spacing is None else spacing[1],
+        extent=extent,
+        min_figsize=(6.0, 4.0),
+        figsize=figsize,
+        wspace=facet.get("wspace"),
+        hspace=facet.get("hspace"),
         despine=False,
     )
     mappables = {}

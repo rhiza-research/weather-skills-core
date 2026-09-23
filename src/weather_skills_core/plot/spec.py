@@ -47,6 +47,7 @@ TOP_KEYS = frozenset(
         "inputs",
         "traces",
         "layers",
+        "subplots",
         "layout",
         "theme",
         "geo",
@@ -74,11 +75,12 @@ LAYOUT_KEYS = frozenset(
         "colorbar",
         "suptitle",
         "shared_colorscale",
-        "subplots",
         "bar_mode",
     }
 )
-FACET_KEYS = frozenset({"rows", "columns", "max_columns", "n_panels", "wspace", "hspace"})
+FACET_KEYS = frozenset(
+    {"rows", "columns", "max_columns", "n_panels", "wspace", "hspace", "per_trace"}
+)
 SUPTITLE_KEYS = frozenset({"y"})
 COLORBAR_KEYS = frozenset(
     {
@@ -105,7 +107,34 @@ THEME_KEYS = frozenset({"template", "colormap", "fontsize", "rc"})
 GEO_KEYS = frozenset(
     {"extent", "bbox", "cities", "mask_geojson", "draw_boxes", "overlays", "lat", "lon"}
 )
-INPUT_KEYS = frozenset({"id", "path", "variable", "index", "label", "colormap", "role"})
+SUBPLOT_KEYS = frozenset(
+    {
+        "row",
+        "col",
+        "title",
+        "vmin",
+        "vmax",
+        "colormap",
+        "cbar_label",
+        "variable",
+        "index",
+        "layers",
+    }
+)
+INPUT_KEYS = frozenset(
+    {
+        "id",
+        "path",
+        "variable",
+        "index",
+        "label",
+        "colormap",
+        "vmin",
+        "vmax",
+        "cbar_label",
+        "role",
+    }
+)
 TRACE_KEYS = (
     frozenset(
         {
@@ -154,88 +183,14 @@ _SECTIONS = {
     "geo": GEO_KEYS,
 }
 
-# Keys that used to be read from a second location. Naming the canonical path
-# in the error is the whole point: an agent editing a dumped spec gets told
-# where the knob moved instead of watching its edit silently do nothing.
-RELOCATED = {
-    "patch": "merge your edits into the spec itself (pass them on --spec)",
-    "style": "theme",
-    "layered": "traces[0].kind = 'layer'",
-    "rc": "theme.rc",
-    "facecolor": "layout.facecolor",
-    "colorbar": "layout.colorbar",
-    "along": "traces[].along",
-    "along_color": "traces[].along_color",
-    "reduce": "traces[].reduce",
-    "align": "traces[].align",
-    "band": "traces[].band",
-    "u_variable": "traces[].u_variable",
-    "v_variable": "traces[].v_variable",
-    "x_variable": "traces[].x_variable",
-    "y_variable": "traces[].y_variable",
-    "pair_on": "traces[].pair_on",
-    "layout.title": "title",
-    "layout.axes": "axes",
-    "layout.annotations": "annotations",
-    "layout.shapes": "shapes",
-    "layout.coloraxis": "layout.colorbar",
-    "layout.rows": "layout.facet.rows",
-    "layout.columns": "layout.facet.columns",
-    "layout.wspace": "layout.facet.wspace",
-    "layout.hspace": "layout.facet.hspace",
-    "horizontal_spacing": "layout.facet.wspace",
-    "vertical_spacing": "layout.facet.hspace",
-    "labelpad": "layout.colorbar.labelpad",
-    "label_pad": "layout.colorbar.labelpad",
-    "layout.colorbar.label_pad": "layout.colorbar.labelpad",
-    "label_size": "layout.colorbar.labelsize",
-    "layout.colorbar.label_size": "layout.colorbar.labelsize",
-    "layout.colorbar.fontsize": "layout.colorbar.labelsize",
-    "tick_size": "layout.colorbar.ticksize",
-    "layout.colorbar.tick_size": "layout.colorbar.ticksize",
-    "layout.metric": "traces[].metric",
-    "layout.leads": "traces[].leads",
-    "style.dpi": "layout.dpi",
-    "style.max_columns": "layout.facet.max_columns",
-    "style.colormap_a": "inputs[0].colormap",
-    "style.colormap_b": "inputs[1].colormap",
-    "style.rc": "theme.rc",
-    "style.template": "theme.template",
-    "style.colormap": "theme.colormap",
-    "style.fontsize": "theme.fontsize",
-    "subplot_title_fontsize": "theme.rc.axes.titlesize",
-    "theme.subplot_title_fontsize": "theme.rc.axes.titlesize",
-    "title_fontsize": "theme.rc.figure.titlesize",
-    "theme.title_fontsize": "theme.rc.figure.titlesize",
-    "label_fontsize": "theme.rc.axes.labelsize",
-    "theme.label_fontsize": "theme.rc.axes.labelsize",
-    "tick_fontsize": "theme.rc.xtick.labelsize",
-    "theme.tick_fontsize": "theme.rc.xtick.labelsize",
-    "legend_fontsize": "theme.rc.legend.fontsize",
-    "theme.legend_fontsize": "theme.rc.legend.fontsize",
-    "theme.dpi": "layout.dpi",
-    "theme.max_columns": "layout.facet.max_columns",
-    "traces[].type": "traces[].kind",
-    "traces[].style": "traces[].mark",
-    "quiver_scale": "quiver.scale",
-    "quiver_step": "quiver.step",
-    "traces[].quiver_scale": "traces[].quiver.scale",
-    "traces[].quiver_step": "traces[].quiver.step",
-    **{key: f"traces[].{key}" for key in sorted(ARTIST_BLOCKS)},
-}
-
-
-def _check_keys(obj, allowed, loc, *, relocated_prefix=""):
-    """Raise on any key of ``obj`` outside ``allowed``, naming its new home."""
+def _check_keys(obj, allowed, loc):
+    """Raise on any key of ``obj`` outside ``allowed``, listing the valid ones."""
     if not isinstance(obj, dict):
         raise UsageError(f"plot spec {loc} must be an object")
     for key in obj:
         if key in allowed:
             continue
-        moved = RELOCATED.get(f"{relocated_prefix}{key}") or RELOCATED.get(key)
         where = f"{loc}.{key}" if loc else key
-        if moved:
-            raise UsageError(f"plot spec {where} moved to {moved}")
         raise UsageError(
             f"plot spec {where} is not a known key; allowed here: {', '.join(sorted(allowed))}"
         )
@@ -271,6 +226,46 @@ def _panel_spacing_pair(value):
     return parse_panel_spacing(value)
 
 
+def _lift_facet_titles(data: dict, facet: dict) -> None:
+    """``layout.facet.titles`` names the panels. The canonical list is ``subplot_titles``.
+
+    A ``None`` entry means "use this panel's auto title" — it is never
+    turned into the literal string ``"None"``.
+    """
+    raw = facet.pop("titles", None)
+    if raw is None:
+        raw = facet.pop("title", None)
+    if raw is None:
+        return
+    if isinstance(raw, str):
+        raw = [raw]
+    if not isinstance(raw, list):
+        raise UsageError("layout.facet.titles must be a list of panel titles")
+    if not data.get("subplot_titles"):
+        data["subplot_titles"] = [None if title is None else str(title) for title in raw]
+
+
+def _lift_trace_titles(data: dict, traces: list) -> None:
+    """``traces[].title`` is the panel title. The canonical list is ``subplot_titles``.
+
+    A trace with no ``title`` lifts as ``None`` (use that panel's auto
+    title) rather than requiring every trace to set one.
+    """
+    lifted = []
+    saw = False
+    for item in traces:
+        if not isinstance(item, dict) or "title" not in item:
+            lifted.append(None)
+            continue
+        saw = True
+        lifted.append(item.pop("title"))
+    if not saw:
+        return
+    if data.get("subplot_titles"):
+        return
+    data["subplot_titles"] = [None if title is None else str(title) for title in lifted]
+
+
 def normalize_spec(data: dict) -> dict:
     """Validate a spec against the canonical schema, returning it unchanged.
 
@@ -295,14 +290,15 @@ def normalize_spec(data: dict) -> dict:
         block = data.get(section)
         if block is None:
             continue
-        _check_keys(block, allowed, section, relocated_prefix=f"{section}.")
+        _check_keys(block, allowed, section)
     facet = (data.get("layout") or {}).get("facet")
     if facet is not None:
+        _lift_facet_titles(data, facet)
         _check_keys(facet, FACET_KEYS, "layout.facet")
         _validate_facet_spacing(facet)
     colorbar = (data.get("layout") or {}).get("colorbar")
     if colorbar is not None:
-        _check_keys(colorbar, COLORBAR_KEYS, "layout.colorbar", relocated_prefix="layout.colorbar.")
+        _check_keys(colorbar, COLORBAR_KEYS, "layout.colorbar")
         ticks, labels = colorbar.get("ticks"), colorbar.get("labels")
         if labels is not None and ticks is None:
             raise UsageError("plot spec layout.colorbar.labels requires layout.colorbar.ticks")
@@ -338,10 +334,11 @@ def normalize_spec(data: dict) -> dict:
     if traces is not None:
         if not isinstance(traces, list):
             raise UsageError("plot spec traces must be a list of objects")
+        _lift_trace_titles(data, traces)
         for i, item in enumerate(traces):
             if not isinstance(item, dict):
                 raise UsageError(f"plot spec traces[{i}] must be an object")
-            _check_keys(item, TRACE_KEYS, f"traces[{i}]", relocated_prefix="traces[].")
+            _check_keys(item, TRACE_KEYS, f"traces[{i}]")
             kind = item.get("kind")
             if kind is not None and kind not in TRACE_KINDS:
                 raise UsageError(
@@ -362,8 +359,89 @@ def normalize_spec(data: dict) -> dict:
             if isinstance((item.get("options") or {}).get("colormap"), dict):
                 parse_colormap_spec(item["options"]["colormap"])
             _validate_artist_blocks(item, f"layers[{i}]")
+    _validate_subplots(data)
     _validate_axes_annotations(data)
     return data
+
+
+def _positive_int(value, loc):
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise UsageError(f"plot spec {loc} must be an integer >= 1; got {value!r}")
+    return value
+
+
+def _validate_subplots(data: dict) -> None:
+    """A subplot is one grid cell. Its ``layers`` stack on that cell."""
+    items = data.get("subplots")
+    if items is None:
+        return
+    if not isinstance(items, list):
+        raise UsageError("plot spec subplots must be a list of objects")
+    if not items:
+        return
+    positioned = False
+    for i, item in enumerate(items):
+        if not isinstance(item, dict):
+            raise UsageError(f"plot spec subplots[{i}] must be an object")
+        _check_keys(item, SUBPLOT_KEYS, f"subplots[{i}]")
+        if item.get("row") is not None or item.get("col") is not None:
+            positioned = True
+            _positive_int(item.get("row"), f"subplots[{i}].row")
+            _positive_int(item.get("col"), f"subplots[{i}].col")
+        if isinstance(item.get("colormap"), dict):
+            parse_colormap_spec(item["colormap"])
+        layers = item.get("layers")
+        if not isinstance(layers, list) or not layers:
+            raise UsageError(f"plot spec subplots[{i}].layers must be a non-empty list")
+        for j, layer in enumerate(layers):
+            if not isinstance(layer, dict):
+                raise UsageError(f"plot spec subplots[{i}].layers[{j}] must be an object")
+            _check_keys(layer, LAYER_KEYS, f"subplots[{i}].layers[{j}]")
+            if not layer.get("kind"):
+                raise UsageError(f"plot spec subplots[{i}].layers[{j}] needs kind")
+            if isinstance(layer.get("colormap"), dict):
+                parse_colormap_spec(layer["colormap"])
+            _validate_artist_blocks(layer, f"subplots[{i}].layers[{j}]")
+    if positioned and any(item.get("row") is None or item.get("col") is None for item in items):
+        raise UsageError("subplots[] row and col must be set on every subplot, or on none")
+    if positioned:
+        seen = set()
+        nrows = max(item["row"] for item in items)
+        ncols = max(item["col"] for item in items)
+        for i, item in enumerate(items):
+            cell = (item["row"], item["col"])
+            if cell in seen:
+                raise UsageError(f"subplots[{i}] repeats row {cell[0]}, col {cell[1]}")
+            seen.add(cell)
+        facet = data.setdefault("layout", {}).setdefault("facet", {})
+        if facet.get("rows") is None:
+            facet["rows"] = nrows
+        if facet.get("columns") is None:
+            facet["columns"] = ncols
+        if facet["rows"] < nrows or facet["columns"] < ncols:
+            raise UsageError(
+                f"layout.facet {facet['rows']}×{facet['columns']} is smaller than "
+                f"subplots row {nrows}, col {ncols}"
+            )
+    if data.get("subplot_titles"):
+        return
+    titles = [item.get("title") for item in items]
+    if not any(titles):
+        return
+    # A cell with no title is None (use that panel's auto title), never a
+    # forced blank string — same rule as _lift_facet_titles/_lift_trace_titles.
+    if positioned:
+        nrows = data["layout"]["facet"]["rows"]
+        ncols = data["layout"]["facet"]["columns"]
+        grid = [None] * (nrows * ncols)
+        for item in items:
+            title = item.get("title")
+            grid[(item["row"] - 1) * ncols + (item["col"] - 1)] = (
+                None if title is None else str(title)
+            )
+        data["subplot_titles"] = grid
+    else:
+        data["subplot_titles"] = [None if title is None else str(title) for title in titles]
 
 
 def _validate_artist_blocks(item: dict, loc: str) -> None:
@@ -708,15 +786,24 @@ def _layer_id(item: dict | None) -> str | None:
 
 
 def merge_object_lists(
-    base, overlay, *, id_keys: tuple[str, ...], label: str, known_ids: set[str] | None = None
+    base,
+    overlay,
+    *,
+    id_keys: tuple[str, ...] = (),
+    label: str,
+    known_ids: set[str] | None = None,
+    id_fn=None,
 ) -> list:
     """Merge ``overlay`` objects onto ``base`` by id, else by index.
 
     Overlay keys win. Unknown ids error (they do not append a half-built
     entry), except an id listed in ``known_ids``, which is appended. An
     empty overlay leaves ``base`` unchanged. When ``base`` is empty,
-    ``overlay`` is kept as-is.
+    ``overlay`` is kept as-is. Identity is ``id_fn(item)`` when given
+    (e.g. a composite ``row``/``col`` position), else the first non-empty
+    field in ``id_keys`` order; an item with no identity merges by index.
     """
+    ident_of = id_fn or (lambda item: _object_id(item, id_keys))
     if overlay is None:
         return copy.deepcopy(list(base or []))
     if not isinstance(overlay, list):
@@ -731,7 +818,7 @@ def merge_object_lists(
     def ids_on(items):
         found = []
         for item in items:
-            ident = _object_id(item, id_keys) if isinstance(item, dict) else None
+            ident = ident_of(item) if isinstance(item, dict) else None
             if ident is not None:
                 found.append(ident)
         return found
@@ -739,12 +826,12 @@ def merge_object_lists(
     for item in overlay:
         if not isinstance(item, dict):
             raise UsageError(f"plot spec {label} entries must be objects")
-        ident = _object_id(item, id_keys)
+        ident = ident_of(item)
         if ident is not None:
             matches = [
                 i
                 for i, current in enumerate(out)
-                if isinstance(current, dict) and _object_id(current, id_keys) == ident
+                if isinstance(current, dict) and ident_of(current) == ident
             ]
             if len(matches) > 1:
                 raise UsageError(f"{label} id {ident!r} is not unique")
@@ -820,9 +907,10 @@ def _merge_named_list(
     key: str,
     overlay,
     *,
-    id_keys: tuple[str, ...],
+    id_keys: tuple[str, ...] = (),
     label: str,
     known_ids: set[str] | None = None,
+    id_fn=None,
 ) -> None:
     """Merge one object list onto ``out`` when the overlay set that key."""
     if overlay is None:
@@ -830,20 +918,36 @@ def _merge_named_list(
     existing = out.get(key) or []
     if existing:
         out[key] = merge_object_lists(
-            existing, overlay, id_keys=id_keys, label=label, known_ids=known_ids
+            existing, overlay, id_keys=id_keys, label=label, known_ids=known_ids, id_fn=id_fn
         )
     else:
         out[key] = list(overlay)
+
+
+def _subplot_cell_id(item: dict | None) -> str | None:
+    """Identity for a ``subplots[]`` cell: its ``(row, col)`` when positioned.
+
+    An unpositioned cell (no ``row``/``col``) has no stable identity and
+    merges by index instead, same as an id-less ``layers[]`` entry.
+    """
+    if not isinstance(item, dict):
+        return None
+    row, col = item.get("row"), item.get("col")
+    if row is None or col is None:
+        return None
+    return f"{row}:{col}"
 
 
 def overlay_spec(base: dict, overlay: dict | None) -> dict:
     """Deep-merge ``overlay`` onto ``base`` (overlay wins).
 
     ``inputs[]`` merges by ``id``, ``traces[]`` by ``input`` (else ``id``),
-    and ``layers[]`` by ``id`` (else ``input``), then by index. A trace whose
-    ``input`` already names an input is appended, so two heatmap traces become
-    two panels. A partial ``--spec '{"traces": [{"kind": "contour"}]}'`` keeps
-    the other trace fields. An empty list does not wipe the figure.
+    ``layers[]`` by ``id`` (else ``input``), and ``subplots[]`` by ``(row,
+    col)`` (else index) — all then fall back to merge-by-index for entries
+    with no identity. A trace whose ``input`` already names an input is
+    appended, so two heatmap traces become two panels. A partial ``--spec
+    '{"traces": [{"kind": "contour"}]}'`` keeps the other trace fields. An
+    empty list does not wipe the figure.
     """
     if not overlay:
         return copy.deepcopy(base) if base else {}
@@ -853,6 +957,7 @@ def overlay_spec(base: dict, overlay: dict | None) -> dict:
     input_overlay = overlay.pop("inputs", None)
     trace_overlay = overlay.pop("traces", None)
     layer_overlay = overlay.pop("layers", None)
+    subplot_overlay = overlay.pop("subplots", None)
     out = deep_merge(base, overlay)
     _merge_named_list(out, "inputs", input_overlay, id_keys=("id",), label="inputs[]")
     input_ids = {
@@ -869,6 +974,7 @@ def overlay_spec(base: dict, overlay: dict | None) -> dict:
         known_ids=input_ids,
     )
     _merge_named_list(out, "layers", layer_overlay, id_keys=("id", "input"), label="layers[]")
+    _merge_named_list(out, "subplots", subplot_overlay, label="subplots[]", id_fn=_subplot_cell_id)
     return out
 
 
@@ -896,7 +1002,7 @@ FLAG_TO_SPEC = {
     "figsize": ("layout", "figsize"),
     "dpi": ("layout", "dpi"),
     "facecolor": ("layout", "facecolor"),
-    "subplots": ("layout", "subplots"),
+    "per_trace": ("layout", "facet", "per_trace"),
     "bar_mode": ("layout", "bar_mode"),
     "colorbar": ("layout", "colorbar"),
     "cbar_ticks": ("layout", "colorbar", "ticks"),
@@ -1171,101 +1277,6 @@ SPEC_ARGUMENT_HELP = (
     'Example: {"title": "Week 1", "traces": [{"kind": "contour"}]}. '
     "Paths listed in the spec are opened when no dataset flag is passed."
 )
-
-# Removed CLI flag → canonical spec path. Unknown flags are hinted at --spec.
-PLOT_CLI_TO_SPEC = {
-    "--title": "title",
-    "--subplot-title": "subplot_titles",
-    "--xlabel": "xlabel",
-    "--ylabel": "ylabel",
-    "--cbar-label": "cbar_label",
-    "--cbar-ticks": "layout.colorbar.ticks",
-    "--cbar-labels": "layout.colorbar.labels",
-    "--legend": "legend",
-    "--vmin": "vmin",
-    "--vmax": "vmax",
-    "--colormap": "theme.colormap",
-    "--colormap-bounds": "theme.colormap.bounds",
-    "--colormap-under": "theme.colormap.under",
-    "--colormap-over": "theme.colormap.over",
-    "--colormap-a": "inputs[0].colormap",
-    "--colormap-b": "inputs[1].colormap",
-    "--fontsize": "theme.fontsize",
-    "--theme": "theme.template",
-    "--figsize": "layout.figsize",
-    "--rows": "layout.facet.rows",
-    "--columns": "layout.facet.columns",
-    "--panels": "layout.facet.columns",
-    "--panel-spacing": "layout.facet.wspace",
-    "--subplots": "layout.subplots",
-    "--bar-mode": "layout.bar_mode",
-    "--extent": "geo.extent",
-    "--bbox": "geo.bbox",
-    "--cities": "geo.cities",
-    "--mask-geojson": "geo.mask_geojson",
-    "--draw-box": "geo.draw_boxes",
-    "--lat": "geo.lat",
-    "--lon": "geo.lon",
-    "--variable": "inputs[].variable",
-    "-v": "inputs[].variable",
-    "--variable-a": "inputs[0].variable",
-    "--variable-b": "inputs[1].variable",
-    "--index": "inputs[].index",
-    "--label": "inputs[].label",
-    "--kind": "traces[].kind",
-    "--mark": "traces[].mark",
-    "--along": "traces[].along",
-    "--along-color": "traces[].along_color",
-    "--reduce": "traces[].reduce",
-    "--align-day-of-year": "traces[].align",
-    "--band": "traces[].band",
-    "--pair-on": "traces[].pair_on",
-    "--u-variable": "traces[].u_variable",
-    "--v-variable": "traces[].v_variable",
-    "--x-variable": "traces[].x_variable",
-    "--y-variable": "traces[].y_variable",
-    "--quiver-scale": "traces[].quiver.scale",
-    "--quiver-step": "traces[].quiver.step",
-    "--shared-scale": "layout.shared_colorscale",
-    "--independent-scale": "layout.shared_colorscale",
-    "--trace": "traces[].line",
-    "--lead": "traces[].leads",
-    "--time-dim": "traces[].time_dim",
-    "--patch": "--spec",
-}
-
-
-def hint_moved_plot_flags(message: str) -> str:
-    """Append spec-path hints when argparse rejected a plotting flag."""
-    found = []
-    for flag, path in PLOT_CLI_TO_SPEC.items():
-        if re.search(rf"(?:^|[\s]){re.escape(flag)}(?:\s|=|$)", message):
-            found.append((flag, path))
-    if not found:
-        return message
-    lines = [
-        message.rstrip(),
-        "Those names are plot-spec keys. Set them in --spec, which is merged "
-        "onto the figure built from the input files:",
-    ]
-    for flag, path in found:
-        lines.append(f"  {flag} → {path}")
-    lines.append(
-        '--spec \'{"title": "S2S precip", "layout": {"facet": {"columns": 4}}}\''
-    )
-    return "\n".join(lines)
-
-
-def patch_parser_for_spec_flags(parser):
-    """Make ``parser.error`` name the spec home of a plotting flag."""
-    orig = parser.error
-
-    def error(message):
-        orig(hint_moved_plot_flags(message))
-
-    parser.error = error
-    return parser
-
 
 DUMP_SPEC_ARGUMENT_HELP = (
     "Dump the assembled plot spec as JSON and skip drawing a PNG. "

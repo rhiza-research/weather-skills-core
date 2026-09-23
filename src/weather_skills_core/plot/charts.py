@@ -264,7 +264,7 @@ def compile_lines(
     ylabels=None,
     fontsize=DEFAULT_FONTSIZE,
     figsize=None,
-    subplots=False,
+    per_trace=False,
     kinds=None,
     styles=None,
     template="weather_skills",
@@ -278,11 +278,11 @@ def compile_lines(
     ylabels = ylabels or [""] * n
     if figsize is not None:
         fig_w, fig_h = float(figsize[0]), float(figsize[1])
-    elif subplots:
+    elif per_trace:
         fig_w, fig_h = 10.0, max(2.8 * n, 4.0)
     else:
         fig_w, fig_h = 10.0, 6.0
-    if subplots:
+    if per_trace:
         fig, axes = facet_figure(
             n, 1, figsize=(fig_w, fig_h), sharex=True, despine=True
         )
@@ -304,7 +304,7 @@ def compile_lines(
     bar_slots = {}
     for i, kind in enumerate(kinds):
         if kind == "bar":
-            bar_slots.setdefault(i if subplots else 0, []).append(i)
+            bar_slots.setdefault(i if per_trace else 0, []).append(i)
     bar_pos = {
         i: (k, len(idxs)) for idxs in bar_slots.values() for k, i in enumerate(idxs)
     }
@@ -312,7 +312,7 @@ def compile_lines(
     for i, ((xvals, yvals, label), kind, style, along_color) in enumerate(
         zip(series, kinds, styles, along_modes, strict=True)
     ):
-        ax = axes[i if subplots else 0, 0]
+        ax = axes[i if per_trace else 0, 0]
         plot_ax = ax
         if style.get("twin") in (True, "y", "twinx"):
             plot_ax = ax.twinx()
@@ -392,7 +392,7 @@ def compile_lines(
                     unit = _bar_unit_width(xnum)
                     bar_kw = dict(bk)
                     user_width = bar_kw.pop("width", None)
-                    ax_i = i if subplots else 0
+                    ax_i = i if per_trace else 0
                     if bar_mode == "stacked":
                         width = float(user_width) if user_width is not None else 0.8 * unit
                         bottom = stack_bottom.get(ax_i)
@@ -465,18 +465,18 @@ def compile_lines(
                             **lk,
                         },
                     )
-            if subplots and cycle:
+            if per_trace and cycle:
                 plot_ax.legend(loc="best")
         if np.asarray(xvals).dtype.kind == "M":
             apply_date_ticks(ax)
-        if subplots:
+        if per_trace:
             ax.set_ylabel(ylabels[i])
             if i == n - 1:
                 ax.set_xlabel(xlabel)
         elif i == 0:
             ax.set_xlabel(xlabel)
             ax.set_ylabel(ylabels[0] if ylabels else "")
-    if not subplots:
+    if not per_trace:
         axes[0, 0].legend(
             loc="upper center", bbox_to_anchor=(0.5, -0.12), ncol=min(max(legend_n, 1), 4)
         )

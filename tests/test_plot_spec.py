@@ -65,36 +65,23 @@ def test_spec_roundtrip_json(tmp_path):
     assert merged["title"] == "Edited"
 
 
-def test_normalize_spec_reports_where_a_relocated_key_moved():
+def test_normalize_spec_rejects_unknown_keys_everywhere():
+    """An unknown key anywhere in the spec is a hard error listing the valid ones."""
     from weather_skills_core import UsageError
     from weather_skills_core.plot.spec import normalize_spec
 
     for bad, expected in [
-        ({"patch": {"title": "x"}}, "pass them on --spec"),
-        ({"layered": True}, "traces\\[0\\].kind"),
-        ({"rc": {"axes.grid": False}}, "theme.rc"),
-        ({"mesh": {"alpha": 0.4}}, r"traces\[\].mesh"),
-        ({"band": [10, 90]}, r"traces\[\].band"),
-        ({"along_color": "cycle"}, r"traces\[\].along_color"),
-        ({"layout": {"title": "x"}}, "moved to title"),
-        ({"layout": {"wspace": 0.4}}, "moved to layout.facet.wspace"),
-        ({"layout": {"facet": {"horizontal_spacing": 0.25}}}, "moved to layout.facet.wspace"),
-        ({"layout": {"axes": {}}}, "moved to axes"),
-        ({"style": {"dpi": 200}}, "theme"),
-        ({"theme": {"subplot_title_fontsize": 10}}, "theme.rc.axes.titlesize"),
-        ({"theme": {"label_fontsize": 12}}, "theme.rc.axes.labelsize"),
-        ({"theme": {"tick_fontsize": 8}}, "theme.rc.xtick.labelsize"),
-        ({"theme": {"legend_fontsize": 11}}, "theme.rc.legend.fontsize"),
-        ({"theme": {"title_fontsize": 18}}, "theme.rc.figure.titlesize"),
-        ({"traces": [{"type": "heatmap"}]}, r"traces\[0\].type moved to traces\[\].kind"),
-        ({"traces": [{"kind": "heatmap", "quiver_step": 2}]}, r"traces\[0\].quiver_step moved to traces\[\].quiver.step"),
-        ({"layers": [{"id": "a", "kind": "quiver", "path": "w.zarr", "quiver_scale": 10}]}, "quiver.scale"),
+        ({"patch": {"title": "x"}}, "not a known key"),
+        ({"layout": {"title": "x"}}, "not a known key"),
+        ({"layout": {"axes": {}}}, "not a known key"),
+        ({"style": {"dpi": 200}}, "not a known key"),
+        ({"traces": [{"type": "heatmap"}]}, r"traces\[0\].type is not a known key"),
+        ({"layers": [{"id": "a", "kind": "quiver", "path": "w.zarr", "quiver_scale": 10}]}, "not a known key"),
         ({"version": 1}, "version 1 is not supported"),
+        ({"bogus": 1}, "not a known key"),
     ]:
         with pytest.raises(UsageError, match=expected):
             normalize_spec(bad)
-    with pytest.raises(UsageError, match="not a known key"):
-        normalize_spec({"bogus": 1})
 
 
 def test_layout_suptitle_y_sets_figure_title_height():
@@ -147,7 +134,7 @@ def test_flag_table_writes_and_reads_one_canonical_path():
     assert FLAG_TO_SPEC["mark"] == ("traces", 0, "mark")
     assert FLAG_TO_SPEC["lead"] == ("traces", 0, "leads")
     assert FLAG_TO_SPEC["align_day_of_year"] == ("traces", 0, "align")
-    assert FLAG_TO_SPEC["subplots"] == ("layout", "subplots")
+    assert FLAG_TO_SPEC["per_trace"] == ("layout", "facet", "per_trace")
     assert FLAG_TO_SPEC["bar_mode"] == ("layout", "bar_mode")
     assert FLAG_TO_SPEC["wspace"] == ("layout", "facet", "wspace")
     assert FLAG_TO_SPEC["hspace"] == ("layout", "facet", "hspace")
@@ -238,15 +225,15 @@ def test_normalize_spec_colorbar_labels_need_ticks():
 
     with pytest.raises(UsageError, match="requires layout.colorbar.ticks"):
         normalize_spec({"layout": {"colorbar": {"labels": ["a"]}}})
-    with pytest.raises(UsageError, match="moved to layout.colorbar.labelpad"):
+    with pytest.raises(UsageError, match="not a known key"):
         normalize_spec({"layout": {"colorbar": {"label_pad": 12}}})
     padded = normalize_spec({"layout": {"colorbar": {"labelpad": 16}}})
     assert padded["layout"]["colorbar"]["labelpad"] == 16
-    with pytest.raises(UsageError, match="moved to layout.colorbar.labelsize"):
+    with pytest.raises(UsageError, match="not a known key"):
         normalize_spec({"layout": {"colorbar": {"fontsize": 28}}})
     sized = normalize_spec({"layout": {"colorbar": {"labelsize": 28}}})
     assert sized["layout"]["colorbar"]["labelsize"] == 28
-    with pytest.raises(UsageError, match="moved to layout.colorbar.ticksize"):
+    with pytest.raises(UsageError, match="not a known key"):
         normalize_spec({"layout": {"colorbar": {"tick_size": 15}}})
     ticksized = normalize_spec({"layout": {"colorbar": {"ticksize": 15}}})
     assert ticksized["layout"]["colorbar"]["ticksize"] == 15
@@ -403,15 +390,6 @@ def test_overlay_spec_merges_inputs_and_traces_without_wiping():
         overlay_spec(base, {"inputs": [{"id": "z", "variable": "tp"}]})
     with pytest.raises(UsageError, match="does not match"):
         overlay_spec(base, {"traces": [{"input": "missing", "kind": "xy"}]})
-
-
-def test_hint_moved_plot_flags_names_spec():
-    from weather_skills_core.plot.spec import hint_moved_plot_flags
-
-    text = hint_moved_plot_flags("unrecognized arguments: --title --patch")
-    assert "--spec" in text
-    assert "--title → title" in text
-    assert "--patch → --spec" in text
 
 
 def test_merge_layer_lists_index_fallback_and_unknown_id():
@@ -698,6 +676,29 @@ def test_compile_heatmap_facets_time():
     assert len(_quadmeshes(fig)) == 5
 
 
+def test_trace_title_becomes_subplot_title():
+    from weather_skills_core import UsageError
+    from weather_skills_core.plot.spec import normalize_spec
+
+    spec = normalize_spec(
+        {
+            "traces": [
+                {"kind": "heatmap", "input": "a", "title": "CHIRPS"},
+                {"kind": "heatmap", "input": "b", "title": "ECMWF"},
+            ]
+        }
+    )
+    assert spec["subplot_titles"] == ["CHIRPS", "ECMWF"]
+    assert "title" not in spec["traces"][0]
+    faceted = normalize_spec(
+        {"layout": {"facet": {"rows": 1, "columns": 2, "titles": ["CHIRPS", "ECMWF"]}}}
+    )
+    assert faceted["subplot_titles"] == ["CHIRPS", "ECMWF"]
+    assert "titles" not in faceted["layout"]["facet"]
+    with pytest.raises(UsageError, match="not a known key"):
+        normalize_spec({"layers": [{"id": "a", "kind": "heatmap", "path": "a.zarr", "label": "CHIRPS"}]})
+
+
 def test_compile_heatmap_traces_are_separate_panels():
     pytest.importorskip("matplotlib")
     from weather_skills_core import UsageError
@@ -737,7 +738,7 @@ def test_compile_heatmap_traces_are_separate_panels():
     assert any("ECMWF" in title for title in titles)
 
     multi = make_gridded(n_time=3)
-    with pytest.raises(UsageError, match="its own panel"):
+    with pytest.raises(UsageError, match="each heatmap/quiver trace has to be one map"):
         compile(
             {
                 "inputs": [{"id": "a", "variable": "precip"}, {"id": "b", "variable": "precip"}],
@@ -1469,6 +1470,104 @@ def test_colorblind_template_sets_style():
     assert _quadmeshes(fig)
 
 
+def test_subplots_keep_layers_and_scales():
+    pytest.importorskip("matplotlib")
+    from weather_skills_core.plot import compile
+
+    left = make_gridded(n_time=1, name="precip", fill=1.0)
+    right = make_gridded(n_time=1, lats=(1.5,), lons=(10.5,), name="tp", fill=4.0)
+    right["tp"].attrs.update(units="mm", long_name="Total precipitation")
+    spec = {
+        "version": 2,
+        "inputs": [
+            {"id": "a", "variable": "precip"},
+            {"id": "b", "variable": "tp"},
+        ],
+        "subplots": [
+            {
+                "row": 1,
+                "col": 1,
+                "title": "CHIRPS",
+                "vmin": 0,
+                "vmax": 10,
+                "colormap": "Blues",
+                "cbar_label": "Obs",
+                "layers": [{"kind": "heatmap", "input": "a"}],
+            },
+            {
+                "row": 1,
+                "col": 2,
+                "title": "ECMWF",
+                "vmin": 0,
+                "vmax": 40,
+                "colormap": "YlGn",
+                "cbar_label": "Forecast",
+                "layers": [{"kind": "heatmap", "input": "b"}],
+            },
+        ],
+    }
+    compiled = compile(spec, {"a": left, "b": right})
+    meshes = _quadmeshes(compiled.fig)
+    limits = sorted((round(mesh.norm.vmin, 5), round(mesh.norm.vmax, 5)) for mesh in meshes)
+    assert limits == [(0.0, 10.0), (0.0, 40.0)]
+    assert {mesh.cmap.name for mesh in meshes} == {"Blues", "YlGn"}
+    titles = [ax.get_title() for ax in compiled.fig.axes if ax.get_title()]
+    assert titles == ["CHIRPS", "ECMWF"]
+    labels = []
+    for ax in compiled.fig.axes:
+        if ax.get_label() != "<colorbar>":
+            continue
+        labels.append(ax.yaxis.label.get_text() or ax.xaxis.label.get_text())
+    assert set(labels) == {"Obs", "Forecast"}
+
+
+def test_per_input_style_stays_on_that_panel():
+    pytest.importorskip("matplotlib")
+    from weather_skills_core.plot import compile
+
+    left = make_gridded(n_time=1, name="precip", fill=1.0)
+    right = make_gridded(n_time=1, lats=(1.5,), lons=(10.5,), name="tp", fill=4.0)
+    right["tp"].attrs.update(units="mm", long_name="Total precipitation")
+    spec = {
+        "version": 2,
+        "inputs": [
+            {
+                "id": "a",
+                "variable": "precip",
+                "vmin": 0,
+                "vmax": 10,
+                "colormap": "Blues",
+                "cbar_label": "Obs",
+            },
+            {
+                "id": "b",
+                "variable": "tp",
+                "vmin": 0,
+                "vmax": 40,
+                "colormap": "YlGn",
+                "cbar_label": "Forecast",
+            },
+        ],
+        "traces": [
+            {"kind": "heatmap", "input": "a"},
+            {"kind": "heatmap", "input": "b"},
+        ],
+        "layout": {"facet": {"rows": 1, "columns": 2}},
+        "subplot_titles": ["CHIRPS", "ECMWF"],
+    }
+    compiled = compile(spec, {"a": left, "b": right})
+    meshes = _quadmeshes(compiled.fig)
+    limits = sorted((round(mesh.norm.vmin, 5), round(mesh.norm.vmax, 5)) for mesh in meshes)
+    assert limits == [(0.0, 10.0), (0.0, 40.0)]
+    assert {mesh.cmap.name for mesh in meshes} == {"Blues", "YlGn"}
+    labels = []
+    for ax in compiled.fig.axes:
+        if ax.get_label() != "<colorbar>":
+            continue
+        labels.append(ax.yaxis.label.get_text() or ax.xaxis.label.get_text())
+    assert set(labels) == {"Obs", "Forecast"}
+
+
 def test_shared_colorscale_one_norm_across_panels():
     pytest.importorskip("matplotlib")
     from weather_skills_core.plot import compile
@@ -1481,6 +1580,69 @@ def test_shared_colorscale_one_norm_across_panels():
     meshes = _quadmeshes(fig)
     norms = {id(m.norm) for m in meshes}
     assert len(norms) == 1
+
+
+def _two_cell_subplots_spec(*, shared=None):
+    left = make_gridded(n_time=1, name="t2m", fill=1.0, units="degree_Celsius")
+    right = make_gridded(
+        n_time=1, lats=(1.5,), lons=(10.5,), name="t2m", fill=100.0, units="degree_Celsius"
+    )
+    spec = {
+        "version": 2,
+        "inputs": [{"id": "a", "variable": "t2m"}, {"id": "b", "variable": "t2m"}],
+        "subplots": [
+            {"row": 1, "col": 1, "layers": [{"kind": "heatmap", "input": "a"}]},
+            {"row": 1, "col": 2, "layers": [{"kind": "heatmap", "input": "b"}]},
+        ],
+    }
+    if shared is not None:
+        spec["layout"] = {"shared_colorscale": shared}
+    return left, right, spec
+
+
+def test_subplots_same_variable_scales_independently_by_default():
+    """Two cells with the same variable and no override do NOT auto-share a colorbar."""
+    pytest.importorskip("matplotlib")
+    from weather_skills_core.plot import compile
+
+    left, right, spec = _two_cell_subplots_spec()
+    compiled = compile(spec, {"a": left, "b": right})
+    meshes = _quadmeshes(compiled.fig)
+    assert len(meshes) == 2
+    limits = {(round(m.norm.vmin, 2), round(m.norm.vmax, 2)) for m in meshes}
+    assert len(limits) == 2
+
+
+def test_subplots_shared_colorscale_true_forces_one_scale():
+    """``layout.shared_colorscale: true`` opts in to one scale across cells."""
+    pytest.importorskip("matplotlib")
+    from weather_skills_core.plot import compile
+
+    left, right, spec = _two_cell_subplots_spec(shared=True)
+    compiled = compile(spec, {"a": left, "b": right})
+    meshes = _quadmeshes(compiled.fig)
+    assert len(meshes) == 2
+    limits = {(round(m.norm.vmin, 2), round(m.norm.vmax, 2)) for m in meshes}
+    assert len(limits) == 1
+
+
+def test_overlay_spec_merges_subplots_by_row_col():
+    """A ``--spec`` patch to one ``subplots[]`` cell merges by (row, col); the grid survives."""
+    from weather_skills_core.plot.spec import overlay_spec
+
+    base = {
+        "subplots": [
+            {"row": 1, "col": 1, "vmin": 0, "layers": [{"kind": "heatmap", "input": "a"}]},
+            {"row": 1, "col": 2, "vmin": 0, "layers": [{"kind": "heatmap", "input": "b"}]},
+        ]
+    }
+    patch = {"subplots": [{"row": 1, "col": 1, "vmax": 50}]}
+    out = overlay_spec(base, patch)
+    cells = {(c["row"], c["col"]): c for c in out["subplots"]}
+    assert cells[(1, 1)]["vmin"] == 0
+    assert cells[(1, 1)]["vmax"] == 50
+    assert cells[(1, 2)]["vmin"] == 0
+    assert len(out["subplots"]) == 2
 
 
 def test_pick_rejects_unknown_and_non_json():

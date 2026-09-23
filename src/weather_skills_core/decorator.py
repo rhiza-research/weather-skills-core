@@ -362,10 +362,6 @@ def weather_skill(
                 )
             parser.add_argument(*arg.option_strings, **kwargs)
 
-        from weather_skills_core.plot.spec import patch_parser_for_spec_flags
-
-        patch_parser_for_spec_flags(parser)
-
         strip_dests = {arg.dest for arg in arguments if arg.dataset_type is not None} | {"output"}
 
         @functools.wraps(fn)
