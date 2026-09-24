@@ -1473,30 +1473,44 @@ def apply_shape(ax, shape: dict, loc: str = "shapes") -> None:
     )
 
 
+def _resolve_target_axes(item: dict, visible: list, loc: str) -> list:
+    """Unset ``panel``/``axes`` broadcasts to every visible panel. A single
+    int targets one panel; a list of ints targets that subset. Either way,
+    an out-of-range index still raises.
+    """
+    raw = item.get("axes") if item.get("axes") is not None else item.get("panel")
+    if raw is None:
+        return visible
+    values = raw if isinstance(raw, (list, tuple)) else [raw]
+    out = []
+    for v in values:
+        idx = int(v)
+        if idx < 0 or idx >= len(visible):
+            raise UsageError(f"{loc} axes index {idx} is out of range (0..{len(visible) - 1})")
+        out.append(visible[idx])
+    return out
+
+
 def apply_annotations_and_shapes(fig, spec: dict, axes=None) -> None:
+    """Draw every ``annotations[]``/``shapes[]`` entry.
+
+    An entry with no ``panel``/``axes`` draws on every panel. Set ``panel``
+    (an int, or a list of ints) to target one panel or a subset instead —
+    breaking change: this used to default to panel 0 only.
+    """
     visible = _visible_axes(fig, axes)
     if not visible:
         return
-    anns = list(spec.get("annotations") or [])
-    shapes = list(spec.get("shapes") or [])
-    for i, ann in enumerate(anns):
+    for i, ann in enumerate(list(spec.get("annotations") or [])):
         if not isinstance(ann, dict):
             continue
-        idx = int(ann.get("axes") if ann.get("axes") is not None else ann.get("panel") or 0)
-        if idx < 0 or idx >= len(visible):
-            raise UsageError(
-                f"annotations[{i}] axes index {idx} is out of range (0..{len(visible) - 1})"
-            )
-        apply_annotation(visible[idx], ann, loc=f"annotations[{i}]")
-    for i, shape in enumerate(shapes):
+        for ax in _resolve_target_axes(ann, visible, f"annotations[{i}]"):
+            apply_annotation(ax, ann, loc=f"annotations[{i}]")
+    for i, shape in enumerate(list(spec.get("shapes") or [])):
         if not isinstance(shape, dict):
             continue
-        idx = int(shape.get("axes") if shape.get("axes") is not None else shape.get("panel") or 0)
-        if idx < 0 or idx >= len(visible):
-            raise UsageError(
-                f"shapes[{i}] axes index {idx} is out of range (0..{len(visible) - 1})"
-            )
-        apply_shape(visible[idx], shape, loc=f"shapes[{i}]")
+        for ax in _resolve_target_axes(shape, visible, f"shapes[{i}]"):
+            apply_shape(ax, shape, loc=f"shapes[{i}]")
 
 
 def apply_axes_from_spec(fig, spec: dict, axes=None) -> None:
@@ -1547,9 +1561,12 @@ def apply_suptitle(fig, title, spec=None):
     return fig.suptitle(title, **suptitle_kwargs(spec))
 
 
-def colorbar_mpl_kwargs(spec: dict | None) -> dict:
-    """Extra matplotlib colorbar kwargs (extend, pad, orientation, …)."""
-    cbar = colorbar_spec(spec) or {}
+def colorbar_mpl_kwargs_from_dict(cbar: dict | None) -> dict:
+    """Extra matplotlib colorbar kwargs (extend, pad, orientation, …) from an
+    already-resolved ``layout.colorbar``-shaped dict — e.g. a figure-wide
+    default merged with a ``subplots[].colorbar`` override for one cell.
+    """
+    cbar = cbar or {}
     kw = colorbar_size_kwargs(colorbar=cbar)
     extra = pick(
         {k: v for k, v in cbar.items() if k in COLORBAR_EXTRA_KEYS},
@@ -1568,6 +1585,11 @@ def colorbar_mpl_kwargs(spec: dict | None) -> dict:
     if cbar.get("ticksize") is not None:
         kw["ticksize"] = float(cbar["ticksize"])
     return kw
+
+
+def colorbar_mpl_kwargs(spec: dict | None) -> dict:
+    """Extra matplotlib colorbar kwargs (extend, pad, orientation, …)."""
+    return colorbar_mpl_kwargs_from_dict(colorbar_spec(spec))
 
 
 def line_kwargs(style: dict | None, *, loc: str = "line") -> dict:

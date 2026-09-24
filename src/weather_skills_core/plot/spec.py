@@ -119,6 +119,7 @@ SUBPLOT_KEYS = frozenset(
         "variable",
         "index",
         "layers",
+        "colorbar",
     }
 )
 INPUT_KEYS = frozenset(
@@ -193,6 +194,19 @@ def _check_keys(obj, allowed, loc):
         where = f"{loc}.{key}" if loc else key
         raise UsageError(
             f"plot spec {where} is not a known key; allowed here: {', '.join(sorted(allowed))}"
+        )
+
+
+def _validate_colorbar_dict(colorbar: dict, loc: str) -> None:
+    """``layout.colorbar`` / ``subplots[].colorbar`` share this schema."""
+    _check_keys(colorbar, COLORBAR_KEYS, loc)
+    ticks, labels = colorbar.get("ticks"), colorbar.get("labels")
+    if labels is not None and ticks is None:
+        raise UsageError(f"plot spec {loc}.labels requires {loc}.ticks")
+    if ticks is not None and labels is not None and len(list(ticks)) != len(list(labels)):
+        raise UsageError(
+            f"plot spec {loc}.labels has {len(list(labels))} entries "
+            f"but ticks has {len(list(ticks))}"
         )
 
 
@@ -298,15 +312,7 @@ def normalize_spec(data: dict) -> dict:
         _validate_facet_spacing(facet)
     colorbar = (data.get("layout") or {}).get("colorbar")
     if colorbar is not None:
-        _check_keys(colorbar, COLORBAR_KEYS, "layout.colorbar")
-        ticks, labels = colorbar.get("ticks"), colorbar.get("labels")
-        if labels is not None and ticks is None:
-            raise UsageError("plot spec layout.colorbar.labels requires layout.colorbar.ticks")
-        if ticks is not None and labels is not None and len(list(ticks)) != len(list(labels)):
-            raise UsageError(
-                f"plot spec layout.colorbar.labels has {len(list(labels))} entries "
-                f"but ticks has {len(list(ticks))}"
-            )
+        _validate_colorbar_dict(colorbar, "layout.colorbar")
     suptitle = (data.get("layout") or {}).get("suptitle")
     if suptitle is not None:
         _check_keys(suptitle, SUPTITLE_KEYS, "layout.suptitle")
@@ -390,6 +396,10 @@ def _validate_subplots(data: dict) -> None:
             _positive_int(item.get("col"), f"subplots[{i}].col")
         if isinstance(item.get("colormap"), dict):
             parse_colormap_spec(item["colormap"])
+        if item.get("colorbar") is not None:
+            if not isinstance(item["colorbar"], dict):
+                raise UsageError(f"plot spec subplots[{i}].colorbar must be an object")
+            _validate_colorbar_dict(item["colorbar"], f"subplots[{i}].colorbar")
         layers = item.get("layers")
         if not isinstance(layers, list) or not layers:
             raise UsageError(f"plot spec subplots[{i}].layers must be a non-empty list")
@@ -423,25 +433,35 @@ def _validate_subplots(data: dict) -> None:
                 f"layout.facet {facet['rows']}×{facet['columns']} is smaller than "
                 f"subplots row {nrows}, col {ncols}"
             )
-    if data.get("subplot_titles"):
+    _apply_subplot_titles(data, items, positioned)
+
+
+def _apply_subplot_titles(data: dict, items: list, positioned: bool) -> None:
+    """A cell's own ``title`` overrides whatever default already filled
+    ``subplot_titles`` (``layout.facet.titles``, ``traces[].title``, or an
+    explicit top-level ``subplot_titles``) — same default+override contract
+    as ``vmin``/``vmax``, independent of validation order. A cell with no
+    title leaves its slot as ``None`` (use that panel's auto title) rather
+    than forcing a blank string.
+    """
+    if not any(item.get("title") is not None for item in items):
         return
-    titles = [item.get("title") for item in items]
-    if not any(titles):
-        return
-    # A cell with no title is None (use that panel's auto title), never a
-    # forced blank string — same rule as _lift_facet_titles/_lift_trace_titles.
     if positioned:
         nrows = data["layout"]["facet"]["rows"]
         ncols = data["layout"]["facet"]["columns"]
-        grid = [None] * (nrows * ncols)
-        for item in items:
-            title = item.get("title")
-            grid[(item["row"] - 1) * ncols + (item["col"] - 1)] = (
-                None if title is None else str(title)
-            )
-        data["subplot_titles"] = grid
+        n = nrows * ncols
     else:
-        data["subplot_titles"] = [None if title is None else str(title) for title in titles]
+        n, ncols = len(items), None
+    existing = list(data.get("subplot_titles") or [])
+    if len(existing) < n:
+        existing += [None] * (n - len(existing))
+    for i, item in enumerate(items):
+        title = item.get("title")
+        if title is None:
+            continue
+        idx = (item["row"] - 1) * ncols + (item["col"] - 1) if positioned else i
+        existing[idx] = str(title)
+    data["subplot_titles"] = existing
 
 
 def _validate_artist_blocks(item: dict, loc: str) -> None:

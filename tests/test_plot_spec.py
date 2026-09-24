@@ -1645,6 +1645,131 @@ def test_overlay_spec_merges_subplots_by_row_col():
     assert len(out["subplots"]) == 2
 
 
+def test_annotation_with_no_panel_broadcasts_to_every_panel():
+    """An ``annotations[]`` entry with no ``panel``/``axes`` draws on every panel."""
+    pytest.importorskip("matplotlib")
+    from weather_skills_core.plot import compile
+
+    left, right, spec = _two_cell_subplots_spec()
+    spec["annotations"] = [{"text": "N=30", "x": 0.5, "y": 0.5}]
+    fig = compile(spec, {"a": left, "b": right}).fig
+    for ax in _visible_map_axes(fig):
+        assert "N=30" in [t.get_text() for t in ax.texts]
+
+
+def test_annotation_panel_int_narrows_to_one_panel():
+    """``panel`` as a single int overrides the broadcast and targets one panel."""
+    pytest.importorskip("matplotlib")
+    from weather_skills_core.plot import compile
+
+    left, right, spec = _two_cell_subplots_spec()
+    spec["annotations"] = [{"text": "N=30", "x": 0.5, "y": 0.5, "panel": 1}]
+    fig = compile(spec, {"a": left, "b": right}).fig
+    axes = _visible_map_axes(fig)
+    assert "N=30" not in [t.get_text() for t in axes[0].texts]
+    assert "N=30" in [t.get_text() for t in axes[1].texts]
+
+
+def test_annotation_panel_list_narrows_to_subset():
+    """``panel`` as a list of ints targets that subset only."""
+    pytest.importorskip("matplotlib")
+    from weather_skills_core.plot import compile
+
+    ds = make_gridded(n_time=3)
+    spec = spec_from_flags(variable="precip", kind="heatmap", columns=3)
+    spec["annotations"] = [{"text": "N=30", "x": 0.5, "y": 0.5, "panel": [0, 2]}]
+    fig = compile(spec, {"a": ds}).fig
+    axes = _visible_map_axes(fig)
+    assert len(axes) == 3
+    assert "N=30" in [t.get_text() for t in axes[0].texts]
+    assert "N=30" not in [t.get_text() for t in axes[1].texts]
+    assert "N=30" in [t.get_text() for t in axes[2].texts]
+
+
+def test_annotation_panel_out_of_range_still_raises():
+    pytest.importorskip("matplotlib")
+    from weather_skills_core import UsageError
+    from weather_skills_core.plot import compile
+
+    left, right, spec = _two_cell_subplots_spec()
+    spec["annotations"] = [{"text": "N=30", "x": 0.5, "y": 0.5, "panel": 5}]
+    with pytest.raises(UsageError, match="out of range"):
+        compile(spec, {"a": left, "b": right})
+
+
+def test_shape_with_no_panel_broadcasts_and_panel_narrows():
+    """``shapes[]`` follows the same broadcast/narrow rule as ``annotations[]``."""
+    pytest.importorskip("matplotlib")
+    from weather_skills_core.plot import compile
+
+    left, right, spec = _two_cell_subplots_spec()
+    spec["shapes"] = [{"type": "hline", "y": 1.0, "color": "red"}]
+    fig = compile(spec, {"a": left, "b": right}).fig
+    axes = _visible_map_axes(fig)
+    assert len(axes[0].lines) > 0
+    assert len(axes[1].lines) > 0
+
+    left2, right2, spec2 = _two_cell_subplots_spec()
+    spec2["shapes"] = [{"type": "hline", "y": 1.0, "color": "red", "panel": 0}]
+    fig2 = compile(spec2, {"a": left2, "b": right2}).fig
+    axes2 = _visible_map_axes(fig2)
+    assert len(axes2[0].lines) > 0
+    assert len(axes2[1].lines) == 0
+
+
+def test_subplot_colorbar_override_applies_only_to_that_cell():
+    """``subplots[].colorbar`` styles only that cell's own colorbar."""
+    pytest.importorskip("matplotlib")
+    from weather_skills_core.plot import compile
+    from weather_skills_core.plot.figure import DEFAULT_FONTSIZE
+
+    left, right, spec = _two_cell_subplots_spec()
+    spec["subplots"][1]["colorbar"] = {"labelsize": 28}
+    fig = compile(spec, {"a": left, "b": right}).fig
+    cbar_axes = sorted(
+        (a for a in fig.axes if a.get_label() == "<colorbar>"),
+        key=lambda a: a.get_position().x0,
+    )
+    assert len(cbar_axes) == 2
+    assert cbar_axes[0].yaxis.label.get_size() == DEFAULT_FONTSIZE
+    assert cbar_axes[1].yaxis.label.get_size() == 28
+
+
+def test_subplot_colorbar_override_conflicts_with_shared_scale():
+    """A cell's ``colorbar`` override is ambiguous once its colorbar is shared."""
+    pytest.importorskip("matplotlib")
+    from weather_skills_core import UsageError
+    from weather_skills_core.plot import compile
+
+    left, right, spec = _two_cell_subplots_spec(shared=True)
+    spec["subplots"][0]["colorbar"] = {"labelsize": 28}
+    with pytest.raises(UsageError, match="shared"):
+        compile(spec, {"a": left, "b": right})
+
+
+def test_subplot_title_overrides_figure_wide_default():
+    """A cell's own ``title`` wins over a figure-wide default, even though
+    ``layout.facet.titles`` lifts into ``subplot_titles`` before ``subplots[]``
+    is validated — previously that early lift silently blocked any
+    ``subplots[].title`` override (see ``_apply_subplot_titles``)."""
+    from weather_skills_core.plot.spec import normalize_spec
+
+    spec = {
+        "layout": {"facet": {"titles": ["Default 1", "Default 2"]}},
+        "subplots": [
+            {"row": 1, "col": 1, "layers": [{"kind": "heatmap", "input": "a"}]},
+            {
+                "row": 1,
+                "col": 2,
+                "title": "Mine",
+                "layers": [{"kind": "heatmap", "input": "b"}],
+            },
+        ],
+    }
+    resolved = normalize_spec(spec)
+    assert resolved["subplot_titles"] == ["Default 1", "Mine"]
+
+
 def test_pick_rejects_unknown_and_non_json():
     from weather_skills_core import UsageError
     from weather_skills_core.plot.figure import LINE_KEYS, pick

@@ -22,6 +22,8 @@ from weather_skills_core.plot.figure import (
     apply_style_then_rc,
     apply_suptitle,
     colorbar_mpl_kwargs,
+    colorbar_mpl_kwargs_from_dict,
+    colorbar_spec,
     facet_figure,
     finish_figure,
     format_plot_date,
@@ -45,6 +47,7 @@ from weather_skills_core.plot.theme import (
     DEFAULT_FONTSIZE,
     DISCRETE_PRECIP_NAMES,
     aggregation_days,
+    deep_merge,
     mpl_cmap_norm,
     parse_colormap_spec,
     resolve_colorscale,
@@ -2189,6 +2192,7 @@ def _plot_layers(
 
     last_by_group = {}
     group_axes = {}
+    group_overrides = {}
     last_quiv = None
     for i, s in enumerate(steps):
         ax = axes[i]
@@ -2211,11 +2215,13 @@ def _plot_layers(
                 key = share_keys.get(id(p), id(p))
                 last_by_group[key] = (artist, p)
                 group_axes.setdefault(key, []).append(ax)
+                group_overrides.setdefault(key, []).append(p["spec"].options.get("colorbar"))
             elif slab["kind"] == "scatter":
                 artist = _draw_scatter_on_ax(ax, slab, transform)
                 key = share_keys.get(id(p), id(p))
                 last_by_group[key] = (artist, p)
                 group_axes.setdefault(key, []).append(ax)
+                group_overrides.setdefault(key, []).append(p["spec"].options.get("colorbar"))
             elif slab["kind"] == "quiver":
                 _, scale, step = quiver_meta
                 mesh, quiv = _draw_quiver_on_ax(ax, slab, transform, scale, step, mpl_spec=mpl_spec)
@@ -2275,9 +2281,25 @@ def _plot_layers(
     apply_suptitle(fig, title, mpl_spec)
 
     visible = [ax for ax in axes if ax.get_visible()]
-    size_kw = colorbar_mpl_kwargs(mpl_spec or {})
+    base_colorbar = colorbar_spec(mpl_spec) or {}
+    base_size_kw = colorbar_mpl_kwargs_from_dict(base_colorbar)
     for key, (mappable, p) in last_by_group.items():
         axes_for = visible if key == "shared" else group_axes.get(key) or visible
+        distinct_axes = {id(a) for a in axes_for}
+        cell_overrides = {id(o): o for o in group_overrides.get(key, []) if o}
+        if cell_overrides:
+            if len(distinct_axes) > 1 or len(cell_overrides) > 1:
+                raise UsageError(
+                    "subplots[].colorbar is set on a cell whose colorbar is shared "
+                    "with another cell (matching vmin/vmax/colormap, or "
+                    "layout.shared_colorscale: true); give the cells distinct "
+                    "vmin/vmax/colormap, or set layout.shared_colorscale: false"
+                )
+            size_kw = colorbar_mpl_kwargs_from_dict(
+                deep_merge(base_colorbar, next(iter(cell_overrides.values())))
+            )
+        else:
+            size_kw = base_size_kw
         kw = dict(_cbar_boundary_kwargs(p.get("norm"), p.get("cmap")))
         if p.get("flag_ticks") is not None:
             kw["ticks"] = p["flag_ticks"]
@@ -2456,7 +2478,15 @@ def _layers_from_subplots(spec, inputs, by_id, dataset_for):
                 raise UsageError(f"subplots[].layers {kind} needs path")
             options = {
                 key: cell[key]
-                for key in ("variable", "index", "colormap", "vmin", "vmax", "cbar_label")
+                for key in (
+                    "variable",
+                    "index",
+                    "colormap",
+                    "vmin",
+                    "vmax",
+                    "cbar_label",
+                    "colorbar",
+                )
                 if cell.get(key) is not None
             }
             options.update(fold_layer_options(layer))
