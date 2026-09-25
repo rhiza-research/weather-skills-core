@@ -148,8 +148,12 @@ or `data: NULL` so an agent can see whether the figure changed and whether the
 plotted arrays are finite. Build the internal spec from the opened files, merge `--spec`, and return before `compile`/`export` when `maybe_emit_spec` is true (or call
 `maps.compile_grid` / `charts.compile_lines` / `charts.compile_mediogram`
 after data prep) and then `export(compiled, output, datasets=…)`. Public names:
-`PlotSpec`, `load_spec`, `dump_spec`, `compile`, `export`. Matplotlib does
-not load on `import weather_skills_core.plot`. The spec must not open files.
+`PlotSpec`, `load_spec`, `dump_spec`, `compile`, `export`. These live in the
+`weather_skills_plotting` package (its own repo,
+[`weather-skills-plotting`](https://github.com/rhiza-research/weather-skills-plotting)),
+not here — a figure skill depends on both it and this library. Matplotlib
+does not load on `import weather_skills_plotting`. The spec must not open
+files.
 
 ## Units
 

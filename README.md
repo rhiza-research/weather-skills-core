@@ -264,26 +264,13 @@ for the full units contract.
 
 ## Plotting
 
-Install the `[plot]` extra (matplotlib, seaborn, cartopy). The public names
-are `PlotSpec`, `load_spec`, `dump_spec`, `compile`, and `export`. Matplotlib
-does not load on `import weather_skills_core.plot`. The spec must not open
-files; pass already-opened Datasets into `compile`. Figure skills name
-files on the command line and take every other knob in `--spec`, which is
-deep-merged onto the spec built from those files. `--dump-spec -` writes
-that merge and skips the PNG.
-No `*.plot.json` sidecar is written.
-
-```python
-from weather_skills_core.plot import compile, export, load_spec
-
-spec = load_spec(dumped_json)  # or a path, if you wrote one with dump_spec
-compiled = compile(spec, {"a": ds})
-export(compiled, "out.png", datasets={"a": ds})  # no sidecar unless dump_spec_path=
-```
-
-Recipe skills that build a cell matrix or series in Python call
-`maps.compile_grid`, `charts.compile_lines`, or `charts.compile_mediogram`.
-Those helpers return the same `CompiledFigure` and go through `export`.
+The plot spec, matplotlib/Cartopy compiler, and figure helpers
+(`PlotSpec`, `compile`, `export`, `maps`, `charts`, `theme`) live in their
+own repo, [`weather-skills-plotting`](https://github.com/rhiza-research/weather-skills-plotting),
+as the `weather_skills_plotting` package — not here. This library still
+provides the shared pieces that plotting (and other skills) depend on:
+`errors`, `cf`, `display_labels`, `standard_utils`, `units`,
+`standard_dataset`, and the `weather_skill` CLI decorator.
 
 ## Install
 
