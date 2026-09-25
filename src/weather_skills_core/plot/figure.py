@@ -1551,11 +1551,39 @@ def suptitle_kwargs(spec: dict | None) -> dict:
     return {"y": number}
 
 
+def wrap_suptitle(fig, text):
+    """Wrap a figure title so it fits within the figure width. Keep existing breaks.
+
+    A centered ``Figure.suptitle`` that is wider than the figure itself does
+    not shrink or grow the canvas to fit — it just gets cut off at both
+    edges, on screen and in a ``bbox_inches="tight"`` export alike. Wrapping
+    it onto more lines, the same way ``wrap_axes_title`` already does for
+    panel titles, is what actually fits it; constrained layout then reserves
+    whatever extra height that needs automatically.
+    """
+    import textwrap
+
+    if text is None:
+        return text
+    raw = str(text)
+    if not raw.strip() or "\n" in raw:
+        return raw
+    width_in = max(float(fig.get_figwidth() or 1.0) * 0.94, 0.8)
+    import matplotlib as mpl
+
+    try:
+        size = float(mpl.rcParams.get("figure.titlesize", DEFAULT_FONTSIZE))
+    except (TypeError, ValueError):
+        size = float(DEFAULT_FONTSIZE)
+    char_in = max(size / 72.0 * 0.52, 0.06)
+    return textwrap.fill(raw, width=max(12, int(width_in / char_in)))
+
+
 def apply_suptitle(fig, title, spec=None):
     """Place the figure title, honoring ``layout.suptitle.y`` when set."""
     if not title:
         return None
-    return fig.suptitle(title, **suptitle_kwargs(spec))
+    return fig.suptitle(wrap_suptitle(fig, title), **suptitle_kwargs(spec))
 
 
 def colorbar_mpl_kwargs_from_dict(cbar: dict | None) -> dict:

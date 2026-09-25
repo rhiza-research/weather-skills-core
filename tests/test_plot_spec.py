@@ -997,6 +997,27 @@ def test_compile_heatmap_suptitle_never_overlaps_panel_titles():
         )
 
 
+def test_long_suptitle_wraps_instead_of_clipping():
+    """A figure title wider than the figure wraps onto more lines rather
+    than getting cut off at the left/right edges (a centered ``suptitle``
+    does not grow the canvas to fit itself, even with a tight export crop).
+    """
+    pytest.importorskip("matplotlib")
+    from weather_skills_core.plot import compile
+
+    ds = make_gridded(n_time=1)
+    spec = spec_from_flags(variable="precip", kind="heatmap")
+    spec["title"] = "CHIRPS 30-day rainfall total, Ethiopia (2026-08-22 to 2026-09-21)"
+    spec["layout"]["figsize"] = [5.5, 5.5]
+    fig = compile(spec, {"a": ds}).fig
+    assert "\n" in fig._suptitle.get_text()
+    fig.canvas.draw()
+    renderer = fig.canvas.get_renderer()
+    bbox = fig._suptitle.get_window_extent(renderer)
+    assert bbox.x0 >= fig.bbox.x0 - 1.0
+    assert bbox.x1 <= fig.bbox.x1 + 1.0
+
+
 def test_normalize_spec_rejects_negative_facet_spacing():
     from weather_skills_core import UsageError
     from weather_skills_core.plot.spec import normalize_spec
