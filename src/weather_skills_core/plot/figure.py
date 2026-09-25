@@ -481,12 +481,18 @@ def facet_figure(
     hspace=None,
     despine=True,
 ):
-    """Build a panel grid with seaborn ``FacetGrid``.
+    """Build a panel grid with seaborn ``FacetGrid``, laid out by matplotlib's
+    constrained-layout engine.
 
-    Map panels pass a Cartopy projection through ``subplot_kws``. ``wspace`` /
-    ``hspace`` are GridSpec fractions (``--panel-spacing``). FacetGrid's
-    ``tight_layout`` overwrites those fractions, so they are applied again
-    afterwards. Returns ``(fig, axes)`` with ``axes`` shaped ``(nrows, ncols)``.
+    Map panels pass a Cartopy projection through ``subplot_kws``. ``FacetGrid``
+    itself calls an internal, unconditional ``tight_layout()`` at construction
+    time — before any panel title, colorbar, or figure title exists — so its
+    result is transient and gets fully superseded the moment the constrained
+    layout engine takes over below. That single engine (not a GridSpec kwarg,
+    not a manual ``tight_layout()`` pass, not a hand-tuned ``suptitle.y``) is
+    what reserves room for panel titles, the figure title, and colorbars, and
+    what makes an explicit ``wspace``/``hspace`` (see ``_reapply_facet_spacing``)
+    take effect. Returns ``(fig, axes)`` with ``axes`` shaped ``(nrows, ncols)``.
     """
     import numpy as np
     import pandas as pd
@@ -503,11 +509,6 @@ def facet_figure(
     )
     height = float(figsize[1]) / nrows
     aspect = (float(figsize[0]) / ncols) / height if height else 1.0
-    gridspec_kws = {}
-    if wspace is not None:
-        gridspec_kws["wspace"] = float(wspace)
-    if hspace is not None:
-        gridspec_kws["hspace"] = float(hspace)
     grid = sns.FacetGrid(
         data,
         row="row",
@@ -519,7 +520,6 @@ def facet_figure(
         height=height,
         aspect=aspect,
         subplot_kws=subplot_kws,
-        gridspec_kws=gridspec_kws or None,
         despine=despine,
         legend_out=False,
     )
@@ -537,14 +537,22 @@ def facet_figure(
 
 
 def _reapply_facet_spacing(fig):
+    """Put the figure under constrained layout and apply any requested
+    ``wspace``/``hspace``. Constrained layout recomputes on every draw, so
+    this is safe to call more than once and needs no ``tight_layout()``
+    companion pass — see ``settle_figure``.
+    """
+    fig.set_layout_engine("constrained")
     spacing = getattr(fig, "_ws_facet_spacing", None)
     if not spacing or (spacing[0] is None and spacing[1] is None):
         return
     wspace, hspace = spacing
-    fig.subplots_adjust(
-        wspace=0.0 if wspace is None else wspace,
-        hspace=0.0 if hspace is None else hspace,
-    )
+    kw = {}
+    if wspace is not None:
+        kw["wspace"] = wspace
+    if hspace is not None:
+        kw["hspace"] = hspace
+    fig.get_layout_engine().set(**kw)
 
 
 def wrap_axes_title(ax, text):
@@ -592,24 +600,13 @@ def relax_colorbar_ticklabels(fig):
             tick.set_rotation_mode("anchor")
 
 
-def _tight_layout_safe(fig) -> bool:
-    """Cartopy and polar axes ignore ``tight_layout`` and it pulls the colorbar onto the map."""
-    for ax in fig.axes:
-        if ax.get_label() == "<colorbar>":
-            continue
-        if getattr(ax, "name", None) == "polar":
-            return False
-        projection = getattr(ax, "projection", None)
-        if projection is not None and type(ax).__name__ == "GeoAxes":
-            return False
-    return True
-
-
 def settle_figure(fig):
-    """Reserve title and label space with seaborn's tight layout, then keep facet gaps."""
-    if _tight_layout_safe(fig):
-        fig.tight_layout()
-        _reapply_facet_spacing(fig)
+    """Keep the figure under constrained layout (it already reserves room for
+    titles, labels, and colorbars on every draw — no ``tight_layout()`` call
+    needed, and calling one here would error once a colorbar exists on a
+    constrained-layout figure), then fix up crowded colorbar tick labels.
+    """
+    _reapply_facet_spacing(fig)
     relax_colorbar_ticklabels(fig)
 
 

@@ -977,6 +977,26 @@ def test_compile_heatmap_facet_spacing_separates_panels():
     assert fig_spaced._ws_facet_spacing[0] == 0.45
 
 
+def test_compile_heatmap_suptitle_never_overlaps_panel_titles():
+    """The figure title clears every panel title with no manual hspace or
+    ``layout.suptitle.y`` needed — constrained layout reserves the room."""
+    pytest.importorskip("matplotlib")
+    from weather_skills_core.plot import compile
+
+    ds = make_gridded(n_time=6)
+    spec = spec_from_flags(variable="precip", kind="heatmap")
+    spec["title"] = "A figure title long enough to test real spacing"
+    fig = compile(spec, {"a": ds}).fig
+    fig.canvas.draw()
+    renderer = fig.canvas.get_renderer()
+    suptitle_bbox = fig._suptitle.get_window_extent(renderer)
+    for ax in _visible_map_axes(fig):
+        title_bbox = ax.title.get_window_extent(renderer)
+        assert suptitle_bbox.y0 >= title_bbox.y1, (
+            "figure title overlaps a panel title without any manual spacing set"
+        )
+
+
 def test_normalize_spec_rejects_negative_facet_spacing():
     from weather_skills_core import UsageError
     from weather_skills_core.plot.spec import normalize_spec
