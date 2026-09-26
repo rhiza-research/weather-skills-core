@@ -4,9 +4,11 @@ Lookup order (no network until a later step):
 
 1. Bundled Natural Earth countries — ISO3 or country name.
 2. Bundled Natural Earth groupings — continent / UN / World Bank labels
-   (``East Africa``, ``Sub-Saharan Africa``, …).
-3. geoBoundaries admin-1 / admin-2 — ``kenya-nairobi`` or ``KEN-nairobi``.
-4. OSM Nominatim — landmarks only, via :func:`geocode_nominatim`.
+   (``Eastern Africa``, ``Sub-Saharan Africa``, …). ``East Africa`` is the
+   Eastern Africa grouping clipped at 15°S.
+3. Bundled custom forecast boxes — ``Kenya OND region``, ``Indian Ocean basin``, ….
+4. geoBoundaries admin-1 / admin-2 — ``kenya-nairobi`` or ``KEN-nairobi``.
+5. OSM Nominatim — landmarks only, via :func:`geocode_nominatim`.
 
 Rebuild the country file with ``tools/build_countries.py``.
 """
@@ -68,6 +70,44 @@ _COUNTRY_ALIASES = {
     "falkland_islands_(uk)": "falkland_islands",
     "gaza_strip": "palestine",
     "west_bank": "palestine",
+}
+
+# ``East Africa`` is the NE Eastern Africa grouping clipped at this latitude
+# (Greater Horn / ICPAC-style view). ``Eastern Africa`` stays the full UN box.
+_EAST_AFRICA_SOUTH = -15.0
+
+# ``Kenya OND region`` analog box (N, W, S, E): 36.5–42°E, 5°S–5°N.
+_KENYA_OND_BBOX = (5.0, 36.5, -5.0, 42.0)
+
+# Forecast / briefing boxes that are not Natural Earth groupings or admin units.
+# ``bbox`` is (N, W, S, E). Aliases are passed through :func:`clean_region_name`.
+_CUSTOM_REGIONS = {
+    "kenya_ond_region": {
+        "name": "Kenya OND region",
+        "bbox": _KENYA_OND_BBOX,
+        "iso3": "KEN",
+        "country": "Kenya",
+        "aliases": (
+            "Kenya OND",
+            "OND Kenya",
+            "Central-Eastern Kenya",
+            "Central Eastern Kenya",
+            "Central and Eastern Kenya",
+            "CE Kenya",
+        ),
+    },
+    "indian_ocean_basin": {
+        "name": "Indian Ocean basin",
+        "bbox": (30.0, 20.0, -40.0, 120.0),
+        "iso3": None,
+        "country": None,
+        "aliases": (
+            "Indian Ocean",
+            "Indian Ocean Basin",
+            "Indian Ocean basin region",
+            "IOB",
+        ),
+    },
 }
 
 
@@ -276,6 +316,32 @@ def _region_indexes() -> dict[str, dict]:
     return by_key
 
 
+@lru_cache(maxsize=1)
+def _custom_indexes() -> dict[str, dict]:
+    """Cleaned query → bundled custom forecast box."""
+    by_key: dict[str, dict] = {}
+    for key, spec in _CUSTOM_REGIONS.items():
+        by_key[key] = spec
+        for alias in (spec["name"], *spec.get("aliases", ())):
+            cleaned = clean_region_name(alias)
+            if cleaned != "no_region":
+                by_key.setdefault(cleaned, spec)
+    return by_key
+
+
+def _slim_custom(spec: dict) -> dict:
+    north, west, south, east = spec["bbox"]
+    return _feature(
+        _bbox_rectangle(north, west, south, east),
+        iso3=spec.get("iso3"),
+        name=spec["name"],
+        region_name=clean_region_name(spec["name"]),
+        level="custom",
+        country=spec.get("country"),
+        bbox=[north, west, south, east],
+    )
+
+
 def _slim_country(feature: dict) -> dict:
     props = feature["properties"]
     return _feature(
@@ -286,6 +352,43 @@ def _slim_country(feature: dict) -> dict:
         level="country",
         country=props["name"],
     )
+
+
+def _clip_geometry_to_rect(geometry, west, south, east, north):
+    """Intersect a GeoJSON geometry with a lon/lat rectangle; return GeoJSON."""
+    from shapely.geometry import GeometryCollection, box, mapping, shape
+    from shapely.ops import unary_union
+
+    clipped = shape(geometry).intersection(
+        box(float(west), float(south), float(east), float(north))
+    )
+    if clipped.is_empty:
+        return None
+    if clipped.geom_type == "GeometryCollection" or isinstance(clipped, GeometryCollection):
+        parts = [
+            part
+            for part in clipped.geoms
+            if not part.is_empty and part.geom_type in ("Polygon", "MultiPolygon")
+        ]
+        if not parts:
+            return None
+        clipped = unary_union(parts)
+    return mapping(clipped)
+
+
+def _clip_feature_south(feature: dict, south: float) -> dict:
+    """Keep land at or north of ``south``; bbox south is exactly that latitude."""
+    geometry = _clip_geometry_to_rect(feature["geometry"], -180.0, south, 180.0, 90.0)
+    if geometry is None:
+        raise DataError(
+            f"{feature['properties'].get('name')!r} has no land north of {south}°."
+        )
+    north, west, _south, east = bbox_from_geometry(geometry)
+    props = dict(feature["properties"])
+    props["name"] = "East Africa"
+    props["region_name"] = "east_africa"
+    props["bbox"] = [north, west, float(south), east]
+    return {**feature, "geometry": geometry, "properties": props}
 
 
 def _slim_region(spec: dict) -> dict:
@@ -312,7 +415,7 @@ def _slim_region(spec: dict) -> dict:
 
 
 def _match_bundled(cleaned: str) -> dict | None:
-    """ISO3, country name, or Natural Earth grouping. Country names win (South Africa)."""
+    """ISO3, country name, NE grouping, or custom box. Country names win (South Africa)."""
     by_iso3, by_clean = _country_indexes()
     if _is_iso3_token(cleaned):
         match = by_iso3.get(cleaned.upper())
@@ -323,7 +426,13 @@ def _match_bundled(cleaned: str) -> dict | None:
         return _slim_country(match)
     named = _region_indexes().get(cleaned)
     if named is not None:
-        return _slim_region(named)
+        feature = _slim_region(named)
+        if cleaned == "east_africa":
+            return _clip_feature_south(feature, _EAST_AFRICA_SOUTH)
+        return feature
+    custom = _custom_indexes().get(cleaned)
+    if custom is not None:
+        return _slim_custom(custom)
     return None
 
 
@@ -443,14 +552,15 @@ def _split_subnational(cleaned: str) -> tuple[dict, str] | None:
 def should_geocode(query: str) -> bool:
     """True when a failed :func:`lookup_region` may fall through to Nominatim.
 
-    ISO3-shaped tokens, hierarchical admin keys, and Natural Earth regions
-    stay off Nominatim even when the lookup itself failed (typo in the unit).
+    ISO3-shaped tokens, hierarchical admin keys, Natural Earth regions, and
+    bundled custom forecast boxes stay off Nominatim even when the lookup
+    itself failed (typo in the unit).
     """
     text = query.strip()
     if not text:
         return False
     cleaned = clean_region_name(text)
-    if _is_iso3_token(cleaned) or cleaned in _region_indexes():
+    if _is_iso3_token(cleaned) or cleaned in _region_indexes() or cleaned in _custom_indexes():
         return False
     return _split_subnational(cleaned) is None
 
@@ -504,7 +614,8 @@ def geocode_nominatim(query: str) -> dict:
         raise DataError(
             f"{query!r} is not a known ISO3 code, country name, named region, "
             "or sub-national region, and Nominatim found no matching place. "
-            "Pass an ISO3 code, country-admin1, a named region (e.g. East Africa), "
+            "Pass an ISO3 code, country-admin1, a named region "
+            "(e.g. East Africa, Kenya OND region), "
             "or a more specific landmark (e.g. 'Mount Kenya, Kenya')."
         )
     hit = hits[0]
@@ -528,12 +639,12 @@ def geocode_nominatim(query: str) -> dict:
 
 
 def lookup_region(query: str) -> dict:
-    """Resolve ISO3, country, Natural Earth region, or ``country-admin`` to a Feature."""
+    """Resolve ISO3, country, NE region, custom box, or ``country-admin`` to a Feature."""
     text = query.strip()
     if not text:
         raise UsageError(
             "region query must be a non-empty ISO3 code, country name, "
-            "named region (e.g. East Africa), or sub-national region "
+            "named region (e.g. East Africa, Kenya OND region), or sub-national region "
             "(e.g. kenya-nairobi)."
         )
 
@@ -559,7 +670,7 @@ def lookup_region(query: str) -> dict:
 
     raise DataError(
         f"{query!r} is not a known ISO3 code, country name, named region "
-        "(e.g. East Africa), or sub-national region "
+        "(e.g. East Africa, Kenya OND region), or sub-national region "
         "(country-admin1 / country-admin1-admin2)."
     )
 

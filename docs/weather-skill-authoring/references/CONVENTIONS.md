@@ -53,7 +53,8 @@ and relative dates are not decorator flags.
 ```
 
 - **resolve-region** turns an ISO3 code, a Natural Earth multi-country
-  region (`East Africa`), or a `country-admin…` key into a bbox (and
+  region (`East Africa`), a custom forecast box (`Kenya OND region`),
+  or a `country-admin…` key into a bbox (and
   optional GeoJSON). Anything else falls through to OSM Nominatim
   (`limit=1`) for landmarks.
 - **resolve-time** is calendar math against UTC today (or `--as-of`).
@@ -66,7 +67,7 @@ Consumer skills take `--bbox`. Polygon clipping is skill-specific
 
 | Concept | Usual flag | Notes |
 | --- | --- | --- |
-| Zarr input | `-i` / `--input` | `type=Dataset(...)`. Arrives as `ds` (a list if `nargs` / `append`). Name the flag by role when inputs differ (`--forecast`, `--obs`). |
+| Zarr input | `-i` / `--input` | `type=Dataset(...)`. Arrives as `ds` (a list if `action="append"`). Repeat `-i` once per Zarr. Name the flag by role when inputs differ (`--forecast`, `--obs`). |
 | Opaque file | whatever fits | GeoJSON, PNG, … — `type=Path`, not `Dataset`. |
 | Output path | `-o` / `--output`, repeatable | Owned by the decorator (`output=True` default). Count must match returned artifacts. |
 

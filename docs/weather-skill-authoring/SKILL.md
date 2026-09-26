@@ -33,6 +33,7 @@ One question per file:
 # ///
 from weather_skills_core import Dataset, weather_skill
 
+# Keep in lockstep with SKILL.md metadata.version; do not edit by hand.
 _SKILL_VERSION = "0.1.0"
 
 
@@ -55,6 +56,13 @@ if __name__ == "__main__":
     my_skill()
 ```
 
+Pair that constant with SKILL.md frontmatter (do not edit either by hand; CI bumps both):
+
+```yaml
+metadata:
+  version: "0.1.0"
+```
+
 `@weather_skill.argument(...)` mirrors
 `argparse.ArgumentParser.add_argument`. Stack one decorator per flag. The skill
 function **must** accept `**kwargs`. **Every** declared flag is injected as a
@@ -65,7 +73,7 @@ and custom flags alike.
 
 Use `type=Dataset(...)` for Zarr inputs. The decorator opens the path, checks
 required dims, quantifies units, and injects the opened dataset as `ds` (a
-list if you used `nargs`/`append`). Grammar:
+list if you used `action="append"`). Grammar:
 
 | Form | Meaning |
 | --- | --- |
@@ -76,8 +84,8 @@ list if you used `nargs`/`append`). Grammar:
 | `Dataset("any")` | any Zarr; skip dim checks |
 
 Opaque files (GeoJSON, …) use `type=Path`, not `Dataset`. Flag names are
-free-form (`-i/--input`, `--forecast`, …). Multi-input: `nargs=2` / `nargs="+"`
-or separate Dataset args.
+free-form (`-i/--input`, `--forecast`, …). Multi-input: `action="append"`
+(repeat `-i` once per Zarr) or separate Dataset args.
 
 ## Outputs
 
@@ -131,6 +139,22 @@ resolve-time skill and pass the printed `--start-time`/`--end-time` or
 | Figure | Dataset input(s) + decorator `-o` | Path (write PNG yourself) |
 | Inspect | Dataset or Path input; `output=False` | anything (stdout) |
 
+Figure skills name files on the command line. Parameters go in `--spec`,
+which is deep-merged onto the spec built from those files. `--dump-spec`
+writes that merge and skips the PNG (`-o` is not required). Call `maybe_emit_spec` after
+assembling the spec and return before `compile`/`export` when it is True.
+`export()` writes the PNG and prints a pixel `plot hash` plus `data: not null`
+or `data: NULL` so an agent can see whether the figure changed and whether the
+plotted arrays are finite. Build the internal spec from the opened files, merge `--spec`, and return before `compile`/`export` when `maybe_emit_spec` is true (or call
+`maps.compile_grid` / `charts.compile_lines` / `charts.compile_mediogram`
+after data prep) and then `export(compiled, output, datasets=…)`. Public names:
+`PlotSpec`, `load_spec`, `dump_spec`, `compile`, `export`. These live in the
+`weather_skills_plotting` package (its own repo,
+[`weather-skills-plotting`](https://github.com/rhiza-research/weather-skills-plotting)),
+not here — a figure skill depends on both it and this library. Matplotlib
+does not load on `import weather_skills_plotting`. The spec must not open
+files.
+
 ## Units
 
 Most skills accept precip **rates** (`mm day-1`) and **amounts** (`mm`). The
@@ -139,12 +163,16 @@ exception is `convert-to-totals` / `rate_to_total`, which multiply a rate by
 
 ## Provenance
 
-The decorator appends a `weather_skills_history` entry (skill name, version,
-args, input basename+hash). Path write targets and Dataset path strings are
-omitted from the args blob. PNG/JPEG figures with an intact chain get a corner
-mark.
+The decorator records a `weather_skills_history` node (skill name, version,
+git commit of the running skill, args, input basename+hash). A single-input
+skill appends to the parent's path; a multi-input skill is a join whose
+entry nests every parent's subgraph. Path write targets and Dataset path
+strings are omitted from the args blob. PNG/JPEG figures with an intact
+chain get a corner mark.
 
 ## Layout
 
-Keep the script as domain logic. Put version in `_SKILL_VERSION`. Declare
+Keep the script as domain logic. Put the published identity in SKILL.md
+`metadata.version` (Agent Skills spec) and a matching `_SKILL_VERSION` in
+the script; CI rewrites both. Declare
 `weather-skills-core` in the PEP 723 block. Document every flag in SKILL.md.

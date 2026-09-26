@@ -17,6 +17,7 @@ from weather_skills_core.dataset_type import Dataset
 from weather_skills_core.errors import SkillError, UsageError
 from weather_skills_core.standard_utils import (
     fill_missing_data_var_attrs,
+    normalize_latlon_coords,
     normalize_step_coord,
 )
 from weather_skills_core.units import (
@@ -28,6 +29,9 @@ from weather_skills_core.units import (
 
 # Accumulated by ``@weather_skill.argument`` (bottom-up); weather_skill reads it.
 ARGS_ATTR = "__weather_skill_arguments__"
+
+# In-memory only: source Zarr path for plot-spec dump. Stripped before any write.
+INPUT_PATH_ATTR = "weather_skills_input_path"
 
 
 def argv_has_option(argv: list[str], option_strings) -> bool:
@@ -69,31 +73,45 @@ class Argument:
         return flag.lstrip("-").replace("-", "_")
 
 
-def build_history(name, version, args, params, input_paths, upstream, strip_dests):
-    """Append this skill's provenance entry to the first input's history."""
+def _history_json_default(obj):
+    """Keep a plot spec's keys in provenance instead of stringifying the object."""
+    to_dict = getattr(obj, "to_dict", None)
+    if callable(to_dict):
+        return to_dict()
+    return str(obj)
+
+
+def build_history(name, version, args, params, input_paths, upstream, strip_dests, revision=None):
+    """Record this skill as a node on the provenance DAG.
+
+    A fetcher (no inputs) or a single-input transform stays a path: the
+    parent's history plus this entry. A multi-input skill is a join: the
+    top-level array is only this entry, and every parent's full subgraph is
+    nested on that entry's ``input`` list. ``revision`` is the git identity
+    of the skill that ran (commit / repo / dirty).
+    """
     entry_args = {k: v for k, v in vars(args).items() if k not in strip_dests}
     for dest in ("date", "start_time", "end_time"):
         if dest in params and params[dest] is not None:
             entry_args[dest] = params[dest].isoformat()
-    entry_args = json.loads(json.dumps(entry_args, default=str))
+    entry_args = json.loads(json.dumps(entry_args, default=_history_json_default))
 
     if not input_paths:
         input_field, base_history = None, []
     elif len(input_paths) == 1:
         input_field = provenance_mod.input_ref(input_paths[0])
-        base_history = upstream[0]
+        base_history = list(upstream[0])
     else:
         input_field = [
-            {
-                "basename": path.name,
-                "hash": provenance_mod.hash_zarr(path),
-                "history": hist,
-            }
+            provenance_mod.input_ref(path, hist)
             for path, hist in zip(input_paths, upstream, strict=True)
         ]
-        base_history = upstream[0]
+        # Join node: do not flatten the first parent into a linear spine.
+        base_history = []
 
-    return base_history + [provenance_mod.build_entry(name, version, entry_args, input_field)]
+    return base_history + [
+        provenance_mod.build_entry(name, version, entry_args, input_field, revision=revision)
+    ]
 
 
 def prepare_dataset_output(ds, *, first_ds=None):
@@ -102,6 +120,7 @@ def prepare_dataset_output(ds, *, first_ds=None):
     - GRIB-style ``kg m**-2`` → pint/CF strings
     - precip amount units → amount CF ``standard_name``
     - ``step`` timedelta → ``timedelta64[ns]``
+    - lat/lon coords → 5 decimal places, ``float32``
     - fill attrs stripped by geometry ops from the first input (same var names)
     """
     if first_ds is not None:
@@ -111,7 +130,10 @@ def prepare_dataset_output(ds, *, first_ds=None):
         ds = fill_missing_data_var_attrs(ref, ds)
     ds = normalize_unit_strings(ds)
     ds = stamp_precip_amounts(ds)
-    return normalize_step_coord(ds)
+    ds = normalize_step_coord(ds)
+    ds = normalize_latlon_coords(ds)
+    ds.attrs.pop(INPUT_PATH_ATTR, None)
+    return ds
 
 
 def write_output(value, out_path, history, first_ds):
@@ -135,6 +157,7 @@ def write_output(value, out_path, history, first_ds):
     value = prepare_dataset_output(value, first_ds=first_ds)
     if first_ds is not None:
         value.attrs = {**first_ds.attrs, **value.attrs}
+    value.attrs.pop(INPUT_PATH_ATTR, None)
     provenance_mod.stamp_zarr(value, history)
     if out_path.exists():
         shutil.rmtree(out_path)
@@ -147,11 +170,52 @@ def write_output(value, out_path, history, first_ds):
     print(f"Wrote: {out_path}", file=sys.stderr)
 
 
+def _open_zarr(path, io_spec=None):
+    """Open, validate, and quantify one Zarr store."""
+    if not path.exists():
+        raise UsageError(f"input not found: {path}")
+    ds = xr.open_zarr(path, consolidated=True)
+    if io_spec is not None:
+        std.validate_input(ds, io_spec, str(path))
+    ds = normalize_unit_strings(ds)
+    ds = normalize_step_coord(ds)
+    return quantify_dataset(ds)
+
+
+def _iter_zarr_path_holders(value):
+    """Yield objects that expose ``zarr_paths()`` (e.g. plot ``LayerSpec``)."""
+    if value is None:
+        return
+    items = value if isinstance(value, (list, tuple)) else (value,)
+    for item in items:
+        fn = getattr(item, "zarr_paths", None)
+        if callable(fn):
+            yield item
+
+
 def open_dataset_params(params, arguments):
-    """Replace Dataset-typed Path values with opened/validated/quantified datasets."""
+    """Replace Dataset-typed Path values with opened/validated/quantified datasets.
+
+    Values (or list items) that expose ``zarr_paths() -> list[Path]`` are also
+    opened and hashed. Identical paths are opened once and reused. Each holder
+    gets ``.ds`` (one path) or ``.datasets`` (several).
+    """
     input_paths: list[Path] = []
     upstream: list = []
     first_ds = None
+    cache: dict[Path, xr.Dataset] = {}
+
+    def remember(path, ds):
+        nonlocal first_ds
+        resolved = path.resolve()
+        cache[resolved] = ds
+        if resolved not in {p.resolve() for p in input_paths}:
+            input_paths.append(path)
+            upstream.append(provenance_mod.load_history(path))
+        if first_ds is None:
+            first_ds = ds
+        ds.attrs[INPUT_PATH_ATTR] = str(path)
+        return ds
 
     for arg in arguments:
         if arg.dataset_type is None:
@@ -164,19 +228,33 @@ def open_dataset_params(params, arguments):
             continue
         opened = []
         for path in paths:
-            if not path.exists():
-                raise UsageError(f"input not found: {path}")
-            ds = xr.open_zarr(path, consolidated=True)
-            std.validate_input(ds, arg.dataset_type.io_spec, str(path))
-            ds = normalize_unit_strings(ds)
-            ds = normalize_step_coord(ds)
-            ds = quantify_dataset(ds)
-            opened.append(ds)
-            input_paths.append(path)
-            upstream.append(provenance_mod.load_history(path))
-            if first_ds is None:
-                first_ds = ds
+            resolved = path.resolve()
+            ds = cache.get(resolved)
+            if ds is None:
+                ds = _open_zarr(path, arg.dataset_type.io_spec)
+            opened.append(remember(path, ds))
         params[dest] = opened if isinstance(raw, (list, tuple)) else opened[0]
+
+    seen_holders: list[object] = []
+    for raw in list(params.values()):
+        for holder in _iter_zarr_path_holders(raw):
+            if holder in seen_holders:
+                continue
+            seen_holders.append(holder)
+            opened = []
+            for path in holder.zarr_paths() or []:
+                path = Path(path)
+                resolved = path.resolve()
+                ds = cache.get(resolved)
+                if ds is None:
+                    ds = _open_zarr(path)
+                opened.append(remember(path, ds))
+            if not opened:
+                continue
+            if len(opened) == 1:
+                holder.ds = opened[0]
+            else:
+                holder.datasets = opened
 
     return params, input_paths, upstream, first_ds
 
@@ -204,7 +282,10 @@ def weather_skill(
 
     Stack ``@weather_skill.argument`` for flags. Use ``type=Dataset(...)`` for
     Zarr inputs (opened and dim-checked before the skill runs). Dataset
-    ``--input`` is passed to the skill as ``ds`` (a list when nargs/append).
+    ``--input`` is passed to the skill as ``ds`` (a list when ``action="append"``).
+    Converted values that expose ``zarr_paths() -> list[Path]`` are opened and
+    hashed the same way (identical paths are reused); each holder gets ``.ds``
+    or ``.datasets``.
 
     When ``output=True`` (default), the decorator owns ``-o/--output``
     (repeatable). It injects ``output`` as a ``Path`` (one path) or
@@ -221,9 +302,10 @@ def weather_skill(
 
     On every Dataset write the decorator also normalizes GRIB unit strings,
     stamps precip-amount CF names when units are amounts, casts ``step`` to
-    ``timedelta64[ns]``, and fills data-var attrs stripped by the skill from
-    the first input (same variable names). Value conversion
-    (``to_standard_units``) stays skill-owned.
+    ``timedelta64[ns]``, rounds lat/lon to 5 decimal places as ``float32``,
+    and fills data-var attrs stripped by the skill from the first input
+    (same variable names). Value conversion (``to_standard_units``) stays
+    skill-owned.
     """
 
     def decorator(fn):
@@ -331,7 +413,14 @@ def weather_skill(
                     )
 
                 history = build_history(
-                    name, version, args, params, input_paths, upstream, strip_dests
+                    name,
+                    version,
+                    args,
+                    params,
+                    input_paths,
+                    upstream,
+                    strip_dests,
+                    revision=provenance_mod.resolve_skill_revision(fn),
                 )
                 for value, out_path in zip(results, output_paths, strict=True):
                     write_output(value, out_path, history, first_ds)
