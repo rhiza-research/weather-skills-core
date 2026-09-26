@@ -139,18 +139,21 @@ resolve-time skill and pass the printed `--start-time`/`--end-time` or
 | Figure | Dataset input(s) + decorator `-o` | Path (write PNG yourself) |
 | Inspect | Dataset or Path input; `output=False` | anything (stdout) |
 
-Figure skills keep CLI flags and fold them through `FLAG_TO_SPEC`. `--dump-spec`
-dumps the assembled spec as JSON and skips the PNG (`-o` is not required);
-`--patch` submits edits. `--spec` is an optional full JSON object, not a
-replacement for `--title` / `--variable`. Call `maybe_emit_spec` after
+Figure skills name files on the command line. Parameters go in `--spec`,
+which is deep-merged onto the spec built from those files. `--dump-spec`
+writes that merge and skips the PNG (`-o` is not required). Call `maybe_emit_spec` after
 assembling the spec and return before `compile`/`export` when it is True.
 `export()` writes the PNG and prints a pixel `plot hash` plus `data: not null`
 or `data: NULL` so an agent can see whether the figure changed and whether the
-plotted arrays are finite. Assemble a spec from flags (or call
+plotted arrays are finite. Build the internal spec from the opened files, merge `--spec`, and return before `compile`/`export` when `maybe_emit_spec` is true (or call
 `maps.compile_grid` / `charts.compile_lines` / `charts.compile_mediogram`
 after data prep) and then `export(compiled, output, datasets=…)`. Public names:
-`PlotSpec`, `load_spec`, `dump_spec`, `compile`, `export`. Matplotlib does
-not load on `import weather_skills_core.plot`. The spec must not open files.
+`PlotSpec`, `load_spec`, `dump_spec`, `compile`, `export`. These live in the
+`weather_skills_plotting` package (its own repo,
+[`weather-skills-plotting`](https://github.com/rhiza-research/weather-skills-plotting)),
+not here — a figure skill depends on both it and this library. Matplotlib
+does not load on `import weather_skills_plotting`. The spec must not open
+files.
 
 ## Units
 
