@@ -7,6 +7,7 @@ under ``input[].history``. Each new entry also records the git ``commit``
 (and optional ``repo`` / ``dirty``) of the skill that ran.
 """
 
+import csv
 import hashlib
 import html
 import inspect
@@ -348,13 +349,63 @@ def _direct_url_payload(dist) -> dict | None:
     return None
 
 
+def _revision_from_payload(payload: dict) -> dict | None:
+    vcs = payload.get("vcs_info") if isinstance(payload.get("vcs_info"), dict) else {}
+    commit = vcs.get("commit_id")
+    if not isinstance(commit, str) or not commit:
+        return None
+    revision = {"commit": commit}
+    url = payload.get("url")
+    if isinstance(url, str) and url:
+        revision["repo"] = normalize_repo_url(url)
+    return revision
+
+
+def _record_lists(info_dir: Path, rel: str) -> bool:
+    try:
+        with (info_dir / "RECORD").open(encoding="utf-8", newline="") as fh:
+            return any(row and row[0] == rel for row in csv.reader(fh))
+    except (OSError, csv.Error, UnicodeDecodeError):
+        return False
+
+
+def _revision_from_sibling_dist_info(source_file: Path) -> dict | None:
+    """Find the ``*.dist-info`` beside an ancestor of ``source_file`` that owns it.
+
+    The skills runner launches each skill with ``uv run --script``, a separate
+    environment from the one that installed the skill files, so the owning dist
+    is not in ``importlib.metadata.distributions()``. Its ``site-packages`` is
+    still an ancestor of the script, with the dist-info right there.
+    """
+    for root in source_file.parents:
+        try:
+            infos = sorted(root.glob("*.dist-info"))
+        except OSError:
+            continue
+        if not infos:
+            continue
+        rel = source_file.relative_to(root).as_posix()
+        for info in infos:
+            if not _record_lists(info, rel):
+                continue
+            try:
+                payload = json.loads((info / "direct_url.json").read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                return None
+            return _revision_from_payload(payload) if isinstance(payload, dict) else None
+    return None
+
+
 def _revision_from_direct_url(source_file: Path) -> dict | None:
     """Read PEP 610 ``direct_url.json`` for the installed dist that owns ``source_file``."""
+    source_file = source_file.resolve()
+    revision = _revision_from_sibling_dist_info(source_file)
+    if revision is not None:
+        return revision
     try:
         from importlib.metadata import distributions
     except ImportError:
         return None
-    source_file = source_file.resolve()
     for dist in distributions():
         owned = False
         for file in getattr(dist, "files", None) or []:
@@ -367,17 +418,9 @@ def _revision_from_direct_url(source_file: Path) -> dict | None:
         if not owned:
             continue
         payload = _direct_url_payload(dist)
-        if payload is None:
-            continue
-        vcs = payload.get("vcs_info") if isinstance(payload.get("vcs_info"), dict) else {}
-        commit = vcs.get("commit_id")
-        if not isinstance(commit, str) or not commit:
-            continue
-        revision = {"commit": commit}
-        url = payload.get("url")
-        if isinstance(url, str) and url:
-            revision["repo"] = normalize_repo_url(url)
-        return revision
+        revision = _revision_from_payload(payload) if payload is not None else None
+        if revision is not None:
+            return revision
     return None
 
 
@@ -386,7 +429,8 @@ def resolve_skill_revision(source=None) -> dict | None:
 
     ``source`` may be a skill function or a filesystem path. Prefers the git
     checkout that contains the file; falls back to the installed package's
-    ``direct_url.json`` (``uvx --from git+…@sha``). Returns ``None`` when
+    ``direct_url.json`` (``uvx --from git+…@sha``), including when the skill
+    runs in its own ``uv run --script`` environment. Returns ``None`` when
     neither is available. Untracked files do not count as dirty.
     """
     path = None
