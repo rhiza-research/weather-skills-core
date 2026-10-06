@@ -121,11 +121,9 @@ def auto_variable(ds):
 def resolve_input_variable(inputs, ds, *, id=None, index=None):
     """This input's own ``variable``, else ``inputs[0].variable``, else auto-detect on ``ds``.
 
-    Match the input by ``id`` (preferred) or list ``index``. This is the one
-    place "which variable does this dataset use" is resolved, so every
-    plot-* skill treats a per-input override, and the ``inputs[0]`` fallback,
-    the same way — a spec key set on one dataset never leaks onto another
-    dataset that has its own name for the same field.
+    ``inputs`` is a list of ``{"id", "variable", …}`` objects. Match the input
+    by ``id`` (preferred) or list ``index``; its own ``variable`` wins, then
+    ``inputs[0].variable``, then auto-detection on ``ds``.
     """
     items = [item for item in (inputs or []) if isinstance(item, dict)]
     own = None

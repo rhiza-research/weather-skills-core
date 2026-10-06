@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 248" width="800" height="248" role="img" aria-labelledby="title desc">
   <title id="title">Composable weather skills</title>
-  <desc id="desc">Fetchers write a standard Zarr. Transforms take Zarr in and Zarr out. Figure skills read those stores and write a PNG. Mix any combination — the file contract stays the same.</desc>
+  <desc id="desc">Fetchers write a standard Zarr. Transforms take Zarr in and Zarr out. Figure skills read those stores and write a PNG or HTML figure. Mix any combination — the file contract stays the same.</desc>
   <style>
     .bg { fill: #f7f4ec; }
     .grid { stroke: #ddd7c7; stroke-width: 1; }
@@ -81,12 +81,12 @@
     <text class="ink" x="111" y="172" text-anchor="middle">ecmwf-fetch</text>
   </g>
 
-  <!-- plot-compare -->
+  <!-- plot -->
   <g>
     <rect class="shadow" x="483" y="109" width="150" height="36" rx="2"/>
     <rect class="box" x="480" y="106" width="150" height="36" rx="2"/>
     <rect class="bar" x="480" y="106" width="3" height="36" rx="1"/>
-    <text class="ink" x="555" y="128" text-anchor="middle">plot-compare</text>
+    <text class="ink" x="555" y="128" text-anchor="middle">plot</text>
   </g>
 
   <!-- PNG terminal -->
