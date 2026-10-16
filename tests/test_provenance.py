@@ -262,3 +262,14 @@ def test_visualization_jpeg_official_mark_when_intact(tmp_path):
     assert provenance.load_figure_history(path) == chain
     after = list(Image.open(path).crop((320, 250, 400, 300)).get_flattened_data())
     assert before != after
+
+
+def test_validate_chain_accepts_flags_and_input_args():
+    entry = provenance.build_entry("s", "1.0.0", {"inputs": ["a.zarr=A"]}, None)
+    entry["flags"] = {"inputs": "--input"}
+    entry["input_args"] = [{"dest": "inputs", "item": 0, "path": "a.zarr", "input": 0}]
+    violations, notes = provenance.validate_chain([entry], "h")
+    assert violations == [] and notes == []
+    entry["flags"] = ["--input"]
+    violations, _notes = provenance.validate_chain([entry], "h")
+    assert violations == ["h[0].flags: must be an object"]

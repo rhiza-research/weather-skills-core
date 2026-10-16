@@ -66,7 +66,17 @@ def coerce_chain(raw: str, label: str) -> list | None:
     return chain
 
 
-_ENTRY_KNOWN_KEYS = {"skill", "version", "args", "input", "commit", "repo", "dirty"}
+_ENTRY_KNOWN_KEYS = {
+    "skill",
+    "version",
+    "args",
+    "input",
+    "commit",
+    "repo",
+    "dirty",
+    "flags",
+    "input_args",
+}
 _INPUT_ITEM_KNOWN_KEYS = {"basename", "hash", "history"}
 _GIT_TIMEOUT_SECONDS = 2
 _GITHUB_REMOTE_RE = re.compile(
@@ -138,6 +148,10 @@ def _validate_chain(chain, loc: str, violations: list, notes: list) -> None:
                 violations.append(f"{eloc}.{key}: must be a non-empty string")
         if "dirty" in entry and not isinstance(entry["dirty"], bool):
             violations.append(f"{eloc}.dirty: must be a boolean")
+        if "flags" in entry and not isinstance(entry["flags"], dict):
+            violations.append(f"{eloc}.flags: must be an object")
+        if "input_args" in entry and not isinstance(entry["input_args"], list):
+            violations.append(f"{eloc}.input_args: must be an array")
         for key in entry:
             if key not in _ENTRY_KNOWN_KEYS:
                 notes.append(f"{eloc}: unknown key {key!r}")

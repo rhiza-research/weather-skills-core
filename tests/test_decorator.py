@@ -693,6 +693,66 @@ def test_zarr_paths_dedupes_identical_paths(tmp_path):
     assert inp["basename"] == "in.zarr"
 
 
+class _NamedInput:
+    """``PATH=NAME`` holder, like a plotting skill's ``-i``."""
+
+    def __init__(self, value):
+        self.path, _, self.name = value.rpartition("=")
+        self.ds = None
+
+    def zarr_paths(self):
+        return [Path(self.path)]
+
+    def __str__(self):
+        return f"{self.path}={self.name}"
+
+
+def test_history_records_flags_and_input_args(tmp_path):
+    a = tmp_path / "a.zarr"
+    b = tmp_path / "b.zarr"
+    out = tmp_path / "out.zarr"
+    make_gridded().to_zarr(a, mode="w", consolidated=True)
+    make_gridded(fill=2.0).to_zarr(b, mode="w", consolidated=True)
+
+    @weather_skill(name="named", version="0.1.0")
+    @weather_skill.argument("-i", "--input", dest="inputs", action="append", type=_NamedInput)
+    @weather_skill.argument("--obs", type=Dataset("any"))
+    @weather_skill.argument("--max-lead", "-m")
+    def named(output, inputs, obs, **kwargs):
+        return inputs[0].ds
+
+    named(["-i", f"{a}=A", "-i", f"{b}=B", "-i", f"{a}=C", "--obs", str(b), "-o", str(out)])
+    entry = load_history(out)[-1]
+    # Only dests whose option is not --dest are mapped.
+    assert entry["flags"] == {"inputs": "--input"}
+    assert entry["args"]["inputs"] == [f"{a}=A", f"{b}=B", f"{a}=C"]
+    assert [p["basename"] for p in entry["input"]] == ["b.zarr", "a.zarr"]
+    # Dataset dests open first; a repeated path reuses its input index.
+    assert entry["input_args"] == [
+        {"dest": "obs", "item": None, "path": str(b), "input": 0},
+        {"dest": "inputs", "item": 0, "path": str(a), "input": 1},
+        {"dest": "inputs", "item": 1, "path": str(b), "input": 0},
+        {"dest": "inputs", "item": 2, "path": str(a), "input": 1},
+    ]
+
+
+def test_history_omits_flags_when_options_match_dests(tmp_path):
+    src = tmp_path / "in.zarr"
+    out = tmp_path / "out.zarr"
+    make_gridded().to_zarr(src, mode="w", consolidated=True)
+
+    @weather_skill(name="plain", version="0.1.0")
+    @weather_skill.argument("-i", "--input", type=Dataset("any"), required=True)
+    @weather_skill.argument("--max-lead")
+    def plain(ds, output, **kwargs):
+        return ds
+
+    plain(["-i", str(src), "-o", str(out)])
+    entry = load_history(out)[-1]
+    assert "flags" not in entry
+    assert entry["input_args"] == [{"dest": "input", "item": None, "path": str(src), "input": 0}]
+
+
 def test_float64_input_joins_float32_output(tmp_path):
     """A pre-float32 Zarr still aligns cell-for-cell with a new float32 one."""
     lats = tuple(np.round(np.arange(-4.975, 5.0, 0.05), 3))

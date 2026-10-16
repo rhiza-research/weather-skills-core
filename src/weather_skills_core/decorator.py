@@ -65,6 +65,12 @@ class Argument:
         )
         return flag.lstrip("-").replace("-", "_")
 
+    @property
+    def flag(self) -> str | None:
+        """The option a command line passes (long form preferred); None for a positional."""
+        dashed = [f for f in self.option_strings if f.startswith("-")]
+        return next((f for f in dashed if f.startswith("--")), dashed[0] if dashed else None)
+
 
 def _history_json_default(obj):
     """Record objects with ``to_dict()`` (e.g. a parsed spec) as dicts, not their ``str``."""
@@ -74,7 +80,18 @@ def _history_json_default(obj):
     return str(obj)
 
 
-def build_history(name, version, args, params, input_paths, upstream, strip_dests, revision=None):
+def build_history(
+    name,
+    version,
+    args,
+    params,
+    input_paths,
+    upstream,
+    strip_dests,
+    revision=None,
+    flags=None,
+    input_args=None,
+):
     """Record this skill as a node on the provenance DAG.
 
     A fetcher (no inputs) or a single-input transform stays a path: the
@@ -82,6 +99,14 @@ def build_history(name, version, args, params, input_paths, upstream, strip_dest
     top-level array is only this entry, and every parent's full subgraph is
     nested on that entry's ``input`` list. ``revision`` is the git identity
     of the skill that ran (commit / repo / dirty).
+
+    ``flags`` maps an args key (argparse dest) to the option a command line
+    passes, for dests whose option is not ``--dest``. ``input_args`` says
+    where each input path came from: ``{"dest", "item", "path", "input"}``
+    with ``item`` the position in an append list (None for a single value),
+    ``path`` as given on the command line, and ``input`` the index into the
+    entry's ``input`` list. Together they let a reproduction script rebuild
+    the command with upstream outputs swapped in.
     """
     entry_args = {k: v for k, v in vars(args).items() if k not in strip_dests}
     for dest in ("date", "start_time", "end_time"):
@@ -102,9 +127,12 @@ def build_history(name, version, args, params, input_paths, upstream, strip_dest
         # Join node: do not flatten the first parent into a linear spine.
         base_history = []
 
-    return base_history + [
-        provenance_mod.build_entry(name, version, entry_args, input_field, revision=revision)
-    ]
+    entry = provenance_mod.build_entry(name, version, entry_args, input_field, revision=revision)
+    if flags:
+        entry["flags"] = flags
+    if input_args:
+        entry["input_args"] = input_args
+    return base_history + [entry]
 
 
 def prepare_dataset_output(ds, *, first_ds=None):
@@ -207,18 +235,25 @@ def open_dataset_params(params, arguments):
     Values (or list items) that expose ``zarr_paths() -> list[Path]`` are also
     opened and hashed. Identical paths are opened once and reused. Each holder
     gets ``.ds`` (one path) or ``.datasets`` (several).
+
+    Also returns ``input_args``: for every path opened, the dest (and append
+    position) it came from, the path as given, and its index in ``input_paths``.
     """
     input_paths: list[Path] = []
     upstream: list = []
+    input_args: list = []
     cache: dict = {}
+    order: dict = {}
 
-    def open_one(path, io_spec=None):
+    def open_one(path, dest, item, io_spec=None):
         path = Path(path)
         resolved = path.resolve()
         if resolved not in cache:
             cache[resolved] = _open_zarr(path, io_spec)
+            order[resolved] = len(input_paths)
             input_paths.append(path)
             upstream.append(provenance_mod.load_history(path))
+        input_args.append({"dest": dest, "item": item, "path": str(path), "input": order[resolved]})
         ds = cache[resolved]
         ds.attrs[INPUT_PATH_ATTR] = str(path)
         return ds
@@ -227,25 +262,28 @@ def open_dataset_params(params, arguments):
         raw = params.get(arg.dest)
         if arg.dataset_type is None or raw is None:
             continue
+        io_spec = arg.dataset_type.io_spec
         if isinstance(raw, (list, tuple)):
-            params[arg.dest] = [open_one(p, arg.dataset_type.io_spec) for p in raw]
+            params[arg.dest] = [open_one(p, arg.dest, j, io_spec) for j, p in enumerate(raw)]
         else:
-            params[arg.dest] = open_one(raw, arg.dataset_type.io_spec)
+            params[arg.dest] = open_one(raw, arg.dest, None, io_spec)
 
     seen: set[int] = set()
-    for raw in list(params.values()):
-        for holder in raw if isinstance(raw, (list, tuple)) else (raw,):
+    for dest, raw in list(params.items()):
+        is_list = isinstance(raw, (list, tuple))
+        for j, holder in enumerate(raw if is_list else (raw,)):
             if not callable(getattr(holder, "zarr_paths", None)) or id(holder) in seen:
                 continue
             seen.add(id(holder))
-            opened = [open_one(p) for p in holder.zarr_paths() or []]
+            item = j if is_list else None
+            opened = [open_one(p, dest, item) for p in holder.zarr_paths() or []]
             if len(opened) == 1:
                 holder.ds = opened[0]
             elif opened:
                 holder.datasets = opened
 
     first_ds = next(iter(cache.values()), None)
-    return params, input_paths, upstream, first_ds
+    return params, input_paths, upstream, first_ds, input_args
 
 
 def argument(*option_strings, **kwargs):
@@ -351,6 +389,12 @@ def weather_skill(
             parser.add_argument(*arg.option_strings, **kwargs)
 
         strip_dests = {arg.dest for arg in arguments if arg.dataset_type is not None} | {"output"}
+        # Recorded on history so a reproduction passes `-i` for dest "inputs", not --inputs.
+        flags = {
+            arg.dest: arg.flag
+            for arg in arguments
+            if arg.flag and arg.flag != "--" + arg.dest.replace("_", "-")
+        }
         # Options taking one value (store/append), for rewrite_negative_values.
         value_options = {
             opt
@@ -378,7 +422,9 @@ def weather_skill(
                     for action, required in saved_required:
                         action.required = required
                 params = standard_args.convert_standard_args(args, arguments)
-                params, input_paths, upstream, first_ds = open_dataset_params(params, arguments)
+                params, input_paths, upstream, first_ds, input_args = open_dataset_params(
+                    params, arguments
+                )
                 if (
                     any(a.dataset_type is not None and a.dest == "input" for a in arguments)
                     and "input" in params
@@ -415,6 +461,8 @@ def weather_skill(
                     upstream,
                     strip_dests,
                     revision=provenance_mod.resolve_skill_revision(fn),
+                    flags=flags,
+                    input_args=input_args,
                 )
                 for value, out_path in zip(results, output_paths, strict=True):
                     write_output(value, out_path, history, first_ds)

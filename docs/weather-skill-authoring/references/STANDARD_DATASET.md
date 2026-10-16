@@ -115,6 +115,8 @@ Each entry is one skill run:
 | `args` | Its CLI arguments, minus input and output paths |
 | `input` | The Zarr(s) it read: `{basename, hash}`, a list of those, or `null` for a fetcher |
 | `commit`, `repo`, `dirty` | Git identity of the skill code, when known |
+| `flags` | The option for an `args` key whose flag is not `--key` (e.g. `{"inputs": "--input"}`) |
+| `input_args` | Where each input path was passed: `{dest, item, path, input}`, `input` indexing the `input` list |
 
 Chaining works like this:
 
