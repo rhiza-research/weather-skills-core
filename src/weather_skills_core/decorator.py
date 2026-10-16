@@ -183,7 +183,7 @@ def _open_zarr(path, io_spec=None):
 
 
 def _iter_zarr_path_holders(value):
-    """Yield objects that expose ``zarr_paths()`` (e.g. plot ``LayerSpec``)."""
+    """Yield objects that expose ``zarr_paths()`` (e.g. plot's ``--spec`` and ``--layer``)."""
     if value is None:
         return
     items = value if isinstance(value, (list, tuple)) else (value,)

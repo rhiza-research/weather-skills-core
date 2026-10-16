@@ -136,24 +136,27 @@ resolve-time skill and pass the printed `--start-time`/`--end-time` or
 | --- | --- | --- |
 | Fetcher | decorator `-o` | Dataset |
 | Transform | Dataset input(s) + decorator `-o` | Dataset |
-| Figure | Dataset input(s) + decorator `-o` | Path (write PNG yourself) |
+| Figure | Dataset input(s) + decorator `-o` | Path (write the figure yourself) |
 | Inspect | Dataset or Path input; `output=False` | anything (stdout) |
 
-Figure skills name files on the command line. Parameters go in `--spec`,
-which is deep-merged onto the spec built from those files. `--dump-spec`
-writes that merge and skips the PNG (`-o` is not required). Call `maybe_emit_spec` after
-assembling the spec and return before `compile`/`export` when it is True.
-`export()` writes the PNG and prints a pixel `plot hash` plus `data: not null`
-or `data: NULL` so an agent can see whether the figure changed and whether the
-plotted arrays are finite. Build the internal spec from the opened files, merge `--spec`, and return before `compile`/`export` when `maybe_emit_spec` is true (or call
-`maps.compile_grid` / `charts.compile_lines` / `charts.compile_mediogram`
-after data prep) and then `export(compiled, output, datasets=…)`. Public names:
-`PlotSpec`, `load_spec`, `dump_spec`, `compile`, `export`. These live in the
-`weather_skills_plotting` package (its own repo,
+Figure skills name files on the command line and take every drawing choice
+in `--spec`, a standard Plotly figure JSON (`{"data": [...], "layout":
+{...}}`) that is deep-merged onto the figure built from those files. Which
+dataset a trace draws lives in its `meta`; everything else is plain Plotly.
+`--dump-spec` prints that merge and skips drawing (`-o` is not required).
+The `-o` suffix picks the format (`.png`, `.jpg`, or `.html`); the
+decorator stamps provenance on whichever you return. An image prints a pixel
+`plot hash` plus `data: not null` or `data: NULL`, so an agent can see whether
+the figure changed and whether the plotted arrays are finite.
+
+The engine is the `weather_skills_plotting` package (its own repo,
 [`weather-skills-plotting`](https://github.com/rhiza-research/weather-skills-plotting)),
-not here — a figure skill depends on both it and this library. Matplotlib
-does not load on `import weather_skills_plotting`. The spec must not open
-files.
+not this library; a figure skill depends on both. Its public surface is
+`load_spec`, `merge_spec`, `validate`, `compile` (spec + `{input id:
+Dataset}` → Plotly figure) and `export` (figure → file + QA lines). An
+argument object with a `zarr_paths()` method (as `--spec` and `--layer`
+are) gets those Zarrs opened by this decorator, and its `to_dict()` (or
+`str()`) is what provenance records. The spec must not open files itself.
 
 ## Units
 
@@ -168,7 +171,7 @@ git commit of the running skill, args, input basename+hash). A single-input
 skill appends to the parent's path; a multi-input skill is a join whose
 entry nests every parent's subgraph. Path write targets and Dataset path
 strings are omitted from the args blob. PNG/JPEG figures with an intact
-chain get a corner mark.
+chain get a corner mark; HTML figures carry the chain in a `<meta>` tag.
 
 ## Layout
 

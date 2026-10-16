@@ -14,7 +14,7 @@ carries provenance: a record of which skill, version, and arguments produced
 it, so someone else can rerun or check the chain. The skill is the script you
 checked in; nothing is generated at runtime unless you want it to be.
 
-![Composable weather skills: fetchers write a standard Zarr, transforms take Zarr to Zarr, and a figure skill writes a PNG](docs/composable-skills.svg)
+![Composable weather skills: fetchers write a standard Zarr, transforms take Zarr to Zarr, and a figure skill writes a PNG or HTML figure](docs/composable-skills.svg)
 
 ```bash
 # Fetch an ensemble forecast over Kenya
@@ -22,7 +22,7 @@ uv run ecmwf-fetch.py --bbox 5/34/-5/42 --date 2026-01-15 -o forecast.zarr
 
 # Clip precip observations and compare against the forecast
 uv run clip-region.py -i imerg.zarr -o kenya.zarr --bbox 5/34/-5/42
-uv run plot-compare.py -i kenya.zarr -i forecast.zarr -o compare.png
+uv run plot.py -i kenya.zarr -i forecast.zarr -o compare.png
 ```
 
 ## Writing a skill
@@ -88,8 +88,8 @@ required (unless you pass `output=False`) and repeatable. A single
 That path is where the user wants the result. For a Dataset return, leave
 the writing to the decorator: return the xarray object and it will
 `to_zarr` to `--output` after stamping provenance. For a figure, write the
-PNG to `output` yourself and return that same Path so provenance can be
-stamped on the file you created.
+file (PNG, JPEG, or HTML) to `output` yourself and return that same Path so
+provenance can be stamped on the file you created.
 
 What you return decides how the path is filled. The number of returned
 artifacts must match the number of `--output` paths.
@@ -97,7 +97,7 @@ artifacts must match the number of `--output` paths.
 | Return | What the decorator does |
 | --- | --- |
 | `xr.Dataset` | stamp provenance and `to_zarr` to `--output` |
-| `Path` | stamp that file (it must be the `--output` path; typical for a PNG you already wrote) |
+| `Path` | stamp that file (it must be the `--output` path; typical for a figure you already wrote) |
 | a sequence | one write per `--output` |
 | `None` | skip write — the skill already wrote the file |
 
@@ -264,10 +264,11 @@ for the full units contract.
 
 ## Plotting
 
-The plot spec, matplotlib/Cartopy compiler, and figure helpers
-(`PlotSpec`, `compile`, `export`, `maps`, `charts`, `theme`) live in their
-own repo, [`weather-skills-plotting`](https://github.com/rhiza-research/weather-skills-plotting),
-as the `weather_skills_plotting` package — not here. This library still
+The plotting skills and their engine live in their own repo,
+[`weather-skills-plotting`](https://github.com/rhiza-research/weather-skills-plotting),
+as the `weather_skills_plotting` package — not here. Figures are drawn with
+Plotly, and the plot spec is a standard Plotly figure JSON with dataset
+bindings in `meta`. This library still
 provides the shared pieces that plotting (and other skills) depend on:
 `errors`, `cf`, `display_labels`, `standard_utils`, `units`,
 `standard_dataset`, and the `weather_skill` CLI decorator.
