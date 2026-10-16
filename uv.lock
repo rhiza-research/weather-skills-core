@@ -901,7 +901,7 @@ requires-dist = [
     { name = "cftime", specifier = ">=1.6" },
     { name = "geopandas", marker = "extra == 'geo'", specifier = ">=1.0" },
     { name = "numpy", specifier = ">=2.5" },
-    { name = "pillow", specifier = ">=10" },
+    { name = "pillow", specifier = ">=10.1" },
     { name = "pint-xarray", specifier = ">=0.6" },
     { name = "shapely", marker = "extra == 'geo'", specifier = ">=2.1.2" },
     { name = "xarray", specifier = ">=2026.7" },
