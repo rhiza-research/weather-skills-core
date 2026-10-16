@@ -18,8 +18,8 @@ from pathlib import Path
 
 HISTORY_ATTR = "weather_skills_history"
 SOURCE_ATTR = "weather_skills_source"
-# Rubber-stamp red (RGBA), matching the [w-s] mark.
-_MARK_INK = (192, 40, 28, 235)
+# Rubber-stamp crimson (RGBA).
+_MARK_INK = (165, 15, 45, 235)
 
 _EXIF_USER_COMMENT = 0x9286  # EXIF UserComment tag
 _HTML_META_RE = re.compile(
@@ -160,10 +160,10 @@ def chain_is_intact(history) -> bool:
 
 
 def _render_circular_stamp(diameter: int):
-    """Build a small circular rubber stamp: ring + center star, no text."""
+    """Build a small circular rubber stamp: ring, star, and a tiny ``w-s`` below it."""
     import math
 
-    from PIL import Image, ImageDraw
+    from PIL import Image, ImageDraw, ImageFont
 
     scale = 4
     size = max(diameter, 24) * scale
@@ -179,13 +179,24 @@ def _render_circular_stamp(diameter: int):
         width=max(scale, size // 40),
     )
 
-    star_r = outer_r * 0.42
+    star_r = outer_r * 0.3
+    star_cy = cy - outer_r * 0.25
     pts = []
     for i in range(10):
         r = star_r if i % 2 == 0 else star_r * 0.38
         a = -math.pi / 2 + i * math.pi / 5
-        pts.append((cx + r * math.cos(a), cy + r * math.sin(a)))
+        pts.append((cx + r * math.cos(a), star_cy + r * math.sin(a)))
     draw.polygon(pts, fill=ink)
+
+    # Serif lowercase; system serif fonts vary, so fall back to Pillow's sans.
+    font = ImageFont.load_default(size=outer_r * 0.7)
+    for name in ("Georgia.ttf", "Times New Roman.ttf", "DejaVuSerif.ttf"):
+        try:
+            font = ImageFont.truetype(name, size=outer_r * 0.7)
+            break
+        except OSError:
+            continue
+    draw.text((cx, cy + outer_r * 0.42), "w-s", fill=ink, font=font, anchor="mm")
 
     # Slight rotation so it looks hand-inked rather than UI chrome.
     stamp = stamp.rotate(-6, resample=Image.Resampling.BICUBIC, expand=True)
