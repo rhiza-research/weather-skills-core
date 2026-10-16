@@ -1,5 +1,6 @@
 """Provenance helpers: history load/stamp and figure metadata."""
 
+import subprocess
 from pathlib import Path
 
 from conftest import make_gridded
@@ -108,7 +109,15 @@ def test_resolve_skill_revision_from_this_checkout():
     revision = provenance.resolve_skill_revision(Path(__file__))
     assert revision is not None
     assert len(revision["commit"]) >= 7
-    assert revision["repo"] == "https://github.com/rhiza-research/weather-skills-core"
+    # Whatever this checkout's origin is (rhiza-research or weather-skills).
+    origin = subprocess.run(
+        ["git", "config", "--get", "remote.origin.url"],
+        cwd=Path(__file__).parent,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    assert revision["repo"] == provenance.normalize_repo_url(origin)
 
 
 def test_resolve_skill_revision_marks_dirty(monkeypatch, tmp_path):
