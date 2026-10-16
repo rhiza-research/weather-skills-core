@@ -135,6 +135,47 @@ def test_resolve_skill_revision_marks_dirty(monkeypatch, tmp_path):
     }
 
 
+def test_resolve_skill_revision_from_runner_env_dist_info(monkeypatch, tmp_path):
+    # uvx layout: the runner execs ``uv run --script`` on a file inside another
+    # env's site-packages, so the owning dist is not importable from here.
+    site = tmp_path / "archive" / "lib" / "python3.12" / "site-packages"
+    script = site / "skills" / "chirps-fetch" / "scripts" / "fetch.py"
+    script.parent.mkdir(parents=True)
+    script.write_text("x = 1\n", encoding="utf-8")
+    other = site / "other-1.0.dist-info"
+    other.mkdir()
+    (other / "RECORD").write_text("other/__init__.py,,\n", encoding="utf-8")
+    (other / "direct_url.json").write_text(
+        '{"url": "https://example.com/wrong", "vcs_info": {"vcs": "git", "commit_id": "bad"}}',
+        encoding="utf-8",
+    )
+    info = site / "forecasting_skills-0.1.0.dist-info"
+    info.mkdir()
+    (info / "RECORD").write_text(
+        "skills/chirps-fetch/SKILL.md,sha256=x,1\n"
+        "skills/chirps-fetch/scripts/fetch.py,sha256=y,2\n",
+        encoding="utf-8",
+    )
+    (info / "direct_url.json").write_text(
+        '{"url": "https://github.com/rhiza-research/weather-skills",'
+        ' "vcs_info": {"vcs": "git", "commit_id": "608ba506dcba", "requested_revision": "dev"}}',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(provenance, "_git", lambda args, cwd: None)
+    assert provenance.resolve_skill_revision(script) == {
+        "commit": "608ba506dcba",
+        "repo": "https://github.com/rhiza-research/weather-skills",
+    }
+
+
+def test_resolve_skill_revision_none_without_vcs_info(monkeypatch, tmp_path):
+    script = tmp_path / "skills" / "clip" / "scripts" / "clip.py"
+    script.parent.mkdir(parents=True)
+    script.write_text("x = 1\n", encoding="utf-8")
+    monkeypatch.setattr(provenance, "_git", lambda args, cwd: None)
+    assert provenance.resolve_skill_revision(script) is None
+
+
 def test_chain_validation_ok():
     violations, _notes = provenance.validate_chain([entry()], "h")
     assert violations == []
