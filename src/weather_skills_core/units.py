@@ -17,9 +17,6 @@ to the kind's display unit and may stamp CF ``standard_name``; the variable
   pressure-level ``t`` — callers convert those with ``convert_dataarray``.
 - ``precip`` → ``mm day-1``. Precip **rate** / flux.
 - ``precip_amount`` → ``mm``. Precip **total** (rate × period).
-- ``pressure`` → ``hPa``. Sea-level and surface air pressure (``msl``,
-  ``mslp``, ``prmsl``, ``air_pressure_at_mean_sea_level``,
-  ``surface_air_pressure``). Not pressure-level coordinates.
 
 ``temp`` and ``precip`` require a units attr (``units_required``). Other
 variables, including ``precip_amount``, may omit units. Unrecognized fields
@@ -31,7 +28,7 @@ Fetch writes accumulated variables as **rates**. Use ``precip_amounts_to_rates``
 (lead 0 = first native period). Period **totals** come from ``rate_to_total``
 after ``aggregate-temporal`` stamps ``aggregation_period``. That helper refuses
 amounts (and ``cell_methods`` ``sum``) so multiplying by the period cannot
-double-count.
+double-count. Plotters may convert in memory via ``precip_for_display``.
 
 Native cell geometry is XOR: uniform axes get scalar ``data_interval``;
 irregular axes get CF ``{dim}_bounds``. Aggregation adds
@@ -81,6 +78,14 @@ _RATE_RE = re.compile(
     re.IGNORECASE,
 )
 
+# CLI period label → the aggregation_period string stamped for that window.
+PERIOD_TO_AGGREGATION = {
+    "daily": "1 day",
+    "weekly": "7 day",
+    "dekadal": "1 dekad",
+    "monthly": "1 month",
+}
+
 # The vocabulary for every standard kind, in classification precedence order.
 #   units_required         must carry a units attr for explicit skill treatment
 #   units / standard_name  what to_standard_units stamps (None keeps existing)
@@ -115,7 +120,7 @@ STANDARD = {
         "standard_name_contains": (),
         "unit_candidates": ("mm day-1", "mm/day", "m s-1", "kg m-2 s-1", "kg m**-2 s**-1"),
         "depth_candidates": ("m s-1", "mm day-1"),
-        "name_hints": ("precip", "prcp", "rainfall", "rain", "tp", "pr", "total_precipitation"),
+        "name_hints": ("precip", "prcp", "rainfall", "rain", "tp", "pr"),
     },
     # Amount metadata for the totals utilities (rate × period → mm).
     "precip_amount": {
@@ -135,20 +140,6 @@ STANDARD = {
         "unit_candidates": ("mm", "m", "kg m-2", "kg m**-2"),
         "depth_candidates": ("m", "mm"),
         "name_hints": (),
-    },
-    "pressure": {
-        "units_required": False,
-        "units": "hPa",
-        "standard_name": None,
-        "standard_names": frozenset(
-            {"air_pressure_at_mean_sea_level", "air_pressure_at_sea_level", "surface_air_pressure"}
-        ),
-        "standard_name_endswith": (),
-        "standard_name_contains": (),
-        "unit_candidates": ("hPa", "Pa", "mbar"),
-        "depth_candidates": (),
-        # No "sp": as a prefix it would match speed, spi, …; ERA5 sp has a standard_name.
-        "name_hints": ("msl", "mslp", "prmsl", "mean_sea_level_pressure", "surface_pressure"),
     },
 }
 
@@ -214,6 +205,32 @@ def units_equal(a, b) -> bool:
         return False
 
 
+def format_units_for_display(units: str | None) -> str:
+    """Short figure-label spelling. On-disk attrs stay CF; colorbars do not.
+
+    ``mm day-1`` / ``millimeter / day`` → ``mm/day``; ``degree_Celsius`` →
+    ``°C``; other pint-parseable strings use CF compact form.
+    """
+    if not isinstance(units, str) or not units.strip():
+        return ""
+    raw = units.strip()
+    display = {
+        "precip": "mm/day",
+        "precip_amount": "mm",
+        "temp": "°C",
+    }
+    for kind, nice in display.items():
+        if units_equal(raw, STANDARD[kind]["units"]):
+            return nice
+    try:
+        compact = format(ureg.Unit(raw), "cf")
+    except Exception:  # noqa: BLE001 — leave unparseable strings alone
+        return raw
+    if units_equal(compact, STANDARD["temp"]["units"]):
+        return display["temp"]
+    return compact.replace(" d-1", "/day")
+
+
 def variable_units(da) -> str | None:
     """Units string from a pint Quantity, else from the ``units`` attr."""
     units = getattr(da.pint, "units", None)
@@ -250,15 +267,7 @@ def classify_variable(name: str, *, units=None, standard_name=None) -> str | Non
     for kind, spec in STANDARD.items():
         if any(h == key or key.startswith(h) or key.endswith(h) for h in spec["name_hints"]):
             if kind == "precip" and isinstance(units, str) and units.strip():
-                found = _precip_kind_from_hint_units(units)
-                if found is None:
-                    # Not precip units after all (prmsl starts with "pr"): try the next kind.
-                    continue
-                return found
-            if kind == "pressure" and isinstance(units, str) and units.strip():
-                # A pressure-named anomaly in "1" or sigma is not a pressure.
-                if not units_convertible(units, STANDARD["pressure"]["units"]):
-                    continue
+                return _precip_kind_from_hint_units(units)
             return kind
     return None
 
@@ -358,54 +367,35 @@ def _axis_tick_diffs(values):
     raise UsageError(f"could not infer spacing: {failure}")
 
 
-def interval_days(coord, period: str):
-    """Length in days of the interval each label of ``coord`` starts.
-
-    Calendar periods (``"N month"``, ``"N year"``) take each label's real
-    length from the calendar (January 31 days, February 28 or 29), so labels
-    must be month starts. Any other period is the same fixed length for every
-    label. Works for datetime64 and cftime labels; returns a float array
-    shaped like ``coord``.
-    """
-    import pandas as pd
-
-    match = re.fullmatch(r"\s*(\d+)\s*(month|year)s?\s*", period)
-    if match is None:
-        days = float(parse_aggregation_period(period).to("day").magnitude)
-        return np.full(np.shape(coord), days)
-    months = int(match.group(1)) * (12 if match.group(2) == "year" else 1)
-    index = coord.to_index() if coord.ndim else None
-    if index is None or not hasattr(index, "shift") or not hasattr(index, "day"):
-        raise UsageError(
-            f"aggregation_period {period!r} needs datetime labels to know each "
-            "month's length; convert before collapsing the time axis"
-        )
-    if not (np.asarray(index.day) == 1).all():
-        raise UsageError(f"aggregation_period {period!r} needs month-start labels")
-    lengths = pd.to_timedelta(np.asarray(index.shift(months, "MS") - index))
-    return np.asarray(lengths / pd.Timedelta(days=1), dtype=float)
-
-
 def assert_nonoverlapping_intervals(ds, dim: str, period: str) -> None:
-    """Refuse rate → total when any interval runs past the next label.
+    """Refuse convert-to-totals when consecutive labels are finer than ``period``.
 
-    Each label starts an interval of ``interval_days``; consecutive intervals
-    may touch but not overlap. A singleton axis cannot overlap.
+    A singleton axis is allowed: spacing cannot be inferred, and one sample
+    cannot be an overlapping series. Typical after aggregating a short fetch
+    to a single weekly/dekadal/monthly bin. With CF bounds, uses the minimum
+    label spacing; otherwise the median (``infer_timestep``).
     """
     if dim not in ds.dims and dim not in ds.coords:
         raise UsageError(f"dimension/coord {dim!r} not in dataset")
     if ds.sizes.get(dim, 0) < 2:
         return
-    import pandas as pd
-
-    spacing = pd.to_timedelta(np.diff(np.asarray(ds[dim].values))) / pd.Timedelta(days=1)
-    lengths = interval_days(ds[dim], period)[:-1]
-    if (np.asarray(spacing) < lengths - 1e-9).any():
+    base = parse_aggregation_period(period)
+    bounds_name = ds[dim].attrs.get("bounds") if dim in ds.coords or dim in ds.dims else None
+    if isinstance(bounds_name, str) and bounds_name in ds:
+        diffs, unit = _axis_tick_diffs(ds[dim].values)
+        positive = diffs[diffs > 0]
+        if positive.size == 0:
+            raise UsageError(f"no positive spacings on {dim!r}")
+        dt = ureg.Quantity(float(np.min(positive)), unit).to("day")
+    else:
+        dt = infer_timestep(ds, dim)
+    if dt < base:
         raise UsageError(
-            f"spacing on {dim!r} (min {np.min(spacing):g} day) is shorter than "
-            f"aggregation_period {period!r}; refusing to convert to totals "
+            f"spacing on {dim!r} ({format_duration(dt)}) is smaller than "
+            f"aggregation_period {period!r}; refusing convert-to-totals "
             "(overlapping intervals would overcount). "
-            f"Keep a non-overlapping subset of {dim!r} first."
+            f"Run select --dim {dim} to keep a non-overlapping subset, "
+            "then convert-to-totals."
         )
 
 
@@ -424,13 +414,10 @@ def looks_like_precip_total(da) -> bool:
     )
 
 
-def rate_to_total(da, period: str, dim: str | None = None):
+def rate_to_total(da, period: str):
     """Multiply a rate DataArray by ``aggregation_period`` → amount (quantified).
 
-    With ``dim``, each label is multiplied by its own ``interval_days`` (real
-    month lengths for calendar periods); without, by the fixed period, which
-    calendar periods refuse. Refuses precip totals: multiplying an amount by a
-    period would double-count.
+    Refuses precip totals: multiplying an amount by a period would double-count.
     """
     if looks_like_precip_total(da):
         raise UsageError(
@@ -438,21 +425,60 @@ def rate_to_total(da, period: str, dim: str | None = None):
             "(amount units or cell_methods sum); rate_to_total converts "
             "rates × period and cannot take amounts"
         )
-    import xarray as xr
-
-    if dim is not None:
-        days = xr.DataArray(interval_days(da[dim], period), dims=da[dim].dims)
-        base = days.pint.quantify("day")
-    else:
-        base = ureg.Quantity(interval_days(xr.DataArray(0.0), period)[()], "day")
+    base = parse_aggregation_period(period)
     quantified_in = da.pint.units is not None
     qda = da if quantified_in else da.pint.quantify()
     if qda.pint.units is None:
         raise UsageError(f"variable {da.name!r} has no units to convert to totals")
-    # To mm; a mass flux (kg m-2 s-1) goes through liquid-water density. A rate
-    # that cannot become a depth raises rather than being labelled mm unconverted.
-    total, _ = convert_dataarray(qda * base, STANDARD["precip_amount"]["units"])
+    total = qda * base
+    # Prefer mm for precip depth rates.
+    try:
+        total = total.pint.to(STANDARD["precip_amount"]["units"])
+    except (pint_xarray.pint.DimensionalityError, pint_xarray.errors.PintExceptionGroup):
+        pass
     return total
+
+
+def precip_for_display(ds, name: str):
+    """In-memory precip rate → period total for plotting.
+
+    Uses stamped ``aggregation_period`` (from ``aggregate-temporal``). No-op
+    when the variable is not a precip rate, has no period, or the time axis
+    would overlap (same gates as convert-to-totals). Plotters call this so
+    precip defaults to ``mm`` totals without a separate Zarr. The period attr
+    is kept so colormap selection can stay period-aware.
+    """
+    if name not in ds.data_vars:
+        return ds
+    da = ds[name]
+    units = variable_units(da) or da.attrs.get("units")
+    kind = classify_variable(name, units=units, standard_name=da.attrs.get("standard_name"))
+    if kind != "precip":
+        return ds
+    period = da.attrs.get(AGGREGATION_PERIOD_ATTR)
+    if not (isinstance(period, str) and period.strip()):
+        return ds
+    dim = "step" if "step" in da.dims else "time" if "time" in da.dims else None
+    if dim is None:
+        return ds
+    try:
+        assert_nonoverlapping_intervals(ds, dim, period)
+        total = rate_to_total(da, period)
+    except UsageError:
+        return ds
+    plain = total.pint.dequantify() if total.pint.units is not None else total
+    attrs = {**da.attrs, **plain.attrs}
+    attrs["units"] = STANDARD["precip_amount"]["units"]
+    attrs["standard_name"] = STANDARD["precip_amount"]["standard_name"]
+    attrs["long_name"] = PRECIP_AMOUNT_LONG_NAME
+    if looks_like_rate_display_name(attrs.get("GRIB_name")):
+        attrs["GRIB_name"] = PRECIP_AMOUNT_LONG_NAME
+    attrs["cell_methods"] = format_cell_methods(dim, "sum")
+    # Keep aggregation_period so plotters can crop the nested precip palette.
+    out = ds.copy(deep=False)
+    out[name] = plain
+    out[name].attrs = attrs
+    return out
 
 
 def quantify_dataset(ds):
@@ -497,21 +523,8 @@ def quantify_dataset(ds):
 
 
 def dequantify_dataset(ds):
-    """Strip pint quantities back to plain arrays with ``units`` attrs.
-
-    Units equal to a ``STANDARD`` unit keep its spelling (``mm day-1``, not
-    pint's ``millimeter / day``); any other unit is written in CF form.
-    """
-    standard = {ureg.Unit(spec["units"]): spec["units"] for spec in STANDARD.values()}
-    names = {
-        name: standard.get(da.pint.units, format(da.pint.units, "cf"))
-        for name, da in ds.data_vars.items()
-        if da.pint.units is not None
-    }
-    out = ds.pint.dequantify()
-    for name, units in names.items():
-        out[name].attrs["units"] = units
-    return out
+    """Strip pint quantities back to plain arrays with ``units`` attrs."""
+    return ds.pint.dequantify()
 
 
 def convert_values(values, src_units: str, dst_units: str):
@@ -557,12 +570,8 @@ def convert_dataarray(da, dst_units: str):
     """
     quantified_in = da.pint.units is not None
     qda = da if quantified_in else da.pint.quantify()
-    # Keep a float32 field float32: the registry stores scalars (the water
-    # density, conversion factors) as 0-d float64 arrays, which upcast.
-    keep = da.dtype if da.dtype.kind == "f" else None
     try:
         out = qda.pint.to(dst_units)
-        out = out.astype(keep) if keep else out
         if quantified_in:
             return out, False
         out = out.pint.dequantify()
@@ -578,7 +587,6 @@ def convert_dataarray(da, dst_units: str):
             converted = density_scaled.to(dst_units)
         except pint_xarray.pint.DimensionalityError:
             continue
-        converted = converted.astype(keep) if keep else converted
         if quantified_in:
             return da.copy(data=converted), True
         out = da.copy(data=np.asarray(converted.magnitude))
@@ -588,12 +596,11 @@ def convert_dataarray(da, dst_units: str):
 
 
 def to_standard_units(ds, variables=None):
-    """Convert recognized air-temp / precip / pressure data vars to standard display units.
+    """Convert recognized air-temp / precip data vars to standard display units.
 
     Classification is by CF ``standard_name`` or named variable hints (with
     precip amount-vs-rate from units when needed). Air temperature →
-    ``degree_Celsius``; precip rates → ``mm day-1``; precip amounts → ``mm``;
-    sea-level and surface pressure → ``hPa``.
+    ``degree_Celsius``; precip rates → ``mm day-1``; precip amounts → ``mm``.
     SST, dewpoint, skin, soil, and pressure-level temperature are not the
     ``temp`` kind — convert those with ``convert_dataarray``. On a match,
     stamps the kind's CF ``standard_name`` (when set); the variable **name**
@@ -612,10 +619,6 @@ def to_standard_units(ds, variables=None):
         if units is None or kind not in STANDARD:
             continue
         dst_units = STANDARD[kind]["units"]
-        if kind == "temp" and "delta_" in str(ureg.Unit(units)):
-            # A temperature difference (an anomaly from `difference`) stays a
-            # difference; absolute degree_Celsius would refuse or add offsets.
-            dst_units = "delta_degC"
         dst_standard_name = STANDARD[kind]["standard_name"]
         if units_equal(units, dst_units) and da.pint.units is None:
             # Already standard; only the spelling and standard_name change.
@@ -654,27 +657,47 @@ def looks_like_rate_display_name(value) -> bool:
     return "rate" in lowered or "flux" in lowered
 
 
-def stamp_precip_amounts(ds):
-    """Stamp amount CF metadata on precip variables whose units are a depth/mass.
+def variable_label_for_display(
+    da, *, fallback: str | None = None, include_units: bool = True
+) -> str:
+    """Colorbar / axis label: ``long_name``, then ``GRIB_name``, then the name.
 
-    Overwrites rate names left after a rate became a total. Variables that are
-    not precip by name or standard_name are left alone, whatever their units.
+    Leftover rate-like names on precip amounts become ``Total precipitation``.
+    Units are appended in display form (``mm/day``, ``°C``) when present.
     """
+    label = None
+    for key in ("long_name", "GRIB_name"):
+        val = da.attrs.get(key)
+        if isinstance(val, str) and val.strip():
+            label = val.strip()
+            break
+    if label is None:
+        name = da.name if isinstance(da.name, str) and da.name.strip() else None
+        label = fallback or name or "value"
+    kind = classify_variable(
+        da.name or "",
+        units=variable_units(da),
+        standard_name=da.attrs.get("standard_name"),
+    )
+    if kind == "precip_amount" and looks_like_rate_display_name(label):
+        label = PRECIP_AMOUNT_LONG_NAME
+    if not include_units:
+        return label
+    units = format_units_for_display(variable_units(da))
+    if units:
+        return f"{label} [{units}]"
+    return label
+
+
+def stamp_precip_amounts(ds):
+    """Stamp amount CF metadata when units are precip depth/mass (overwrite rate names)."""
     amount_sn = STANDARD["precip_amount"]["standard_name"]
     for name in ds.data_vars:
         units = ds[name].attrs.get("units")
         if not isinstance(units, str):
             continue
-        # Only variables already precip by name or standard_name: units alone
-        # would relabel total column water or water vapour (kg m-2) as rain.
-        kind = classify_variable(
-            name, units=units, standard_name=ds[name].attrs.get("standard_name")
-        )
-        if kind in ("precip", "precip_amount") and kind_from_units(units) == "precip_amount":
-            # CF: lwe_thickness_... is a depth (canonical unit m); a mass per
-            # area (kg m-2) is precipitation_amount.
-            mass = ureg.Unit(units).dimensionality == ureg.Unit("kg m-2").dimensionality
-            ds[name].attrs["standard_name"] = "precipitation_amount" if mass else amount_sn
+        if kind_from_units(units) == "precip_amount":
+            ds[name].attrs["standard_name"] = amount_sn
             long_name = ds[name].attrs.get("long_name")
             if not (
                 isinstance(long_name, str) and long_name.strip()
@@ -724,38 +747,31 @@ def _apply_scalar_interval(ds, period, axis=None):
     name = _cf_bounds_name(ds, axis) if axis is not None else None
     if name is not None:
         ds = ds.drop_vars(name)
-        ds[axis].attrs.pop("bounds", None)
+        if axis in ds.coords or axis in ds.dims:
+            ds[axis].attrs.pop("bounds", None)
     for var in ds.data_vars:
         ds[var].attrs[DATA_INTERVAL_ATTR] = period
     return ds
 
 
-def _apply_bounds(ds, axis, pairs):
-    """Write CF ``{axis}_bounds`` (start, end per cell); drop ``data_interval`` so XOR holds."""
-    old = _cf_bounds_name(ds, axis)
-    if old is not None:
-        ds = ds.drop_vars(old)
-    bound_name = f"{axis}_bounds"
-    out = ds.assign_coords({bound_name: ((axis, _BOUNDS_NV_DIM), pairs)})
-    out[axis].attrs["bounds"] = bound_name
-    for name in out.data_vars:
-        out[name].attrs.pop(DATA_INTERVAL_ATTR, None)
-    return out
-
-
-def stamp_data_interval(ds, period=None, dim=None):
+def stamp_data_interval(ds, period=None, dim=None, origin=None):
     """Stamp native cell geometry: scalar ``data_interval`` or CF bounds.
 
-    ``period`` (a pint duration such as ``"1 day"``) always writes the scalar
-    attr. Without it, an existing ``data_interval`` or CF bounds is kept;
-    otherwise the spacing of ``dim`` (or ``time`` / ``step``) is inferred:
-    even spacing gets ``data_interval``, as does a datetime axis with missing
-    rows (every spacing a whole multiple of the smallest); other uneven spacing
-    (e.g. forecast leads going from 3- to 6-hourly) gets ``{dim}_bounds`` with
-    each label at the end of its cell. A one-sample axis is left alone.
+    ``period`` is a pint duration string (``"1 day"``, ``"30 minute"``) and
+    always writes the scalar attr. When omitted, an existing
+    ``data_interval`` or CF bounds is kept.
+
+    If geometry is missing, spacing is inferred from ``dim`` (or ``time`` /
+    ``step``): equal steps get ``data_interval``; unequal steps get
+    ``{dim}_bounds``. ``origin`` (deaccumulate) forces a restamp from the
+    dropped lead even when an interval was already present: a value **before**
+    the first tick is the left edge of a right-labeled cell; a value **after**
+    the last tick is the right edge of a left-labeled cell. A singleton axis
+    with ``origin`` stamps that one cell; without ``origin`` it is a no-op.
     """
     if period is not None:
         period = format_duration(parse_aggregation_period(period))
+        axis = None
         try:
             axis = _time_or_step_dim(ds, dim)
         except UsageError:
@@ -765,32 +781,70 @@ def stamp_data_interval(ds, period=None, dim=None):
     axis = _time_or_step_dim(ds, dim)
     if axis is None:
         raise UsageError("cannot stamp data_interval: no time/step dim and no period given")
-    if data_interval_of(ds) is not None or _cf_bounds_name(ds, axis):
+    if origin is None and (data_interval_of(ds) is not None or _cf_bounds_name(ds, axis)):
         return ds
-    ticks = np.asarray(ds[axis].values)
-    if ticks.size == 0:
+    values = np.asarray(ds[axis].values)
+    if values.size == 0:
         raise UsageError(f"cannot stamp data_interval: empty {axis!r} axis")
-    if ticks.size == 1:
-        return ds
-    diffs, unit = _axis_tick_diffs(ticks)
-    if np.any(diffs <= 0):
+    if values.size == 1:
+        if origin is None:
+            return ds
+        try:
+            other = np.asarray(origin).reshape(()).astype(values.dtype, copy=False)
+        except (TypeError, ValueError):
+            return ds
+        coord = values.reshape(())
+        if other < coord:
+            values = np.stack([other, coord])
+        elif other > coord:
+            values = np.stack([coord, other])
+        else:
+            return ds
+    diffs, unit = _axis_tick_diffs(values)
+    if diffs.size == 0 or np.any(diffs <= 0):
         raise UsageError(f"{axis!r} must be strictly increasing to stamp spacing")
-    base = diffs.min()
-    # Even spacing, or a datetime axis whose spacings are whole multiples of the
-    # smallest (hourly station data with missing hours): a regular grid. Gaps are
-    # missing samples for coverage to count, not wider cells that would stretch
-    # the sample before each gap over it.
-    if np.all(diffs == base) or (
-        np.issubdtype(ticks.dtype, np.datetime64) and np.all(diffs % base == 0)
-    ):
-        period = format_duration(ureg.Quantity(float(base), unit).to("day"))
+    if np.all(diffs == diffs[0]):
+        period = format_duration(ureg.Quantity(float(diffs[0]), unit).to("day"))
         return _apply_scalar_interval(ds, period, axis=axis)
 
-    first_start = _default_bounds_origin(ticks)
-    if first_start is None:
-        raise UsageError(f"irregular {axis!r} axis: cannot infer where the first cell starts")
-    starts = np.concatenate([[first_start], ticks[:-1]]).astype(ticks.dtype)
-    return _apply_bounds(ds, axis, np.stack([starts, ticks], axis=1))
+    ticks = np.asarray(ds[axis].values)
+    if origin is None:
+        origin = _default_bounds_origin(ticks)
+        if origin is None:
+            raise UsageError(
+                f"irregular {axis!r} axis needs an origin for CF bounds "
+                "(timedelta step defaults to 0; datetime defaults to t0 minus the first gap)"
+            )
+    n = ticks.size
+    pairs = np.empty((n, 2), dtype=ticks.dtype)
+    origin_arr = np.asarray(origin).astype(ticks.dtype, copy=False)
+    if _origin_is_right_of_last(origin_arr, ticks):
+        pairs[:, 0] = ticks
+        pairs[:-1, 1] = ticks[1:]
+        pairs[-1, 1] = origin_arr
+    else:
+        pairs[0, 0] = origin_arr
+        pairs[1:, 0] = ticks[:-1]
+        pairs[:, 1] = ticks
+    bound_name = f"{axis}_bounds"
+    out = ds.assign_coords({bound_name: ((axis, _BOUNDS_NV_DIM), pairs)})
+    out[axis].attrs["bounds"] = bound_name
+    for name in out.data_vars:
+        out[name].attrs.pop(DATA_INTERVAL_ATTR, None)
+    return out
+
+
+def _origin_is_right_of_last(origin, ticks) -> bool:
+    """True when ``origin`` is after the last tick (left-labeled coords)."""
+    ticks = np.asarray(ticks)
+    if ticks.size == 0:
+        return False
+    try:
+        o = np.asarray(origin).reshape(())
+        last = ticks.reshape(-1)[-1]
+        return o > last
+    except (TypeError, ValueError):
+        return False
 
 
 def _default_bounds_origin(values):
@@ -932,14 +986,8 @@ def deaccumulate_along_step(ds, names=None):
                 )
             except (TypeError, ValueError):
                 pass
-    # Each output step is the cell [step, next input step): restamp from the
-    # input steps, since the dropped last step closes the final cell.
-    steps = np.asarray(ds["step"].values)
-    diffs, unit = _axis_tick_diffs(steps)
-    if np.all(diffs == diffs[0]):
-        period = format_duration(ureg.Quantity(float(diffs[0]), unit).to("day"))
-        return _apply_scalar_interval(out, period, axis="step")
-    return _apply_bounds(out, "step", np.stack([steps[:-1], steps[1:]], axis=1))
+    origin = np.asarray(ds["step"].values)[-1]
+    return stamp_data_interval(out, dim="step", origin=origin)
 
 
 def precip_amounts_to_rates(ds, *, interval=None, deaccumulate=True):

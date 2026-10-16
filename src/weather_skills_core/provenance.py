@@ -18,8 +18,10 @@ from pathlib import Path
 
 HISTORY_ATTR = "weather_skills_history"
 SOURCE_ATTR = "weather_skills_source"
-# Rubber-stamp crimson (RGBA).
-_MARK_INK = (165, 15, 45, 235)
+DEFAULT_SOFTWARE = "forecasting-skills"
+OFFICIAL_MARK_TEXT = "weather-skills provenance verified"
+# Classic crimson rubber-stamp ink (RGBA) — opaque enough to read on maps.
+_MARK_INK = (139, 15, 32, 250)
 
 _EXIF_USER_COMMENT = 0x9286  # EXIF UserComment tag
 _HTML_META_RE = re.compile(
@@ -69,9 +71,8 @@ def coerce_chain(raw: str, label: str) -> list | None:
 _ENTRY_KNOWN_KEYS = {"skill", "version", "args", "input", "commit", "repo", "dirty"}
 _INPUT_ITEM_KNOWN_KEYS = {"basename", "hash", "history"}
 _GIT_TIMEOUT_SECONDS = 2
-_GITHUB_REMOTE_RE = re.compile(
-    r"^(?:git@github\.com:|https://github\.com/)([^/]+)/(.+?)(?:\.git)?/?$"
-)
+_SSH_GITHUB_RE = re.compile(r"^git@github\.com:([^/]+)/(.+?)(?:\.git)?$")
+_HTTPS_GITHUB_RE = re.compile(r"^https://github\.com/([^/]+)/(.+?)(?:\.git)?(?:/)?$")
 
 
 def _validate_input(value, loc: str, violations: list, notes: list) -> None:
@@ -133,9 +134,12 @@ def _validate_chain(chain, loc: str, violations: list, notes: list) -> None:
             violations.append(f"{eloc}: missing required key 'input'")
         else:
             _validate_input(entry["input"], f"{eloc}.input", violations, notes)
-        for key in ("commit", "repo"):
-            if key in entry and not (isinstance(entry[key], str) and entry[key]):
-                violations.append(f"{eloc}.{key}: must be a non-empty string")
+        if "commit" in entry:
+            if not isinstance(entry["commit"], str) or not entry["commit"]:
+                violations.append(f"{eloc}.commit: must be a non-empty string")
+        if "repo" in entry:
+            if not isinstance(entry["repo"], str) or not entry["repo"]:
+                violations.append(f"{eloc}.repo: must be a non-empty string")
         if "dirty" in entry and not isinstance(entry["dirty"], bool):
             violations.append(f"{eloc}.dirty: must be a boolean")
         for key in entry:
@@ -160,10 +164,10 @@ def chain_is_intact(history) -> bool:
 
 
 def _render_circular_stamp(diameter: int):
-    """Build a small circular rubber stamp: ring, star, and a tiny ``w-s`` below it."""
+    """Build a small circular rubber stamp: ring + center star, no text."""
     import math
 
-    from PIL import Image, ImageDraw, ImageFont
+    from PIL import Image, ImageDraw
 
     scale = 4
     size = max(diameter, 24) * scale
@@ -176,27 +180,16 @@ def _render_circular_stamp(diameter: int):
     draw.ellipse(
         (cx - outer_r, cy - outer_r, cx + outer_r, cy + outer_r),
         outline=ink,
-        width=max(scale, size // 40),
+        width=max(2 * scale, size // 22),
     )
 
-    star_r = outer_r * 0.3
-    star_cy = cy - outer_r * 0.25
+    star_r = outer_r * 0.48
     pts = []
     for i in range(10):
-        r = star_r if i % 2 == 0 else star_r * 0.38
+        r = star_r if i % 2 == 0 else star_r * 0.42
         a = -math.pi / 2 + i * math.pi / 5
-        pts.append((cx + r * math.cos(a), star_cy + r * math.sin(a)))
+        pts.append((cx + r * math.cos(a), cy + r * math.sin(a)))
     draw.polygon(pts, fill=ink)
-
-    # Serif lowercase; system serif fonts vary, so fall back to Pillow's sans.
-    font = ImageFont.load_default(size=outer_r * 0.7)
-    for name in ("Georgia.ttf", "Times New Roman.ttf", "DejaVuSerif.ttf"):
-        try:
-            font = ImageFont.truetype(name, size=outer_r * 0.7)
-            break
-        except OSError:
-            continue
-    draw.text((cx, cy + outer_r * 0.42), "w-s", fill=ink, font=font, anchor="mm")
 
     # Slight rotation so it looks hand-inked rather than UI chrome.
     stamp = stamp.rotate(-6, resample=Image.Resampling.BICUBIC, expand=True)
@@ -263,26 +256,55 @@ def input_ref(path: Path, history=None) -> dict:
     return ref
 
 
+def input_items(entry) -> list:
+    """Normalize an entry's ``input`` to a list of parent objects."""
+    if not isinstance(entry, dict):
+        return []
+    value = entry.get("input")
+    if value is None:
+        return []
+    if isinstance(value, dict):
+        return [value]
+    if isinstance(value, list):
+        return [item for item in value if isinstance(item, dict)]
+    return []
+
+
+def parent_histories(entry) -> list[tuple[str, list]]:
+    """``(basename, nested history)`` for every parent that recorded a subgraph."""
+    out = []
+    for item in input_items(entry):
+        history = item.get("history")
+        if isinstance(history, list):
+            out.append((item.get("basename") or "?", history))
+    return out
+
+
 def origin_skill(history) -> str | None:
     """Oldest skill name, walking into the first nested parent of a join."""
     if not isinstance(history, list) or not history or not isinstance(history[0], dict):
         return None
     first = history[0]
     if len(history) == 1:
-        parents = first.get("input")
-        for item in parents if isinstance(parents, list) else [parents]:
-            if isinstance(item, dict) and (found := origin_skill(item.get("history"))):
+        for _name, nested in parent_histories(first):
+            found = origin_skill(nested)
+            if found:
                 return found
     skill = first.get("skill")
-    return skill.strip() if isinstance(skill, str) and skill.strip() else None
+    if isinstance(skill, str) and skill.strip():
+        return skill.strip()
+    return None
 
 
 def normalize_repo_url(url: str) -> str:
     """Turn a git remote into an https clone URL when we recognize GitHub."""
     text = url.strip()
-    match = _GITHUB_REMOTE_RE.match(text)
-    if match:
-        return f"https://github.com/{match[1]}/{match[2]}"
+    ssh = _SSH_GITHUB_RE.match(text)
+    if ssh:
+        return f"https://github.com/{ssh[1]}/{ssh[2].removesuffix('.git')}"
+    https = _HTTPS_GITHUB_RE.match(text)
+    if https:
+        return f"https://github.com/{https[1]}/{https[2].removesuffix('.git')}"
     return text.removesuffix(".git")
 
 
@@ -303,22 +325,59 @@ def _git(args: list[str], cwd: Path) -> str | None:
     return proc.stdout.strip() or None
 
 
+def _direct_url_payload(dist) -> dict | None:
+    info_dir = getattr(dist, "_path", None)
+    if info_dir is not None:
+        candidate = Path(info_dir) / "direct_url.json"
+        if candidate.is_file():
+            try:
+                payload = json.loads(candidate.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                payload = None
+            else:
+                if isinstance(payload, dict):
+                    return payload
+    for file in getattr(dist, "files", None) or []:
+        if Path(str(file)).name != "direct_url.json":
+            continue
+        try:
+            payload = json.loads(Path(file.locate()).read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, ValueError):
+            return None
+        return payload if isinstance(payload, dict) else None
+    return None
+
+
 def _revision_from_direct_url(source_file: Path) -> dict | None:
     """Read PEP 610 ``direct_url.json`` for the installed dist that owns ``source_file``."""
-    from importlib.metadata import distributions
-
+    try:
+        from importlib.metadata import distributions
+    except ImportError:
+        return None
+    source_file = source_file.resolve()
     for dist in distributions():
-        try:
-            owned = any(Path(f.locate()).resolve() == source_file for f in dist.files or [])
-            payload = json.loads(dist.read_text("direct_url.json") or "null") if owned else None
-        except (OSError, ValueError):
+        owned = False
+        for file in getattr(dist, "files", None) or []:
+            try:
+                if Path(file.locate()).resolve() == source_file:
+                    owned = True
+                    break
+            except (OSError, ValueError):
+                continue
+        if not owned:
             continue
-        commit = ((payload or {}).get("vcs_info") or {}).get("commit_id")
-        if commit:
-            revision = {"commit": commit}
-            if payload.get("url"):
-                revision["repo"] = normalize_repo_url(payload["url"])
-            return revision
+        payload = _direct_url_payload(dist)
+        if payload is None:
+            continue
+        vcs = payload.get("vcs_info") if isinstance(payload.get("vcs_info"), dict) else {}
+        commit = vcs.get("commit_id")
+        if not isinstance(commit, str) or not commit:
+            continue
+        revision = {"commit": commit}
+        url = payload.get("url")
+        if isinstance(url, str) and url:
+            revision["repo"] = normalize_repo_url(url)
+        return revision
     return None
 
 
@@ -330,16 +389,25 @@ def resolve_skill_revision(source=None) -> dict | None:
     ``direct_url.json`` (``uvx --from git+…@sha``). Returns ``None`` when
     neither is available. Untracked files do not count as dirty.
     """
-    if source is None:
+    path = None
+    if source is not None and not isinstance(source, (str, Path)):
+        try:
+            path = Path(inspect.getfile(source))
+        except (OSError, TypeError):
+            path = None
+    elif source is not None:
+        path = Path(source)
+    if path is None:
         return None
     try:
-        path = Path(source if isinstance(source, (str, Path)) else inspect.getfile(source))
         path = path.resolve()
-    except (OSError, TypeError):
+    except OSError:
         return None
-    root = _git(["rev-parse", "--show-toplevel"], path.parent if path.is_file() else path)
+    cwd = path.parent if path.is_file() else path
+    root = _git(["rev-parse", "--show-toplevel"], cwd)
     if not root:
         return _revision_from_direct_url(path) if path.is_file() else None
+    root = Path(root)
     commit = _git(["rev-parse", "HEAD"], root)
     if not commit:
         return None
@@ -347,14 +415,25 @@ def resolve_skill_revision(source=None) -> dict | None:
     remote = _git(["config", "--get", "remote.origin.url"], root)
     if remote:
         revision["repo"] = normalize_repo_url(remote)
-    if _git(["status", "--porcelain", "-uno"], root):
+    porcelain = _git(["status", "--porcelain", "-uno"], root)
+    if porcelain:
         revision["dirty"] = True
     return revision
 
 
 def build_entry(skill: str, version: str, args: dict, input, revision=None) -> dict:
-    """Assemble a provenance entry, attaching git identity (``commit``/``repo``/``dirty``)."""
-    return {"skill": skill, "version": version, "args": args, "input": input, **(revision or {})}
+    """Assemble a provenance entry, attaching git identity when known."""
+    entry = {"skill": skill, "version": version, "args": args, "input": input}
+    if isinstance(revision, dict):
+        commit = revision.get("commit")
+        if isinstance(commit, str) and commit:
+            entry["commit"] = commit
+        repo = revision.get("repo")
+        if isinstance(repo, str) and repo:
+            entry["repo"] = repo
+        if revision.get("dirty") is True:
+            entry["dirty"] = True
+    return entry
 
 
 def stamp_zarr(ds, history: list, *, source: str | None = None) -> None:
@@ -375,7 +454,7 @@ def restamp_zarr(zarr_path: Path, history: list) -> None:
     zarr.consolidate_metadata(str(zarr_path))
 
 
-def stamp_figure(path: Path, history: list) -> None:
+def stamp_figure(path: Path, history: list, *, software: str = DEFAULT_SOFTWARE) -> None:
     """Embed ``weather_skills_history`` into a PNG, JPEG, or HTML file.
 
     When the chain is intact (non-empty and schema-valid), also draw a circular
@@ -400,7 +479,7 @@ def stamp_figure(path: Path, history: list) -> None:
                 if isinstance(value, str) and key not in (HISTORY_ATTR, "Software"):
                     info.add_text(key, value)
             info.add_text(HISTORY_ATTR, payload)
-            info.add_text("Software", "weather-skills")
+            info.add_text("Software", software)
             out.save(path, pnginfo=info)
         return
 
@@ -420,14 +499,10 @@ def stamp_figure(path: Path, history: list) -> None:
     if suffix in (".html", ".htm"):
         text = path.read_text(encoding="utf-8")
         meta = f'<meta name="{HISTORY_ATTR}" content="{html.escape(payload, quote=True)}">'
-        # Replace via a function: the JSON payload carries backslash escapes
-        # (e.g. \u2014 for an em dash) that re.sub would parse as a template.
         if _HTML_META_RE.search(text):
-            text = _HTML_META_RE.sub(lambda m: meta, text, count=1)
+            text = _HTML_META_RE.sub(meta, text, count=1)
         elif re.search(r"<head[^>]*>", text, re.IGNORECASE):
-            text = re.sub(
-                r"(<head[^>]*>)", lambda m: f"{m.group(1)}\n{meta}", text, count=1, flags=re.I
-            )
+            text = re.sub(r"(<head[^>]*>)", rf"\1\n{meta}", text, count=1, flags=re.IGNORECASE)
         else:
             text = meta + "\n" + text
         path.write_text(text, encoding="utf-8")

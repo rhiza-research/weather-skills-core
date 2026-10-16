@@ -2,16 +2,15 @@
 
 Rule IDs are stable forever -- new rules take new numbers inside their band
 and existing rules are never renumbered. Bands group the rules by what they
-read: WSK0xx analysis failures, WSK1xx the declaration against the flags
-core owns, WSK3xx the SKILL.md manifest, WSK4xx script packaging (version
-constant, PEP 723). Skills are linted one at a time: two skills declaring
-the same flag differently is not a finding. (WSK2xx, the retired cross-skill
-rules, stays unused.)
+read: WSK0xx analysis failures, WSK1xx the declaration against the standard
+surface, WSK2xx cross-skill comparisons over the corpus, WSK3xx the SKILL.md
+manifest, WSK4xx script packaging (version constant, PEP 723).
 
 Severities (worst first): ``error`` -- the declaration breaks an ecosystem
-contract (the script cannot be analyzed, versioning or packaging is
-broken); ``warning`` -- a conformance divergence worth fixing (a core flag
-redeclared, documentation drift); ``info`` -- advisory notes. All of it is
+contract (the script cannot be analyzed, a shared flag behaves differently
+across skills, versioning or packaging is broken); ``warning`` -- a
+conformance divergence worth fixing (a shadowed standard flag, a duplicated
+one-off, documentation drift); ``info`` -- advisory notes. All of it is
 advisory: findings never gate a run by themselves.
 """
 
@@ -19,7 +18,12 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from weather_skills_core.linting.extract import SkillDeclaration, normalize_requirement_name
+from weather_skills_core.linting.corpus import CorpusSkill
+from weather_skills_core.linting.extract import (
+    ArgShape,
+    SkillDeclaration,
+    normalize_requirement_name,
+)
 from weather_skills_core.standard_args import StandardParameter, standard_parameters
 
 CORE_PACKAGE = "weather-skills-core"
@@ -30,27 +34,44 @@ class Rule:
     id: str
     severity: str
     title: str
+    #: Whether the rule is in the default set (the set a bare run evaluates,
+    #: and the base that --select replaces / --extend-select adds to). This is
+    #: orthogonal to ``severity``: severity drives display and --strict only,
+    #: never default membership. WSK201 is advisory (a maintainer survey of
+    #: shared flags) and default-off; every other rule is default-on.
+    default_enabled: bool = True
 
 
 RULES = {
     "WSK001": Rule("WSK001", "error", "skill script could not be analyzed"),
-    "WSK101": Rule("WSK101", "warning", "argument redeclares a flag core owns"),
+    "WSK101": Rule(
+        "WSK101", "warning", "argument uses a non-canonical spelling of a standard parameter"
+    ),
+    "WSK201": Rule(
+        "WSK201", "warning", "one-off flag declared by multiple skills", default_enabled=False
+    ),
+    "WSK202": Rule("WSK202", "error", "shared flag name with divergent shape"),
     "WSK301": Rule("WSK301", "warning", "SKILL.md drift"),
     "WSK401": Rule("WSK401", "error", "_SKILL_VERSION missing or not passed to the decorator"),
     "WSK402": Rule("WSK402", "error", "PEP 723 block does not declare weather-skills-core"),
 }
 
+#: Rules that need a corpus beyond the skill itself; skipped (and excluded
+#: from the score denominator) when none is available.
+CROSS_SKILL_RULES = ("WSK201", "WSK202")
+PER_SKILL_RULES = ("WSK101", "WSK301", "WSK401", "WSK402")
+
 
 def default_rule_set() -> set[str]:
-    """The rule codes evaluated when no ``--select`` is given: all of them."""
-    return set(RULES)
+    """The rule codes evaluated when no ``--select`` is given."""
+    return {rule.id for rule in RULES.values() if rule.default_enabled}
 
 
 def expand_selector(selector: str) -> set[str]:
     """The rule codes a selector matches: a full code, or a category prefix.
 
-    An exact rule code (``WSK301``) matches only itself; anything else is
-    treated as a category prefix (``WSK4`` matches every ``WSK4xx``, ``WSK``
+    An exact rule code (``WSK201``) matches only itself; anything else is
+    treated as a category prefix (``WSK2`` matches every ``WSK2xx``, ``WSK``
     matches all). Returns an empty set when the selector matches no known code,
     which the caller turns into a usage error.
     """
@@ -90,26 +111,13 @@ def _standard_lookup() -> dict[str, StandardParameter]:
 
 
 def _rule_shadow(decl: SkillDeclaration) -> list[Finding]:
-    """Flag arguments that collide with flags core owns.
+    """Flag non-canonical declarations of shared specials (bbox/date/…).
 
-    That is ``-o``/``--output`` (the decorator adds it unless ``output=False``)
-    and non-canonical spellings of the standard parameters (bbox/date/…).
-    Input flags are free-form.
+    Path I/O flags (``-i``/``-o``) are free-form and are not shadows.
     """
     findings = []
     lookup = _standard_lookup()
     for shape in decl.arguments.values():
-        if decl.has_output and ({"-o", "--output"} & set(shape.flags) or shape.dest == "output"):
-            findings.append(
-                _finding(
-                    "WSK101",
-                    decl,
-                    shape.identity,
-                    "the decorator owns -o/--output; drop this argument "
-                    "(or pass output=False to the decorator to opt out).",
-                )
-            )
-            continue
         param = None
         for flag in shape.flags:
             if flag in lookup:
@@ -302,21 +310,111 @@ def _rule_skill_md(decl: SkillDeclaration, siblings: list[SkillDeclaration]) -> 
     return findings
 
 
-def lint_skills(decls: list[SkillDeclaration], active_rules: set[str]) -> list[Finding]:
-    """Evaluate the active rules on each skill declaration, one skill at a time.
+def _shape_divergences(a: ArgShape, b: ArgShape) -> tuple[list[str], bool]:
+    """(differences, partial): shape components differing between two declarations.
+
+    Components recorded as dynamic on either side are skipped from the
+    comparison; ``partial`` reports that such a skip happened.
+    """
+    if a.dynamic or b.dynamic:
+        return [], True
+    dynamic = set(a.dynamic_keys) | set(b.dynamic_keys)
+    partial = bool(dynamic)
+    diffs = []
+    if not ({"action", "repeat"} & dynamic) and a.arity != b.arity:
+        diffs.append(f"arity {a.arity} vs {b.arity}")
+    if "nargs" not in dynamic and a.nargs != b.nargs:
+        diffs.append(f"nargs {a.nargs!r} vs {b.nargs!r}")
+    if "type" not in dynamic and a.type_name != b.type_name:
+        diffs.append(f"type {a.type_name or 'str'} vs {b.type_name or 'str'}")
+    if "choices" not in dynamic and a.choices != b.choices:
+        diffs.append(
+            f"choices {list(a.choices) if a.choices else None} vs "
+            f"{list(b.choices) if b.choices else None}"
+        )
+    return diffs, partial
+
+
+def _rule_cross_skill(corpus: list[CorpusSkill]) -> list[Finding]:
+    lookup = _standard_lookup()
+    by_identity: dict[str, list[tuple[CorpusSkill, ArgShape]]] = {}
+    for cs in corpus:
+        for shape in cs.decl.arguments.values():
+            if shape.dest in lookup or any(flag in lookup for flag in shape.flags):
+                continue  # shadows of the standard surface are WSK101 territory
+            by_identity.setdefault(shape.identity, []).append((cs, shape))
+
+    findings = []
+    for identity, entries in sorted(by_identity.items()):
+        # Holders are skill directories, not individual scripts: two scripts in
+        # one skill directory sharing a flag are not a cross-skill collision, so
+        # a skill is never fired against its own scripts.
+        holder_dirs = {cs.decl.skill_dir.resolve() for cs, _ in entries}
+        if len(holder_dirs) < 2:
+            continue
+        for cs, shape in entries:
+            if not cs.is_target:
+                continue
+            this_dir = cs.decl.skill_dir.resolve()
+            others = [(o, s) for o, s in entries if o.decl.skill_dir.resolve() != this_dir]
+            if not others:
+                continue
+            other_names = ", ".join(f"{o.decl.display_name} ({o.source})" for o, _ in others)
+            findings.append(
+                _finding(
+                    "WSK201",
+                    cs.decl,
+                    identity,
+                    f"one-off flag {identity} is also declared by {other_names}; rename "
+                    "it, or propose promoting it to a weather-skills-core standard "
+                    "parameter.",
+                )
+            )
+            divergent = []
+            any_partial = False
+            for other, other_shape in others:
+                diffs, partial = _shape_divergences(shape, other_shape)
+                any_partial = any_partial or partial
+                if diffs:
+                    divergent.append(
+                        f"{other.decl.display_name} ({other.source}): {'; '.join(diffs)}"
+                    )
+            if divergent:
+                suffix = " (dynamic values excluded from the comparison)" if any_partial else ""
+                findings.append(
+                    _finding(
+                        "WSK202",
+                        cs.decl,
+                        identity,
+                        f"{identity} diverges in shape from {' | '.join(divergent)}; "
+                        f"align the declarations or rename the flags{suffix}.",
+                    )
+                )
+    return findings
+
+
+def lint_corpus(
+    corpus: list[CorpusSkill], corpus_available: bool, active_rules: set[str]
+) -> list[Finding]:
+    """Evaluate the active rules over the corpus; findings only for target skills.
 
     ``active_rules`` is the resolved rule set (see
-    :func:`weather_skills_core.linting.run.resolve_rule_set`).
+    :func:`weather_skills_core.linting.run.resolve_rule_set`). Only findings whose
+    rule is active are returned, and the cross-skill pass is skipped entirely
+    when no cross-skill rule is active.
     """
     findings: list[Finding] = []
-    # Analyzable declarations grouped by skill directory: the SKILL.md reverse
-    # check unions all of a skill's scripts (WSK301 must not flag one script's
-    # argument as undeclared when a sibling script declares it).
+    # Analyzable target declarations grouped by skill directory: the SKILL.md
+    # reverse check unions all of a skill's scripts (WSK301 must not flag one
+    # script's argument as undeclared when a sibling script declares it).
     siblings: dict[Path, list[SkillDeclaration]] = {}
-    for decl in decls:
-        if decl.error is None:
-            siblings.setdefault(decl.skill_dir.resolve(), []).append(decl)
-    for decl in decls:
+    for cs in corpus:
+        if cs.is_target and cs.decl.error is None:
+            siblings.setdefault(cs.decl.skill_dir.resolve(), []).append(cs.decl)
+    for cs in corpus:
+        if not cs.is_target:
+            continue
+        decl = cs.decl
         if decl.error is not None:
             findings.append(_finding("WSK001", decl, None, f"{decl.error}."))
             continue
@@ -324,4 +422,6 @@ def lint_skills(decls: list[SkillDeclaration], active_rules: set[str]) -> list[F
         findings += _rule_skill_md(decl, siblings[decl.skill_dir.resolve()])
         findings += _rule_version(decl)
         findings += _rule_core_dep(decl)
+    if corpus_available and set(CROSS_SKILL_RULES) & active_rules:
+        findings += _rule_cross_skill([cs for cs in corpus if cs.decl.error is None])
     return [f for f in findings if f.rule in active_rules]

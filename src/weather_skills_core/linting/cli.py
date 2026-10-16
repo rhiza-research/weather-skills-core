@@ -2,7 +2,7 @@
 
 Dispatches subcommands; ``lint`` is the only one. Exit codes: 0 whether or
 not the lint produced findings (the linter is advisory), 2 for usage errors
-(an unlintable path, an unknown rule code), and 1 only
+(an unlintable path, an unresolvable ``--against`` reference), and 1 only
 when ``--strict`` is given and a finding at or above the chosen severity
 exists.
 """
@@ -35,12 +35,23 @@ def main(argv=None) -> int:
         help="Lint target (default: the current directory, auto-detected).",
     )
     lint_parser.add_argument(
+        "--against",
+        action="append",
+        default=[],
+        metavar="PATH_OR_REPO",
+        help=(
+            "Additional corpus for the cross-skill rules: a local path or a public "
+            "GitHub repository reference (org/repo[@rev], where rev is a branch, tag, "
+            "or full commit SHA). Repeatable."
+        ),
+    )
+    lint_parser.add_argument(
         "--select",
         action="append",
         metavar="CODE",
         help=(
-            "Replace the default rule set with these rules. A full code (WSK301) "
-            "or a category prefix (WSK4 matches every WSK4xx). Repeatable."
+            "Replace the default rule set with these rules. A full code (WSK201) "
+            "or a category prefix (WSK2 matches every WSK2xx). Repeatable."
         ),
     )
     lint_parser.add_argument(
@@ -49,7 +60,8 @@ def main(argv=None) -> int:
         metavar="CODE",
         help=(
             "Add these rules to the set being run (the default set, or --select "
-            "if given). Codes or category prefixes. Repeatable."
+            "if given). Codes or category prefixes. Repeatable. Use "
+            "--extend-select WSK201 to survey shared one-off flags."
         ),
     )
     lint_parser.add_argument(
@@ -84,6 +96,7 @@ def main(argv=None) -> int:
     try:
         report = run_lint(
             Path(args.path),
+            args.against,
             select=args.select,
             extend_select=args.extend_select,
             ignore=args.ignore,

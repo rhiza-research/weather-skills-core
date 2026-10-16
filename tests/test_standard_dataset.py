@@ -15,9 +15,24 @@ def test_detect_spatial_dims_alias_names():
     assert dataset.detect_spatial_dims(ds) == ("lat", "lon")
 
 
+def test_detect_spatial_dims_override_wins():
+    ds = make_gridded().rename({"latitude": "yy", "longitude": "xx"})
+    assert dataset.detect_spatial_dims(ds, "yy,xx") == ("yy", "xx")
+
+
+def test_detect_spatial_dims_override_names_must_exist():
+    with pytest.raises(UsageError, match="not in dataset dims"):
+        dataset.detect_spatial_dims(make_gridded(), "a,b")
+
+
+def test_detect_spatial_dims_override_must_be_two_names():
+    with pytest.raises(UsageError, match="LAT,LON"):
+        dataset.detect_spatial_dims(make_gridded(), "onlyone")
+
+
 def test_detect_spatial_dims_unidentifiable():
     ds = make_gridded().rename({"latitude": "row", "longitude": "col"})
-    with pytest.raises(UsageError, match="Rename them to lat/lon"):
+    with pytest.raises(UsageError, match="Pass --dims"):
         dataset.detect_spatial_dims(ds)
 
 
@@ -183,6 +198,26 @@ def test_validate_input_point_obs_accepts_lat_lon_aliases():
 def test_validate_input_unknown_declared_type_is_a_programming_error():
     with pytest.raises(ValueError, match="unknown type or dimension"):
         dataset.validate_input(make_gridded(), "grid", "in.zarr")
+
+
+def test_validate_input_dims_override_validates_undetectable_gridded():
+    ds = make_gridded().rename({"latitude": "yy", "longitude": "xx"})
+    with pytest.raises(UsageError, match="lat|lon"):
+        dataset.validate_input(ds, "observations", "in.zarr")
+    assert dataset.validate_input(ds, "observations", "in.zarr", dims="yy,xx") == "observations"
+
+
+def test_validate_input_dims_override_names_must_exist():
+    ds = make_gridded().rename({"latitude": "yy", "longitude": "xx"})
+    with pytest.raises(UsageError, match="lat|lon"):
+        dataset.validate_input(ds, "observations", "in.zarr", dims="a,b")
+
+
+def test_validate_input_time_dim_override_must_exist():
+    with pytest.raises(UsageError, match="time"):
+        dataset.validate_input(make_gridded(), "observations", "in.zarr", time_dim="t")
+    ds = make_gridded().rename({"time": "t"})
+    assert dataset.validate_input(ds, "observations", "in.zarr", time_dim="t") == "observations"
 
 
 def test_validate_input_any_accepts_all():

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 
 from weather_skills_core.errors import UsageError
@@ -37,21 +36,13 @@ def standard_parameters():
     )
 
 
-def rewrite_negative_values(argv, value_options):
-    """Join ``--opt -1.28,36.82`` into ``--opt=-1.28,36.82``.
-
-    argparse reads any token starting with ``-`` that isn't a plain number as
-    a flag, so a southern-hemisphere ``--point`` or a negative-north ``--bbox``
-    fails with "expected one argument". For options in ``value_options`` (those
-    taking one value), a following token that starts with ``-`` and a digit or
-    ``.`` is that option's value.
-    """
+def rewrite_bbox_argv(argv):
+    """Turn ``--bbox N/W/S/E`` into ``--bbox=…`` so a negative north is not a flag."""
     out = []
     i = 0
     while i < len(argv):
-        nxt = argv[i + 1] if i + 1 < len(argv) else ""
-        if argv[i] in value_options and re.match(r"-[\d.]", nxt):
-            out.append(f"{argv[i]}={nxt}")
+        if argv[i] == "--bbox" and i + 1 < len(argv):
+            out.append(f"--bbox={argv[i + 1]}")
             i += 2
             continue
         out.append(argv[i])
@@ -76,8 +67,10 @@ def convert_standard_args(args, arguments) -> dict:
     """Build skill kwargs from parsed CLI.
 
     ``--bbox`` becomes an ``(N, W, S, E)`` float tuple. Dates become ``datetime.date``.
-    Only absolute values are parsed: a ``N/W/S/E`` bbox and ``YYYY-MM-DD``
-    dates. Place names and relative dates are resolved before the call.
+    Named places are not a decorator flag — compose with the resolve-region skill
+    and pass the printed bbox here. Relative dates are not a decorator flag —
+    compose with the resolve-time skill and pass the printed `--date` /
+    `--start-time` / `--end-time`.
 
     Raises UsageError if ``start_time`` is after ``end_time``.
     """

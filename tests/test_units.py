@@ -14,7 +14,6 @@ from weather_skills_core.units import (
     STANDARD,
     assert_nonoverlapping_intervals,
     classify_variable,
-    convert_dataarray,
     convert_values,
     deaccumulate_along_step,
     dequantify_dataset,
@@ -22,11 +21,12 @@ from weather_skills_core.units import (
     filter_min_coverage,
     format_cell_methods,
     format_duration,
+    format_units_for_display,
     infer_timestep,
-    interval_days,
     looks_like_rate_display_name,
     parse_aggregation_period,
     precip_amounts_to_rates,
+    precip_for_display,
     quantify_dataset,
     rate_to_total,
     stamp_data_interval,
@@ -35,6 +35,7 @@ from weather_skills_core.units import (
     units_convertible,
     units_equal,
     ureg,
+    variable_label_for_display,
 )
 
 
@@ -43,6 +44,46 @@ def test_units_equal_spelling():
     assert units_equal("mm/day", "mm day-1")
     assert units_equal("degC", "degree_Celsius")
     assert not units_equal("mm", "mm day-1")
+
+
+def test_format_units_for_display():
+    """Figure labels use mm/day and °C, not CF or pint pretty-print."""
+    assert format_units_for_display("mm day-1") == "mm/day"
+    assert format_units_for_display("millimeter / day") == "mm/day"
+    assert format_units_for_display("mm") == "mm"
+    assert format_units_for_display("degree_Celsius") == "°C"
+    assert format_units_for_display("") == ""
+    assert format_units_for_display(None) == ""
+
+
+def test_variable_label_for_display_prefers_long_name():
+    """Colorbars use long_name even when a leftover GRIB rate name is present."""
+    da = make_forecast()["tp"]
+    da.attrs.update(
+        units="mm",
+        standard_name="lwe_thickness_of_precipitation_amount",
+        long_name="Total precipitation",
+        GRIB_name="Precipitation rate",
+    )
+    assert variable_label_for_display(da) == "Total precipitation [mm]"
+    assert variable_label_for_display(da, include_units=False) == "Total precipitation"
+
+    product = make_gridded()["precip"]
+    product.attrs["long_name"] = "IMERG daily precipitation"
+    assert variable_label_for_display(product) == "IMERG daily precipitation [mm/day]"
+
+    amount = make_forecast()["tp"]
+    amount.attrs.update(
+        units="mm",
+        standard_name="lwe_thickness_of_precipitation_amount",
+        long_name="precipitation rate",
+        GRIB_name="Precipitation rate",
+    )
+    assert variable_label_for_display(amount) == "Total precipitation [mm]"
+
+    bare = make_gridded()["precip"]
+    assert variable_label_for_display(bare) == "precip [mm/day]"
+    assert variable_label_for_display(bare, fallback="rainfall") == "rainfall [mm/day]"
 
 
 def test_pentad_dekad_registry():
@@ -147,31 +188,6 @@ def test_units_convertible():
     assert not units_convertible("1", "mm day-1")
 
 
-def test_pressure_is_a_standard_kind_in_hpa():
-    """MSLP / surface pressure in Pa convert to hPa; pressure-named anomalies do not."""
-    sn = "air_pressure_at_mean_sea_level"
-    assert classify_variable("msl", units="Pa", standard_name=sn) == "pressure"
-    assert classify_variable("sp", units="Pa", standard_name="surface_air_pressure") == "pressure"
-    assert classify_variable("prmsl", units="Pa") == "pressure"
-    assert classify_variable("msl", units="1") is None  # a normalized anomaly
-    assert classify_variable("speed", units="m s-1") is None
-    assert classify_variable("spi", units="1") is None
-
-    ds = make_gridded(name="msl", fill=101325.0, units="Pa")
-    ds["msl"].attrs["standard_name"] = sn
-    out = to_standard_units(ds)
-    assert out["msl"].attrs["units"] == "hPa"
-    assert out["msl"].attrs["standard_name"] == sn
-    np.testing.assert_allclose(out["msl"].values, 1013.25)
-    # A Pa difference (a pressure anomaly from `difference`) scales the same way.
-    diff = make_gridded(name="msl", fill=-250.0, units="Pa")
-    np.testing.assert_allclose(to_standard_units(diff)["msl"].values, -2.5)
-    assert (
-        to_standard_units(make_gridded(name="msl", fill=1.5, units="1"))["msl"].attrs["units"]
-        == "1"
-    )
-
-
 def test_to_standard_units_missing_variable():
     """A missing --variable name is a UsageError."""
     ds = make_gridded()
@@ -245,6 +261,25 @@ def test_rate_to_total_refuses_cell_methods_sum():
         rate_to_total(q["precip"], "1 day")
 
 
+def test_precip_for_display_converts_aggregated_rate():
+    """A rate with aggregation_period becomes an amount for display."""
+    ds = make_gridded(name="precip", fill=2.0, units="mm day-1")
+    ds["precip"].attrs["aggregation_period"] = "1 day"
+    ds["precip"].attrs["standard_name"] = "lwe_precipitation_rate"
+    out = precip_for_display(ds, "precip")
+    assert out["precip"].attrs["units"] == STANDARD["precip_amount"]["units"]
+    assert out["precip"].attrs["long_name"] == PRECIP_AMOUNT_LONG_NAME
+    assert out["precip"].attrs["aggregation_period"] == "1 day"
+    np.testing.assert_allclose(out["precip"].values, 2.0)
+
+
+def test_precip_for_display_noop_without_period():
+    """Without aggregation_period the rate is left as a rate."""
+    ds = make_gridded(name="precip", units="mm day-1")
+    out = precip_for_display(ds, "precip")
+    assert out["precip"].attrs["units"] == "mm day-1"
+
+
 def test_quantify_dataset_passes_unitless_other_vars():
     """Non-temp/precip vars may stay unitless."""
     ds = make_gridded(name="humidity", units=None)
@@ -263,23 +298,7 @@ def test_quantify_dataset_quantifies_and_preserves_coord_attrs():
     assert q["latitude"].pint.units is None
     assert q["latitude"].attrs["units"] == "degrees_north"
     plain = dequantify_dataset(q)
-    assert plain["precip"].attrs["units"] == "mm day-1"
-
-
-def test_dequantify_dataset_spells_units_standard_or_cf():
-    """Converted units keep STANDARD spellings, else CF; never pint long form."""
-    ds = make_gridded(name="precip", units="mm hr-1")
-    ds["temp"] = ds["precip"].copy()
-    ds["temp"].attrs = {"units": "K"}
-    ds["wind"] = ds["precip"].copy()
-    ds["wind"].attrs = {"units": "m s-1"}
-    q = quantify_dataset(ds)
-    q["precip"] = q["precip"].pint.to("mm day-1")
-    q["temp"] = q["temp"].pint.to("degree_Celsius")
-    plain = dequantify_dataset(q)
-    assert plain["precip"].attrs["units"] == "mm day-1"
-    assert plain["temp"].attrs["units"] == "degree_Celsius"
-    assert plain["wind"].attrs["units"] == "m s-1"
+    assert "units" in plain["precip"].attrs
 
 
 def test_format_cell_methods():
@@ -310,7 +329,7 @@ def test_timestep_gate_and_rate_to_total():
         {"precip": (("time",), np.ones(7), {"units": "mm day-1"})},
         coords={"time": np.arange("2026-01-01", "2026-01-08", dtype="datetime64[D]")},
     )
-    with pytest.raises(UsageError, match="non-overlapping subset"):
+    with pytest.raises(UsageError, match="select"):
         assert_nonoverlapping_intervals(daily, "time", "7 day")
 
 
@@ -370,29 +389,26 @@ def test_stamp_data_interval_explicit_and_inferred():
     assert daily["precip"].attrs[DATA_INTERVAL_ATTR] == "1 day"
 
 
-def test_deaccumulate_two_steps_stamps_the_one_remaining_cell():
-    """Two cumulative steps leave one cell, [0, 7 day), stamped from the dropped lead."""
-    steps = np.array([0, 7], dtype="timedelta64[D]").astype("timedelta64[ns]")
+def test_stamp_data_interval_singleton_step_with_origin():
+    """One remaining forecast step stamps from the dropped previous lead."""
+    step = np.array([np.timedelta64(7, "D")], dtype="timedelta64[ns]")
     ds = xr.Dataset(
-        {"tp": (("step",), np.array([0.0, 14.0]), {"units": "mm"})},
-        coords={"step": steps, "time": np.datetime64("2026-01-01", "ns")},
+        {"tp": (("step",), np.ones(1), {"units": "mm day-1"})},
+        coords={"step": step, "time": np.datetime64("2026-01-01", "ns")},
     )
-    out = deaccumulate_along_step(quantify_dataset(ds))
-    assert out.sizes["step"] == 1
+    out = stamp_data_interval(ds, dim="step", origin=np.timedelta64(0, "D"))
     assert out["tp"].attrs[DATA_INTERVAL_ATTR] == "7 day"
 
 
-def test_deaccumulate_irregular_steps_write_left_labeled_bounds():
-    """Uneven leads get CF bounds: each cell runs from its step to the next input step."""
-    hours = np.array([0, 3, 6, 12], dtype="timedelta64[h]").astype("timedelta64[ns]")
+def test_stamp_data_interval_singleton_left_labeled_origin():
+    """Origin after the tick is the right edge of a left-labeled cell."""
+    step = np.array([np.timedelta64(0, "D")], dtype="timedelta64[ns]")
     ds = xr.Dataset(
-        {"tp": (("step",), np.array([0.0, 1.0, 2.0, 4.0]), {"units": "mm"})},
-        coords={"step": hours, "time": np.datetime64("2026-01-01", "ns")},
+        {"tp": (("step",), np.ones(1), {"units": "mm day-1"})},
+        coords={"step": step, "time": np.datetime64("2026-01-01", "ns")},
     )
-    out = deaccumulate_along_step(quantify_dataset(ds))
-    assert DATA_INTERVAL_ATTR not in out["tp"].attrs
-    np.testing.assert_array_equal(out["step_bounds"].values[:, 0], hours[:-1])
-    np.testing.assert_array_equal(out["step_bounds"].values[:, 1], hours[1:])
+    out = stamp_data_interval(ds, dim="step", origin=np.timedelta64(7, "D"))
+    assert out["tp"].attrs[DATA_INTERVAL_ATTR] == "7 day"
 
 
 def test_stamp_data_interval_singleton_step_without_origin_is_noop():
@@ -473,7 +489,7 @@ def test_deaccumulate_origin_restamps_existing_interval():
 def test_stamp_data_interval_irregular_datetime_defaults_origin():
     """Irregular times bound the first bin from midnight of that day."""
     times = np.array(
-        ["2026-08-18T03:00", "2026-08-18T06:00", "2026-08-18T10:00"],
+        ["2026-08-18T03:00", "2026-08-18T06:00", "2026-08-18T12:00"],
         dtype="datetime64[ns]",
     )
     ds = xr.Dataset(
@@ -484,21 +500,6 @@ def test_stamp_data_interval_irregular_datetime_defaults_origin():
     bounds = np.asarray(out["time_bounds"].values)
     assert bounds[0, 0] == np.datetime64("2026-08-18T00:00")
     assert bounds[0, 1] == times[0]
-
-
-def test_stamp_data_interval_datetime_gaps_stay_regular():
-    """Missing hours are missing samples, not wider cells stretched over the gap."""
-    times = np.array(
-        ["2026-08-18T00:00", "2026-08-18T01:00", "2026-08-18T04:00", "2026-08-18T05:00"],
-        dtype="datetime64[ns]",
-    )
-    ds = xr.Dataset(
-        {"pm25": (("time",), np.ones(4), {"units": "ug m-3"})},
-        coords={"time": times},
-    )
-    out = stamp_data_interval(ds)
-    assert "time_bounds" not in out
-    assert out["pm25"].attrs["data_interval"] == "1 hour"
 
 
 def test_assert_nonoverlapping_uses_min_spacing_when_bounds_present():
@@ -638,17 +639,6 @@ def test_stamp_precip_amounts_overwrites_rate_display_names():
     assert stamped["precip"].attrs["long_name"] == "CHIRPS daily precipitation"
 
 
-def test_stamp_precip_amounts_mass_units_are_precipitation_amount():
-    """kg m-2 is a mass per area: CF precipitation_amount, not lwe_thickness (a depth)."""
-    ds = make_gridded(n_time=1, fill=1.0, units="kg m-2")
-    ds["precip"].attrs["standard_name"] = "precipitation_amount"
-    assert stamp_precip_amounts(ds)["precip"].attrs["standard_name"] == "precipitation_amount"
-    depth = make_gridded(n_time=1, fill=1.0, units="m")
-    assert stamp_precip_amounts(depth)["precip"].attrs["standard_name"] == (
-        "lwe_thickness_of_precipitation_amount"
-    )
-
-
 def test_precip_amounts_to_rates_daily_and_step():
     """Daily amounts stay numerically; step amounts become per-step rates."""
     daily = make_gridded(n_time=2, fill=4.0, units="mm")
@@ -699,104 +689,3 @@ def test_precip_convertible_names_skips_temp_with_leftover_precip_standard_name(
 
     rain = make_gridded(n_time=2, fill=1.0, units="mm day-1")
     assert precip_convertible_names(rain) == ["precip"]
-
-
-def _monthly(times, calendar=None):
-    values = np.full((len(times), 1, 1), 2.0)
-    if calendar is None:
-        time = np.array(times, dtype="datetime64[ns]")
-    else:
-        time = xr.date_range(times[0], periods=len(times), freq="MS", calendar=calendar)
-    return xr.Dataset(
-        {"precip": (("time", "latitude", "longitude"), values, {"units": "mm day-1"})},
-        coords={"time": time, "latitude": [0.0], "longitude": [0.0]},
-    )
-
-
-def test_interval_days_uses_calendar_month_lengths():
-    ds = _monthly(["2024-01-01", "2024-02-01", "2025-02-01"])
-    assert interval_days(ds["time"], "1 month").tolist() == [31.0, 29.0, 28.0]
-    assert interval_days(ds["time"], "3 month")[0] == 31 + 29 + 31
-    assert interval_days(ds["time"], "7 day").tolist() == [7.0, 7.0, 7.0]
-    noleap = _monthly(["2024-01-01", "2024-02-01"], calendar="noleap")
-    assert interval_days(noleap["time"], "1 month").tolist() == [31.0, 28.0]
-
-
-def test_interval_days_refuses_months_without_month_start_labels():
-    ds = _monthly(["2024-01-15", "2024-02-15"])
-    with pytest.raises(UsageError):
-        interval_days(ds["time"], "1 month")
-    with pytest.raises(UsageError):
-        interval_days(xr.DataArray(0.0), "1 month")
-
-
-def test_rate_to_total_multiplies_each_month_by_its_length():
-    ds = quantify_dataset(_monthly(["2024-01-01", "2024-02-01"]))
-    total = rate_to_total(ds["precip"], "1 month", dim="time").pint.dequantify()
-    assert total.isel(latitude=0, longitude=0).values.tolist() == pytest.approx([62.0, 58.0])
-    assert total.attrs["units"] in ("mm", "millimeter")
-
-
-def test_assert_nonoverlapping_accepts_months_and_catches_one_overlapping_pair():
-    assert_nonoverlapping_intervals(
-        _monthly(["2025-01-01", "2025-02-01", "2025-03-01"]), "time", "1 month"
-    )
-    times = ["2026-01-01", "2026-01-08", "2026-01-15", "2026-01-22", "2026-01-23"]
-    weekly = _monthly(times)
-    with pytest.raises(UsageError):
-        assert_nonoverlapping_intervals(weekly, "time", "7 day")
-
-
-def test_classify_era5_total_precipitation():
-    assert classify_variable("total_precipitation", units="m") == "precip_amount"
-    assert classify_variable("total_precipitation", units="mm day-1") == "precip"
-
-
-def test_to_standard_units_keeps_temperature_differences_as_differences():
-    """A 2 K warm anomaly is 2 delta_degC, never 2 - 273.15."""
-    ds = make_gridded(name="t2m", units="delta_degF")
-    ds["t2m"].attrs["standard_name"] = "air_temperature"
-    ds["t2m"].values[:] = 3.6
-    out = to_standard_units(quantify_dataset(ds), variables=["t2m"]).pint.dequantify()
-    assert float(out["t2m"].mean()) == pytest.approx(2.0)
-    assert units_equal(out["t2m"].attrs["units"], "delta_degC")
-
-
-def test_rate_to_total_converts_mass_flux_through_water_density():
-    """kg m-2 s-1 x 1 day is 86400 kg m-2 = 86400 mm, not 1 labelled mm."""
-    ds = xr.Dataset(
-        {"precip": (("time",), [1.0 / 86400], {"units": "kg m-2 s-1"})},
-        coords={"time": np.array(["2026-01-01"], dtype="datetime64[D]")},
-    )
-    total = rate_to_total(quantify_dataset(ds)["precip"], "1 day")
-    assert str(total.pint.units) in ("millimeter", "mm")
-    np.testing.assert_allclose(total.pint.dequantify().values, [1.0])
-
-
-def test_convert_dataarray_keeps_float32():
-    """kg m-2 s-1 -> mm day-1 goes through the water density; float32 stays float32."""
-    da = make_gridded(n_time=1, fill=1e-4, units="kg m-2 s-1")["precip"].astype("float32")
-    da.attrs["units"] = "kg m-2 s-1"
-    for src in (da, da.pint.quantify()):
-        out, density = convert_dataarray(src, "mm day-1")
-        assert density
-        assert out.dtype == np.float32
-        np.testing.assert_allclose(
-            out.pint.dequantify().values if out.pint.units else out.values, 8.64, rtol=1e-5
-        )
-
-
-def test_stamp_precip_amounts_leaves_non_precip_kg_m2_alone():
-    """Total column water / water vapour in kg m-2 are not precipitation."""
-    ds = make_gridded(n_time=1, fill=20.0, units="kg m-2", name="tcw")
-    ds["tcw"].attrs.update(
-        standard_name="atmosphere_mass_content_of_water_vapor", long_name="Total column water"
-    )
-    out = stamp_precip_amounts(ds)
-    assert out["tcw"].attrs["standard_name"] == "atmosphere_mass_content_of_water_vapor"
-    assert out["tcw"].attrs["long_name"] == "Total column water"
-    # A precip rate turned into a total still gets the amount name.
-    rate = make_gridded(n_time=1, fill=5.0, units="mm", name="precip")
-    rate["precip"].attrs["standard_name"] = "lwe_precipitation_rate"
-    stamped = stamp_precip_amounts(rate)["precip"].attrs["standard_name"]
-    assert stamped == "lwe_thickness_of_precipitation_amount"

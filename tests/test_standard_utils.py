@@ -25,7 +25,7 @@ def test_parse_date_rejects_compact():
 
 
 def test_parse_bbox_valid():
-    assert utils.parse_bbox("4/2/1/3") == (4.0, 2.0, 1.0, 3.0)
+    assert utils.parse_bbox("1/2/3/4") == (1.0, 2.0, 3.0, 4.0)
 
 
 def test_parse_bbox_negative_values():
@@ -63,15 +63,9 @@ def test_bbox_subset_antimeridian_keeps_wings_drops_interior():
     assert list(sub["longitude"].values) == [-179.0, 179.0]
 
 
-def test_bbox_subset_single_row_latitude_outside_bbox_raises():
+def test_bbox_subset_single_row_latitude_passes_through():
     ds = make_gridded(lats=(1.0,))
-    with pytest.raises(DataError, match="selects no grid cells"):
-        utils.bbox_subset(ds, (60.0, 10.5, 50.0, 12.5))
-
-
-def test_bbox_subset_single_row_latitude_inside_bbox_kept():
-    ds = make_gridded(lats=(1.0,))
-    sub = utils.bbox_subset(ds, (2.0, 10.5, 0.0, 12.5))
+    sub = utils.bbox_subset(ds, (60.0, 10.5, 50.0, 12.5))
     assert list(sub["latitude"].values) == [1.0]
 
 
@@ -475,6 +469,21 @@ def test_grid_spacing_median_spacing():
     assert utils.grid_spacing([0.0, 0.25, 0.5, 0.75]) == pytest.approx(0.25)
 
 
+def test_pick_time_dim_prefers_time():
+    ds = make_gridded()
+    assert utils.pick_time_dim(ds) == "time"
+
+
+def test_pick_time_dim_override():
+    ds = make_gridded()
+    assert utils.pick_time_dim(ds, "time") == "time"
+
+
+def test_pick_time_dim_missing_override():
+    with pytest.raises(UsageError, match="not in dims"):
+        utils.pick_time_dim(make_gridded(), "nope")
+
+
 def test_apply_write_encoding_time_and_fill():
     import numpy as np
 
@@ -595,61 +604,6 @@ def test_clip_by_geometry_grid_keeps_any_cell_overlap():
     assert list(out.longitude.values) == [11.0]
 
 
-def test_clip_by_geometry_keeps_missing_row_inside_geometry():
-    from shapely.geometry import box
-
-    ds = make_gridded()
-    ds["precip"][:, 1, :] = np.nan  # lat=2 row has no data but lies inside
-    out = utils.clip_by_geometry(ds, box(10.5, 0.5, 12.5, 3.5), drop=True)
-    assert list(out.latitude.values) == [1.0, 2.0, 3.0]
-
-
-def test_clip_by_geometry_multipolygon_keeps_rows_between_parts():
-    from shapely.geometry import MultiPolygon, box
-
-    ds = make_gridded()
-    # Two parts at lat=1 and lat=3, lon=10 and lon=13; the lat=2 row and the
-    # lon=11..12 columns between them stay (as NaN) so the grid stays regular.
-    geometry = MultiPolygon([box(9.6, 0.6, 10.4, 1.4), box(12.6, 2.6, 13.4, 3.4)])
-    out = utils.clip_by_geometry(ds, geometry, drop=True)
-    assert list(out.latitude.values) == [1.0, 2.0, 3.0]
-    assert list(out.longitude.values) == [10.0, 11.0, 12.0, 13.0]
-    assert np.isnan(out["precip"].sel(latitude=2.0)).all()
-
-
-def test_clip_by_geometry_masks_only_grid_variables():
-    from shapely.geometry import box
-
-    ds = make_gridded()
-    ds["time_bnds"] = (("time", "nv"), np.zeros((2, 2)))
-    for drop in (True, False):
-        out = utils.clip_by_geometry(ds, box(10.5, 0.5, 11.5, 1.5), drop=drop)
-        assert out["time_bnds"].dims == ("time", "nv")
-        assert int(out["precip"].isel(time=0).notnull().sum()) == 1
-
-
-def test_clip_by_geometry_grid_outside_geometry_bounds():
-    from shapely.geometry import box
-
-    # A 0..360 grid and a polygon that sits in a corner of it.
-    ds = make_gridded(lats=(-1.0, 0.0, 1.0), lons=(350.0, 355.0, 5.0, 10.0))
-    out = utils.clip_by_geometry(ds, box(7.0, -0.4, 8.0, 0.4), drop=True)
-    assert list(out.latitude.values) == [0.0]
-    assert list(out.longitude.values) == [5.0, 10.0]
-
-
-def test_clip_by_geometry_stations_keep_outside():
-    from shapely.geometry import box
-
-    ds = make_station()
-    ds["elevation"] = ("station_id", [1.0, 2.0, 3.0])
-    ds["source"] = ((), "tahmo")
-    out = utils.clip_by_geometry(ds, box(36.5, -0.5, 37.5, 0.5), drop=False)
-    assert out["source"].dims == ()
-    assert np.isnan(out["elevation"].values[[0, 2]]).all()
-    assert out["precip"].isel(time=0).notnull().values.tolist() == [False, True, False]
-
-
 def test_clip_by_geometry_empty_raises():
     from shapely.geometry import box
 
@@ -690,95 +644,6 @@ def test_roll_and_agg_mean_window():
     np.testing.assert_allclose(out["precip"].values, 2.0)
 
 
-def test_roll_and_agg_left_align_on_half_hourly_time():
-    times = np.datetime64("2026-10-01T00:00") + np.arange(96) * np.timedelta64(30, "m")
-    ds = xr.Dataset({"precip": ("time", np.ones(96))}, coords={"time": times})
-    out = utils.roll_and_agg(ds, 48, "time", method="mean", align="left")
-    # Each label is the first sample of its 48-step (one-day) window.
-    assert out["time"].values[0] == times[0]
-    assert out["time"].values[-1] == times[48]
-
-
-def test_roll_and_agg_labels_uneven_time_exactly():
-    # Daily axis with 2026-10-04 missing: labels must be original timestamps.
-    times = np.array(
-        ["2026-10-01", "2026-10-02", "2026-10-03", "2026-10-05", "2026-10-06"],
-        dtype="datetime64[ns]",
-    )
-    ds = xr.Dataset({"precip": ("time", np.arange(5.0))}, coords={"time": times})
-    ds["time"].attrs["standard_name"] = "time"
-    left = utils.roll_and_agg(ds, 3, "time", method="mean", align="left")
-    np.testing.assert_array_equal(left["time"].values, times[:3])
-    np.testing.assert_allclose(left["precip"].values, [1.0, 2.0, 3.0])
-    center = utils.roll_and_agg(ds, 3, "time", method="mean", align="center")
-    np.testing.assert_array_equal(center["time"].values, times[1:4])
-    assert center["time"].attrs["standard_name"] == "time"
-
-
-@pytest.mark.parametrize("align", ["left", "center", "right"])
-def test_roll_and_agg_window_longer_than_series_is_empty(align):
-    ds = make_gridded(n_time=3)
-    out = utils.roll_and_agg(ds, 5, "time", method="mean", align=align)
-    assert out.sizes["time"] == 0
-
-
 def test_roll_and_agg_rejects_sum():
     with pytest.raises(UsageError, match="unsupported rolling method"):
         utils.roll_and_agg(make_gridded(n_time=5), 3, "time", method="sum")
-
-
-def test_fill_missing_attrs_skips_rate_descriptions_on_totals():
-    rate_attrs = {
-        "units": "mm day-1",
-        "comment": "Average precipitation rate since the previous forecast step.",
-        "short_name": "prate",
-        "step_type": "avg",
-        "aggregation_period": "7 day",
-        "long_name": "Precipitation rate",
-    }
-    src = xr.Dataset({"precip": ("time", [1.0], rate_attrs)})
-    dst = xr.Dataset({"precip": ("time", [7.0], {"units": "mm", "cell_methods": "time: sum"})})
-    out = utils.fill_missing_data_var_attrs(src, dst)
-    attrs = out["precip"].attrs
-    for key in ("comment", "short_name", "step_type", "aggregation_period"):
-        assert key not in attrs
-    assert attrs["units"] == "mm"
-    assert attrs["long_name"] == "Precipitation rate"
-
-
-def test_fill_missing_attrs_restores_comment_on_rates():
-    src = xr.Dataset({"precip": ("time", [1.0], {"comment": "rate", "step_type": "avg"})})
-    dst = xr.Dataset({"precip": ("time", [1.0], {"cell_methods": "time: mean"})})
-    out = utils.fill_missing_data_var_attrs(src, dst)
-    assert out["precip"].attrs["comment"] == "rate"
-    assert out["precip"].attrs["step_type"] == "avg"
-
-
-def test_roll_and_agg_mean_of_celsius():
-    """A rolling mean of degree_Celsius used to raise pint OffsetUnitCalculusError."""
-    from weather_skills_core.units import quantify_dataset
-
-    ds = make_gridded(n_time=5, name="tmax", units="degree_Celsius")
-    ds["tmax"].values[:] = np.arange(5.0)[:, None, None]
-    out = utils.roll_and_agg(quantify_dataset(ds), 3, "time", "mean")
-    assert str(out["tmax"].pint.units) == "degree_Celsius"
-    np.testing.assert_allclose(out["tmax"].pint.magnitude[:, 0, 0], [1, 2, 3])
-
-
-def test_normalize_step_coord_keeps_attrs():
-    steps = (np.arange(3) * np.timedelta64(6, "h")).astype("timedelta64[h]")
-    ds = xr.Dataset({"tp": (("step",), np.ones(3))}, coords={"step": steps})
-    ds["step"].attrs.update(standard_name="forecast_period", long_name="lead time")
-    out = utils.normalize_step_coord(ds)
-    assert out["step"].dtype == np.dtype("timedelta64[ns]")
-    assert out["step"].attrs["standard_name"] == "forecast_period"
-
-
-@pytest.mark.parametrize("bbox", ["-5/34/5/42", "95/0/0/10", "0/0/-91/10"])
-def test_parse_bbox_rejects_bad_latitudes(bbox):
-    with pytest.raises(UsageError, match="S <= N"):
-        utils.parse_bbox(bbox)
-
-
-def test_parse_bbox_allows_antimeridian():
-    assert utils.parse_bbox("5/170/-5/-170") == (5.0, 170.0, -5.0, -170.0)

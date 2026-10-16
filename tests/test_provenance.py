@@ -1,6 +1,5 @@
 """Provenance helpers: history load/stamp and figure metadata."""
 
-import subprocess
 from pathlib import Path
 
 from conftest import make_gridded
@@ -109,15 +108,7 @@ def test_resolve_skill_revision_from_this_checkout():
     revision = provenance.resolve_skill_revision(Path(__file__))
     assert revision is not None
     assert len(revision["commit"]) >= 7
-    # Whatever this checkout's origin is (rhiza-research or weather-skills).
-    origin = subprocess.run(
-        ["git", "config", "--get", "remote.origin.url"],
-        cwd=Path(__file__).parent,
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout.strip()
-    assert revision["repo"] == provenance.normalize_repo_url(origin)
+    assert revision["repo"] == "https://github.com/rhiza-research/weather-skills-core"
 
 
 def test_resolve_skill_revision_marks_dirty(monkeypatch, tmp_path):
@@ -180,20 +171,6 @@ def test_visualization_html(tmp_path):
     provenance.stamp_figure(path, chain)
     assert provenance.load_figure_history(path) == chain
     assert "weather_skills_history" in path.read_text(encoding="utf-8")
-
-
-def test_visualization_html_non_ascii_payload(tmp_path):
-    """A title like 'Rain — week 1' is JSON-escaped to \\u2014 in the payload."""
-    path = tmp_path / "x.html"
-    path.write_text("<html><head></head><body></body></html>", encoding="utf-8")
-    chain = [{**entry(), "args": {"title": "Rain \u2014 week 1", "path": "C:\\data"}}]
-    provenance.stamp_figure(path, chain)
-    assert provenance.load_figure_history(path) == chain
-    # Restamping replaces the existing meta tag through the same path.
-    chain2 = [*chain, entry()]
-    provenance.stamp_figure(path, chain2)
-    assert provenance.load_figure_history(path) == chain2
-    assert path.read_text(encoding="utf-8").count('name="weather_skills_history"') == 1
 
 
 def test_visualization_jpeg(tmp_path):

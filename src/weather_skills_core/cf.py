@@ -50,31 +50,96 @@ def stamp_cf_coords(ds, *, long_names: dict | None = None):
     return ds
 
 
-def drop_dangling_cf_refs(ds):
-    """Strip CF reference attrs that name variables ``ds`` lacks.
+# Attrs whose value names other variables in the dataset (CF 1.13 §5, §7.1, §3.4).
+CF_REF_ATTRS = ("coordinates", "grid_mapping", "bounds", "ancillary_variables")
 
-    Covers ``coordinates``, ``ancillary_variables`` and ``bounds`` (each missing
-    name is removed; an emptied attr is deleted) and ``grid_mapping`` (deleted
-    whole if any name is missing). Checks attrs and encoding of every variable,
-    so a skill that drops ``spatial_ref`` or a bounds var does not write a
-    reference to it. Returns a shallow copy.
-    """
-    ds = ds.copy()
+
+def _ref_holders(ds):
+    """Every attrs/encoding dict that can carry a CF variable reference."""
+    holders = [ds.attrs]
     for var in ds.variables.values():
-        for holder in (var.attrs, var.encoding):
-            for key in ("coordinates", "ancillary_variables", "bounds", "grid_mapping"):
-                value = holder.get(key)
-                if not isinstance(value, str):
-                    continue
-                tokens = value.split()
-                kept = [t for t in tokens if t.rstrip(":") in ds.variables]
-                if len(kept) == len(tokens):
-                    continue
-                if kept and key != "grid_mapping":
-                    holder[key] = " ".join(kept)
-                else:
-                    del holder[key]
+        holders.extend((var.attrs, var.encoding))
+    return holders
+
+
+def _map_ref_tokens(value: str, fn) -> str:
+    """Apply ``fn`` to each whitespace token (keeping a ``name:`` colon); drop ``None``s."""
+    out = []
+    for token in value.split():
+        name, colon = (token[:-1], ":") if token.endswith(":") else (token, "")
+        mapped = fn(name)
+        if mapped is not None:
+            out.append(f"{mapped}{colon}")
+    return " ".join(out)
+
+
+def bounds_of(ds, names) -> dict:
+    """``{name: bounds_var}`` for each of ``names`` whose CF ``bounds`` var is in ``ds``."""
+    found = {}
+    for name in names:
+        if name not in ds.variables:
+            continue
+        bounds = ds[name].attrs.get("bounds") or ds[name].encoding.get("bounds")
+        if bounds and bounds in ds.variables:
+            found[name] = bounds
+    return found
+
+
+def rename_cf_refs(ds, mapping: dict):
+    """Rewrite CF reference attrs (``CF_REF_ATTRS``) after ``ds.rename(mapping)``.
+
+    Covers variable attrs and encoding (xarray decodes ``coordinates`` into
+    encoding) and the dataset attrs. Mutates and returns ``ds``.
+    """
+    if not mapping:
+        return ds
+    for holder in _ref_holders(ds):
+        for key in CF_REF_ATTRS:
+            value = holder.get(key)
+            if isinstance(value, str):
+                holder[key] = _map_ref_tokens(value, lambda n: mapping.get(n, n))
     return ds
+
+
+def drop_cf_refs(ds, names):
+    """Remove ``names`` from CF reference attrs; delete an attr left empty.
+
+    A ``grid_mapping`` that named a dropped mapping variable is removed whole,
+    since its remaining tokens (coord lists) mean nothing without it.
+    Mutates and returns ``ds``.
+    """
+    names = set(names)
+    if not names:
+        return ds
+    for holder in _ref_holders(ds):
+        for key in CF_REF_ATTRS:
+            value = holder.get(key)
+            if not isinstance(value, str):
+                continue
+            mapping_names = {t[:-1] for t in value.split() if t.endswith(":")} or {value.strip()}
+            if key == "grid_mapping" and mapping_names & names:
+                del holder[key]
+                continue
+            kept = _map_ref_tokens(value, lambda n: None if n in names else n)
+            if kept:
+                holder[key] = kept
+            else:
+                del holder[key]
+    return ds
+
+
+def dangling_cf_refs(attrs: dict, ds) -> list:
+    """Names in ``attrs``'s CF reference attrs that ``ds`` does not contain."""
+    missing = []
+    for key in CF_REF_ATTRS:
+        value = attrs.get(key)
+        if not isinstance(value, str):
+            continue
+        for token in value.split():
+            name = token[:-1] if token.endswith(":") else token
+            if name not in ds.variables:
+                missing.append(name)
+    return missing
 
 
 def udunits_error(units, *, catch: tuple | None = None):
@@ -143,6 +208,31 @@ def auto_variable(ds):
         return None
     multidim = [v for v in candidates if len(ds[v].dims) >= 2]
     return (multidim or candidates)[0]
+
+
+def resolve_input_variable(inputs, ds, *, id=None, index=None):
+    """This input's own ``variable``, else ``inputs[0].variable``, else auto-detect on ``ds``.
+
+    Match the input by ``id`` (preferred) or list ``index``. This is the one
+    place "which variable does this dataset use" is resolved, so every
+    plot-* skill treats a per-input override, and the ``inputs[0]`` fallback,
+    the same way — a spec key set on one dataset never leaks onto another
+    dataset that has its own name for the same field.
+    """
+    items = [item for item in (inputs or []) if isinstance(item, dict)]
+    own = None
+    if id is not None:
+        own = next(
+            (item.get("variable") for item in items if str(item.get("id")) == str(id)), None
+        )
+    elif index is not None and index < len(items):
+        own = items[index].get("variable")
+    if own:
+        return own
+    fallback = items[0].get("variable") if items else None
+    if fallback:
+        return fallback
+    return auto_variable(ds)
 
 
 def stamp_cf_dsg(ds, var_attrs: dict, *, station_id_long_name: str, name_long_name: str):

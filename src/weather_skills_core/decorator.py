@@ -8,22 +8,29 @@ import shutil
 import sys
 from pathlib import Path
 
+import xarray as xr
+
 from weather_skills_core import provenance as provenance_mod
 from weather_skills_core import standard_args
 from weather_skills_core import standard_dataset as std
 from weather_skills_core.dataset_type import Dataset
 from weather_skills_core.errors import SkillError, UsageError
-
-# xarray, numpy, and pint load inside the functions that use them, so importing
-# a skill (and ``--help`` / usage errors) stays fast.
+from weather_skills_core.standard_utils import (
+    fill_missing_data_var_attrs,
+    normalize_latlon_coords,
+    normalize_step_coord,
+)
+from weather_skills_core.units import (
+    dequantify_dataset,
+    normalize_unit_strings,
+    quantify_dataset,
+    stamp_precip_amounts,
+)
 
 # Accumulated by ``@weather_skill.argument`` (bottom-up); weather_skill reads it.
 ARGS_ATTR = "__weather_skill_arguments__"
 
-# The decorator opens each Dataset argument and hands the skill an xr.Dataset, so
-# the skill no longer sees the path. This attr records it (ds.attrs[INPUT_PATH_ATTR]
-# = the path as given on the command line) so a skill can match a dataset back to a
-# file its own arguments name. In-memory only: stripped before any output is written.
+# In-memory only: source Zarr path for plot-spec dump. Stripped before any write.
 INPUT_PATH_ATTR = "weather_skills_input_path"
 
 
@@ -67,7 +74,7 @@ class Argument:
 
 
 def _history_json_default(obj):
-    """Record objects with ``to_dict()`` (e.g. a parsed spec) as dicts, not their ``str``."""
+    """Keep a plot spec's keys in provenance instead of stringifying the object."""
     to_dict = getattr(obj, "to_dict", None)
     if callable(to_dict):
         return to_dict()
@@ -115,20 +122,7 @@ def prepare_dataset_output(ds, *, first_ds=None):
     - ``step`` timedelta → ``timedelta64[ns]``
     - lat/lon coords → 5 decimal places, ``float32``
     - fill attrs stripped by geometry ops from the first input (same var names)
-    - drop CF reference attrs naming variables the output lacks
     """
-    from weather_skills_core.cf import drop_dangling_cf_refs
-    from weather_skills_core.standard_utils import (
-        fill_missing_data_var_attrs,
-        normalize_latlon_coords,
-        normalize_step_coord,
-    )
-    from weather_skills_core.units import (
-        dequantify_dataset,
-        normalize_unit_strings,
-        stamp_precip_amounts,
-    )
-
     if first_ds is not None:
         ref = first_ds
         if any(getattr(first_ds[v].pint, "units", None) is not None for v in first_ds.data_vars):
@@ -137,8 +131,9 @@ def prepare_dataset_output(ds, *, first_ds=None):
     ds = normalize_unit_strings(ds)
     ds = stamp_precip_amounts(ds)
     ds = normalize_step_coord(ds)
-    ds = drop_dangling_cf_refs(ds)
-    return normalize_latlon_coords(ds)
+    ds = normalize_latlon_coords(ds)
+    ds.attrs.pop(INPUT_PATH_ATTR, None)
+    return ds
 
 
 def write_output(value, out_path, history, first_ds):
@@ -158,18 +153,12 @@ def write_output(value, out_path, history, first_ds):
         raise SkillError(f"skill returned {type(value).__name__}; expected xr.Dataset or Path")
 
     if hasattr(value, "pint"):
-        from weather_skills_core.units import dequantify_dataset
-
         value = dequantify_dataset(value)
     value = prepare_dataset_output(value, first_ds=first_ds)
     if first_ds is not None:
         value.attrs = {**first_ds.attrs, **value.attrs}
     value.attrs.pop(INPUT_PATH_ATTR, None)
     provenance_mod.stamp_zarr(value, history)
-    if out_path.exists() and not out_path.is_dir():
-        raise UsageError(
-            f"--output {out_path} is an existing file, not a Zarr store; pass a new path"
-        )
     if out_path.exists():
         shutil.rmtree(out_path)
     try:
@@ -185,20 +174,23 @@ def _open_zarr(path, io_spec=None):
     """Open, validate, and quantify one Zarr store."""
     if not path.exists():
         raise UsageError(f"input not found: {path}")
-    import xarray as xr
-
-    from weather_skills_core.standard_utils import normalize_latlon_coords, normalize_step_coord
-    from weather_skills_core.units import normalize_unit_strings, quantify_dataset
-
     ds = xr.open_zarr(path, consolidated=True)
     if io_spec is not None:
         std.validate_input(ds, io_spec, str(path))
     ds = normalize_unit_strings(ds)
     ds = normalize_step_coord(ds)
-    # Same lat/lon snap as on write, so a Zarr written before float32 coords
-    # still joins cell-for-cell with a new one.
-    ds = normalize_latlon_coords(ds)
     return quantify_dataset(ds)
+
+
+def _iter_zarr_path_holders(value):
+    """Yield objects that expose ``zarr_paths()`` (e.g. plot ``LayerSpec``)."""
+    if value is None:
+        return
+    items = value if isinstance(value, (list, tuple)) else (value,)
+    for item in items:
+        fn = getattr(item, "zarr_paths", None)
+        if callable(fn):
+            yield item
 
 
 def open_dataset_params(params, arguments):
@@ -210,41 +202,60 @@ def open_dataset_params(params, arguments):
     """
     input_paths: list[Path] = []
     upstream: list = []
-    cache: dict = {}
+    first_ds = None
+    cache: dict[Path, xr.Dataset] = {}
 
-    def open_one(path, io_spec=None):
-        path = Path(path)
+    def remember(path, ds):
+        nonlocal first_ds
         resolved = path.resolve()
-        if resolved not in cache:
-            cache[resolved] = _open_zarr(path, io_spec)
+        cache[resolved] = ds
+        if resolved not in {p.resolve() for p in input_paths}:
             input_paths.append(path)
             upstream.append(provenance_mod.load_history(path))
-        ds = cache[resolved]
+        if first_ds is None:
+            first_ds = ds
         ds.attrs[INPUT_PATH_ATTR] = str(path)
         return ds
 
     for arg in arguments:
-        raw = params.get(arg.dest)
-        if arg.dataset_type is None or raw is None:
+        if arg.dataset_type is None:
             continue
-        if isinstance(raw, (list, tuple)):
-            params[arg.dest] = [open_one(p, arg.dataset_type.io_spec) for p in raw]
-        else:
-            params[arg.dest] = open_one(raw, arg.dataset_type.io_spec)
+        dest, raw = arg.dest, params.get(arg.dest)
+        if raw is None:
+            continue
+        paths = [Path(p) for p in raw] if isinstance(raw, (list, tuple)) else [Path(raw)]
+        if not paths:
+            continue
+        opened = []
+        for path in paths:
+            resolved = path.resolve()
+            ds = cache.get(resolved)
+            if ds is None:
+                ds = _open_zarr(path, arg.dataset_type.io_spec)
+            opened.append(remember(path, ds))
+        params[dest] = opened if isinstance(raw, (list, tuple)) else opened[0]
 
-    seen: set[int] = set()
+    seen_holders: list[object] = []
     for raw in list(params.values()):
-        for holder in raw if isinstance(raw, (list, tuple)) else (raw,):
-            if not callable(getattr(holder, "zarr_paths", None)) or id(holder) in seen:
+        for holder in _iter_zarr_path_holders(raw):
+            if holder in seen_holders:
                 continue
-            seen.add(id(holder))
-            opened = [open_one(p) for p in holder.zarr_paths() or []]
+            seen_holders.append(holder)
+            opened = []
+            for path in holder.zarr_paths() or []:
+                path = Path(path)
+                resolved = path.resolve()
+                ds = cache.get(resolved)
+                if ds is None:
+                    ds = _open_zarr(path)
+                opened.append(remember(path, ds))
+            if not opened:
+                continue
             if len(opened) == 1:
                 holder.ds = opened[0]
-            elif opened:
+            else:
                 holder.datasets = opened
 
-    first_ds = next(iter(cache.values()), None)
     return params, input_paths, upstream, first_ds
 
 
@@ -321,6 +332,7 @@ def weather_skill(
                 "extra runtime information"
             )
 
+        has_bbox = any(arg.dest == "bbox" for arg in arguments)
         parser = argparse.ArgumentParser(
             description=fn.__doc__,
             epilog=f"skill version: {version}",
@@ -351,18 +363,12 @@ def weather_skill(
             parser.add_argument(*arg.option_strings, **kwargs)
 
         strip_dests = {arg.dest for arg in arguments if arg.dataset_type is not None} | {"output"}
-        # Options taking one value (store/append), for rewrite_negative_values.
-        value_options = {
-            opt
-            for action in parser._actions
-            if action.nargs is None
-            for opt in action.option_strings
-        }
 
         @functools.wraps(fn)
         def wrapper(argv=None):
             argv = sys.argv[1:] if argv is None else list(argv)
-            argv = standard_args.rewrite_negative_values(argv, value_options)
+            if has_bbox:
+                argv = standard_args.rewrite_bbox_argv(argv)
 
             try:
                 probing = any(

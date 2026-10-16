@@ -391,21 +391,67 @@ def test_cf_axes_missing_custom_axes():
     assert dataset.cf_axes_missing(ds, axes=("Y",)) == ["Y"]
 
 
-def test_drop_dangling_cf_refs():
-    ds = make_gridded(n_time=2).assign_coords(valid_time=("time", np.zeros(2)))
+def _with_crs_and_bounds():
+    ds = make_gridded(n_time=2)
+    ds = ds.assign_coords(
+        spatial_ref=0,
+        time_bounds=(("time", "nv"), np.zeros((2, 2), dtype="datetime64[ns]")),
+        valid_time=("time", ds["time"].values),
+    )
     ds["time"].attrs["bounds"] = "time_bounds"
     ds["precip"].attrs.update(grid_mapping="spatial_ref", coordinates="valid_time spatial_ref")
-    ds["precip"].encoding["coordinates"] = "spatial_ref"
-    out = dataset.drop_dangling_cf_refs(ds)
-    assert "bounds" not in out["time"].attrs
-    assert "grid_mapping" not in out["precip"].attrs
-    assert out["precip"].attrs["coordinates"] == "valid_time"
-    assert "coordinates" not in out["precip"].encoding
-    assert ds["precip"].attrs["grid_mapping"] == "spatial_ref"  # input untouched
+    return ds
 
 
-def test_drop_dangling_cf_refs_keeps_present_refs():
-    ds = make_gridded(n_time=2).assign_coords(spatial_ref=0)
+def test_bounds_of_finds_present_bounds_only():
+    ds = _with_crs_and_bounds()
+    assert dataset.bounds_of(ds, ["time", "latitude", "missing"]) == {"time": "time_bounds"}
+
+
+def test_rename_cf_refs_rewrites_attrs_and_encoding():
+    ds = _with_crs_and_bounds()
+    ds["precip"].encoding["coordinates"] = "valid_time"
+    ds = ds.rename({"time_bounds": "time_bnds", "valid_time": "vt"})
+    dataset.rename_cf_refs(ds, {"time_bounds": "time_bnds", "valid_time": "vt"})
+    assert ds["time"].attrs["bounds"] == "time_bnds"
+    assert ds["precip"].attrs["coordinates"] == "vt spatial_ref"
+    assert ds["precip"].encoding["coordinates"] == "vt"
+
+
+def test_rename_cf_refs_keeps_extended_grid_mapping_colons():
+    ds = _with_crs_and_bounds()
     ds["precip"].attrs["grid_mapping"] = "spatial_ref: latitude longitude"
-    out = dataset.drop_dangling_cf_refs(ds)
-    assert out["precip"].attrs["grid_mapping"] == "spatial_ref: latitude longitude"
+    dataset.rename_cf_refs(ds, {"latitude": "lat", "longitude": "lon"})
+    assert ds["precip"].attrs["grid_mapping"] == "spatial_ref: lat lon"
+
+
+def test_drop_cf_refs_removes_tokens_and_empty_attrs():
+    ds = _with_crs_and_bounds().drop_vars(["spatial_ref", "valid_time"])
+    dataset.drop_cf_refs(ds, ["spatial_ref", "valid_time"])
+    assert "grid_mapping" not in ds["precip"].attrs
+    assert "coordinates" not in ds["precip"].attrs
+
+
+def test_drop_cf_refs_removes_extended_grid_mapping_whole():
+    ds = _with_crs_and_bounds()
+    ds["precip"].attrs["grid_mapping"] = "spatial_ref: latitude longitude"
+    dataset.drop_cf_refs(ds, ["spatial_ref"])
+    assert "grid_mapping" not in ds["precip"].attrs
+
+
+def test_dangling_cf_refs_lists_missing_names():
+    ds = _with_crs_and_bounds()
+    attrs = {"coordinates": "valid_time gone", "grid_mapping": "spatial_ref", "units": "mm"}
+    assert dataset.dangling_cf_refs(attrs, ds) == ["gone"]
+
+
+def test_fill_missing_attrs_does_not_restore_dangling_refs():
+    from weather_skills_core.standard_utils import fill_missing_data_var_attrs
+
+    src = _with_crs_and_bounds()
+    dst = src.drop_vars("spatial_ref").copy(deep=True)
+    del dst["precip"].attrs["grid_mapping"]
+    del dst["precip"].attrs["units"]
+    out = fill_missing_data_var_attrs(src, dst)
+    assert "grid_mapping" not in out["precip"].attrs
+    assert out["precip"].attrs["units"] == "mm day-1"

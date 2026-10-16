@@ -14,10 +14,9 @@ _ABS_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 # Retryable HTTP status codes as whole tokens (avoid matching "14290", "50000").
 _STATUS_RE = re.compile(r"\b(?:429|500|502|503|504)\b")
-# Specific connection phrases only — bare "connection" appears on permanent urllib3 errors too.
-_TRANSIENT_MARKERS = (
-    "timed out",
-    "timeout",
+_TIMEOUT_MARKERS = ("timed out", "timeout")
+# Specific phrases only — bare "connection" appears on permanent urllib3 errors too.
+_CONNECTION_MARKERS = (
     "connection error",
     "connection reset",
     "connection refused",
@@ -33,7 +32,11 @@ def is_transient(exc: Exception) -> bool:
     with the caller.
     """
     text = str(exc).lower()
-    return bool(_STATUS_RE.search(text)) or any(m in text for m in _TRANSIENT_MARKERS)
+    if _STATUS_RE.search(text):
+        return True
+    if any(marker in text for marker in _TIMEOUT_MARKERS):
+        return True
+    return any(marker in text for marker in _CONNECTION_MARKERS)
 
 
 def normalize_step_coord(ds, dim: str = "step"):
@@ -51,10 +54,7 @@ def normalize_step_coord(ds, dim: str = "step"):
         return ds
     if values.dtype == np.dtype("timedelta64[ns]"):
         return ds
-    # Keep the coord's attrs (standard_name=forecast_period, long_name).
-    return ds.assign_coords(
-        {dim: (ds[dim].dims, values.astype("timedelta64[ns]"), dict(ds[dim].attrs))}
-    )
+    return ds.assign_coords({dim: values.astype("timedelta64[ns]")})
 
 
 _LATLON_DECIMALS = 5
@@ -63,26 +63,41 @@ _LATLON_DECIMALS = 5
 def normalize_latlon_coords(ds):
     """Round lat/lon coords to 5 decimals and store them as float32.
 
-    Snaps float64 noise (``5.9749991`` vs ``5.975``) so grids
+    Snaps float64 noise (Kenya ``5.9749991`` vs CHIRPS ``5.975``) so grids
     that are the same at ~1 m join. A real half-cell offset (0.025°) is kept.
     """
     import numpy as np
 
-    names = [n for key in ("lat", "lon") for n in names_for(key) if n in ds.coords]
-    names += [
-        n
-        for n in ds.coords
-        if n not in names and ds[n].attrs.get("standard_name") in ("latitude", "longitude")
-    ]
+    names: list[str] = []
+    seen: set[str] = set()
+    for preferred in ("lat", "lon"):
+        for name in names_for(preferred):
+            if name in ds.coords and name not in seen:
+                names.append(name)
+                seen.add(name)
+    for name in ds.coords:
+        if name in seen:
+            continue
+        if ds[name].attrs.get("standard_name") in ("latitude", "longitude"):
+            names.append(name)
+            seen.add(name)
 
     updates = {}
-    for name in dict.fromkeys(names):
+    for name in names:
         values = np.asarray(ds[name].values)
         if not np.issubdtype(values.dtype, np.floating):
             continue
-        snapped = np.round(values.astype(np.float64), _LATLON_DECIMALS).astype(np.float32)
-        if values.dtype != np.float32 or not np.array_equal(values, snapped):
-            updates[name] = (ds[name].dims, snapped, dict(ds[name].attrs))
+        snapped = np.round(np.asarray(values, dtype=np.float64), _LATLON_DECIMALS).astype(
+            np.float32
+        )
+        already = (
+            values.dtype == np.float32
+            and values.shape == snapped.shape
+            and np.array_equal(values, snapped)
+        )
+        if already:
+            continue
+        updates[name] = (ds[name].dims, snapped, dict(ds[name].attrs))
     if not updates:
         return ds
     out = ds.assign_coords(updates)
@@ -95,10 +110,12 @@ def fill_missing_data_var_attrs(src, dst):
     """Fill attrs present on ``src`` but missing on matching ``dst`` data vars.
 
     Heals stripped metadata (regrid, etc.) without overwriting attrs a skill set.
-    Does not restore ``aggregation_period`` or rate descriptions (``comment``,
-    ``short_name``, ``step_type``, e.g. "Average precipitation rate…", ``prate``,
-    ``avg``) onto vars whose ``cell_methods`` already record a sum (period totals).
+    Does not restore ``aggregation_period`` onto vars whose ``cell_methods``
+    already record a sum (convert-to-totals amounts), nor a CF reference attr
+    (``coordinates``, ``grid_mapping``, ...) naming a variable ``dst`` lacks
+    (a skill dropped it on purpose).
     """
+    from weather_skills_core.cf import CF_REF_ATTRS, dangling_cf_refs
     from weather_skills_core.units import AGGREGATION_PERIOD_ATTR, cell_methods_has_sum
 
     out = dst
@@ -106,11 +123,13 @@ def fill_missing_data_var_attrs(src, dst):
     for name in dst.data_vars:
         if name not in src.data_vars:
             continue
-        is_total = cell_methods_has_sum(dst[name].attrs.get("cell_methods"))
+        skip_period = cell_methods_has_sum(dst[name].attrs.get("cell_methods"))
         for key, value in src[name].attrs.items():
             if key in dst[name].attrs:
                 continue
-            if is_total and key in (AGGREGATION_PERIOD_ATTR, "comment", "short_name", "step_type"):
+            if skip_period and key == AGGREGATION_PERIOD_ATTR:
+                continue
+            if key in CF_REF_ATTRS and dangling_cf_refs({key: value}, dst):
                 continue
             if not dirty:
                 out = dst.copy()
@@ -162,11 +181,6 @@ def parse_bbox(bbox: str) -> tuple:
         north, west, south, east = (float(x) for x in bbox.split("/"))
     except ValueError:
         raise UsageError("--bbox must be four decimal degrees N/W/S/E.") from None
-    if not (-90 <= south <= north <= 90):
-        raise UsageError(
-            f"--bbox {bbox}: needs -90 <= S <= N <= 90 (order is N/W/S/E); "
-            "west > east is fine and crosses the antimeridian."
-        )
     return north, west, south, east
 
 
@@ -238,10 +252,14 @@ def ensure_normalized_longitude(obj, lon_dim: str | None = None):
     (not a dimension) are wrapped in place and not sorted.
     """
     import numpy as np
+    import xarray as xr
 
+    is_da = isinstance(obj, xr.DataArray)
+    da_name = obj.name if is_da else None
+    ds = obj.to_dataset(name=da_name or "_") if is_da else obj
     if lon_dim is None:
         try:
-            _, lon_dim = detect_spatial_dims(obj)
+            _, lon_dim = detect_spatial_dims(ds)
         except UsageError:
             return obj
     if lon_dim not in obj.coords and lon_dim not in getattr(obj, "variables", ()):
@@ -250,17 +268,23 @@ def ensure_normalized_longitude(obj, lon_dim: str | None = None):
     if not lon_vals.size or float(np.nanmax(lon_vals)) <= 180.0:
         return obj
 
-    lon = ((obj[lon_dim] + 180) % 360) - 180
-    lon.attrs = dict(obj[lon_dim].attrs)
-    obj = obj.assign_coords({lon_dim: lon})
-    if lon_dim in obj.dims:
+    attrs = dict(ds[lon_dim].attrs)
+    lon = ((ds[lon_dim] + 180) % 360) - 180
+    lon.attrs = attrs
+    ds = ds.assign_coords({lon_dim: lon})
+    if lon_dim in ds.dims:
         # np.unique returns each unique value's first-occurrence index; keeping
         # those (in input order) drops any later duplicate the wrap produced.
-        _, first = np.unique(obj[lon_dim].values, return_index=True)
-        if len(first) < obj.sizes[lon_dim]:
-            obj = obj.isel({lon_dim: np.sort(first)})
-        obj = obj.sortby(lon_dim)
-    return obj
+        _, first = np.unique(ds[lon_dim].values, return_index=True)
+        if len(first) < ds.sizes[lon_dim]:
+            ds = ds.isel({lon_dim: np.sort(first)})
+        ds = ds.sortby(lon_dim)
+    if is_da:
+        out = ds[da_name or "_"]
+        if da_name is None:
+            out.name = None
+        return out
+    return ds
 
 
 def _point_spatial(ds):
@@ -268,12 +292,13 @@ def _point_spatial(ds):
     point_dim = next((n for n in names_for("point_id") if n in ds.dims), None)
     if point_dim is None:
         return None
-    lat, lon = (
-        next(
-            (n for n in names_for(key) if n in ds.coords and ds[n].dims == (point_dim,)),
-            None,
-        )
-        for key in ("lat", "lon")
+    lat = next(
+        (n for n in names_for("lat") if n in ds.coords and tuple(ds[n].dims) == (point_dim,)),
+        None,
+    )
+    lon = next(
+        (n for n in names_for("lon") if n in ds.coords and tuple(ds[n].dims) == (point_dim,)),
+        None,
     )
     if lat is None or lon is None:
         raise UsageError(
@@ -326,19 +351,34 @@ def bbox_subset(ds, bbox, *, lat_dim: str | None = None, lon_dim: str | None = N
     # Wrap lon to [-180, 180] before the slice so a 0..360 input grid still
     # intersects bboxes that use negative west/east values.
     ds = ensure_normalized_longitude(ds, lon_dim=lon_dim)
-    for axis, dim in (("lat", lat_dim), ("lon", lon_dim)):
-        vals = np.asarray(ds[dim].values)
-        if vals.size == 0:
-            raise UsageError(f"{axis} axis has length 0; cannot subset.")
-        diffs = np.diff(vals)
-        if not ((diffs > 0).all() or (diffs < 0).all()):
+    lon_vals = np.asarray(ds[lon_dim].values)
+    if lon_vals.size == 0:
+        raise UsageError("lon axis has length 0; cannot subset.")
+    if lon_vals.size == 1:
+        lon_ascending = True
+    else:
+        lon_diffs = np.diff(lon_vals)
+        if (lon_diffs > 0).all():
+            lon_ascending = True
+        elif (lon_diffs < 0).all():
+            lon_ascending = False
+        else:
             raise UsageError(
-                f"{axis} axis is non-monotonic; cannot infer slice orientation. "
+                "lon axis is non-monotonic; cannot infer slice orientation. "
                 "Re-sort the input or pre-process before subsetting."
             )
-    lon_vals = np.asarray(ds[lon_dim].values)
-    lon_ascending = lon_vals.size == 1 or lon_vals[1] > lon_vals[0]
-    ds = ds.sel({lat_dim: lat_slice(np.asarray(ds[lat_dim].values), north, south)})
+
+    lat_vals = np.asarray(ds[lat_dim].values)
+    if lat_vals.size == 0:
+        raise UsageError("lat axis has length 0; cannot subset.")
+    if lat_vals.size > 1:
+        diffs = np.diff(lat_vals)
+        if not ((diffs > 0).all() or (diffs < 0).all()):
+            raise UsageError(
+                "lat axis is non-monotonic; cannot infer slice orientation. "
+                "Re-sort the input or pre-process before subsetting."
+            )
+        ds = ds.sel({lat_dim: lat_slice(lat_vals, north, south)})
 
     if west <= east:
         # Contiguous longitude span. Slice in the axis's own monotonic order.
@@ -391,14 +431,8 @@ def clip_by_geometry(
         )
         if not mask.any():
             raise DataError("geometry selects no stations")
-        if drop:
-            return ds.isel({point_dim: np.nonzero(mask)[0]})
-        # NaN only the variables that run along the station axis; ds.where
-        # would broadcast the mask onto every other variable.
         keep = xr.DataArray(mask, dims=point_dim)
-        return ds.assign(
-            {name: var.where(keep) for name, var in ds.data_vars.items() if point_dim in var.dims}
-        )
+        return ds.isel({point_dim: np.nonzero(mask)[0]}) if drop else ds.where(keep, drop=False)
 
     if lat_dim is None or lon_dim is None:
         lat_dim, lon_dim = detect_spatial_dims(ds)
@@ -433,42 +467,21 @@ def clip_by_geometry(
         east = np.maximum(lon_edges[:-1], lon_edges[1:])
         south = np.minimum(lat_edges[:-1], lat_edges[1:])
         north = np.maximum(lat_edges[:-1], lat_edges[1:])
-        # Only cells inside the geometry's bounding box can overlap it; build
-        # cell boxes for that window alone, not for the whole (maybe global) grid.
-        g_west, g_south, g_east, g_north = geometry.bounds
-        rows = np.nonzero((north > g_south) & (south < g_north))[0]
-        cols = np.nonzero((east > g_west) & (west < g_east))[0]
-        mask = np.zeros((south.size, west.size), dtype=bool)
-        if rows.size and cols.size:
-            west2d, south2d = np.meshgrid(west[cols], south[rows])
-            east2d, north2d = np.meshgrid(east[cols], north[rows])
-            cells = shapely.box(west2d, south2d, east2d, north2d)
-            # Keep cells with a positive-area overlap (not just edge/corner touch).
-            mask[np.ix_(rows, cols)] = shapely.area(shapely.intersection(cells, geometry)) > 0.0
+        west2d, south2d = np.meshgrid(west, south)
+        east2d, north2d = np.meshgrid(east, north)
+        cells = shapely.box(west2d, south2d, east2d, north2d)
+        # Keep cells with a positive-area overlap (not just edge/corner touch).
+        mask = shapely.area(shapely.intersection(cells, geometry)) > 0.0
 
-    if not mask.any():
-        raise DataError("geometry selects no grid cells")
-    if drop:
-        # Trim to the span of rows and columns the geometry touches, decided by
-        # the mask rather than the data. Rows between the parts of a
-        # MultiPolygon stay (as NaN), so the grid keeps its regular spacing,
-        # and nothing is computed.
-        rows = np.nonzero(mask.any(axis=1))[0]
-        cols = np.nonzero(mask.any(axis=0))[0]
-        rows = slice(rows[0], rows[-1] + 1)
-        cols = slice(cols[0], cols[-1] + 1)
-        ds = ds.isel({lat_dim: rows, lon_dim: cols})
-        mask = mask[rows, cols]
-    # NaN only the variables on the grid; ds.where would broadcast the mask
-    # onto every other variable (time bounds, station metadata, ...).
-    mask_da = xr.DataArray(mask, dims=(lat_dim, lon_dim))
-    return ds.assign(
-        {
-            name: var.where(mask_da)
-            for name, var in ds.data_vars.items()
-            if lat_dim in var.dims and lon_dim in var.dims
-        }
+    mask_da = xr.DataArray(
+        mask, dims=(lat_dim, lon_dim), coords={lat_dim: ds[lat_dim], lon_dim: ds[lon_dim]}
     )
+    if not bool(mask_da.any()):
+        raise DataError("geometry selects no grid cells")
+    out = ds.where(mask_da)
+    if drop:
+        out = out.dropna(lat_dim, how="all").dropna(lon_dim, how="all")
+    return out
 
 
 def grid_spacing(coord_vals) -> float:
@@ -479,6 +492,25 @@ def grid_spacing(coord_vals) -> float:
     if coord.size < 2:
         raise ValueError(f"Cannot infer spacing for coord with size {coord.size}")
     return float(abs(np.median(np.diff(coord))))
+
+
+def pick_time_dim(obj, override=None) -> str:
+    """Resolve a time-like dim: override, then ``time``, ``step``, then CF time."""
+    from weather_skills_core.cf import cf_dim
+
+    dims = list(obj.dims)
+    if override:
+        if override not in obj.dims:
+            raise UsageError(f"--time-dim {override!r} not in dims {dims}")
+        return override
+    if "time" in obj.dims:
+        return "time"
+    if "step" in obj.dims:
+        return "step"
+    cf = cf_dim(obj, "time")
+    if cf and cf in obj.dims:
+        return cf
+    raise UsageError(f"no time-like dim in {dims}; pass --time-dim")
 
 
 def apply_write_encoding(ds, *, time_units=None, time_calendar=None, fills=None):
@@ -603,8 +635,6 @@ def roll_and_agg(
     """
     import numpy as np
 
-    from weather_skills_core import units  # noqa: F401  (registers the .pint accessor)
-
     if window < 1:
         raise UsageError(f"rolling window must be >= 1; got {window}")
     if window == 1 and stride is None:
@@ -616,26 +646,25 @@ def roll_and_agg(
         raise UsageError(
             f"rolling aggregation requires datetime64 or timedelta64 on {dim!r}; got dtype {dtype}"
         )
-    # Roll on plain numbers: pint refuses the window sum behind a mean for an
-    # offset unit (degree_Celsius), though mean/min/max of one are well defined.
-    quantified = any(getattr(ds[v].pint, "units", None) is not None for v in ds.data_vars)
-    plain = ds.pint.dequantify() if quantified else ds
-    rolled = plain.rolling({dim: window}, min_periods=min_periods, center=False)
+    rolled = ds.rolling({dim: window}, min_periods=min_periods, center=False)
     fn = {"mean": rolled.mean, "max": rolled.max, "min": rolled.min}.get(method)
     if fn is None:
         raise UsageError(f"unsupported rolling method {method!r}; use mean|min|max")
-    out = fn(skipna=True, keep_attrs=True)
-    out = out.pint.quantify() if quantified else out
+    out = fn(skipna=True)
     out = out.isel({dim: slice(window - 1, None)})
     step_by_align = {"center": (window - 1) // 2, "right": 0, "left": window - 1}
     if align not in step_by_align:
         raise UsageError(f"align must be left/right/center; got {align!r}")
     step_shift = step_by_align[align]
-    # Label each window with the original coordinate of its left/center/right
-    # sample, so uneven or sub-daily spacing is labelled exactly.
-    start = window - 1 - step_shift
-    labels = ds[dim].values[start : start + out.sizes[dim]]
-    out = out.assign_coords({dim: (dim, labels, ds[dim].attrs)})
+    # Timedelta axes: shift by steps, not calendar days.
+    if np.issubdtype(out[dim].dtype, np.timedelta64):
+        steps = np.asarray(ds[dim].values)
+        diffs = np.diff(steps.astype("timedelta64[ns]").astype(np.int64))
+        median_ns = int(np.median(diffs)) if diffs.size else 0
+        shift = np.timedelta64(step_shift * median_ns, "ns")
+    else:
+        shift = np.timedelta64(step_shift, "D")
+    out = out.assign_coords({dim: out[dim] - shift})
     if stride is None:
         return out
     if isinstance(stride, int):

@@ -17,9 +17,7 @@ _SKILL_VERSION = "0.1.0"
     name="gamma",
     version=_SKILL_VERSION,
 )
-@weather_skill.argument(
-    "-i", "--input", type=Dataset("observations"), action="append", required=True, dest="ds"
-)
+@weather_skill.argument("-i", "--input", type=Dataset("observations"), required=True, dest="ds")
 @weather_skill.argument("--method", type=str, help="Aggregation method.", choices=["sum", "mean"])
 @weather_skill.argument("--window", type=float, help="Window width.")
 def gamma(ds, **kwargs):
